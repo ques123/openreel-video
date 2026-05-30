@@ -1,3 +1,4 @@
+import "../../test/install-local-storage-mock";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { cleanup, render, screen, fireEvent } from "@testing-library/react";
 import type { Project } from "@openreel/core";

@@ -1,3 +1,4 @@
+import "../test/install-local-storage-mock";
 import { describe, it, expect, beforeEach } from "vitest";
 import { useUIStore } from "./ui-store";
 
