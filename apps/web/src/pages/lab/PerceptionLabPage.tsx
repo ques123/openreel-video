@@ -20,7 +20,8 @@ export function PerceptionLabPage() {
     usePerceptionLab(forceDevice);
   const director = useDirector({ getDossiers, embedQuery });
   const [preview, setPreview] = useState<ShotPreview | null>(null);
-  const [storyboardOpen, setStoryboardOpen] = useState(false);
+  /** Segment index to start storyboard playback from; null = closed. */
+  const [storyboardStart, setStoryboardStart] = useState<number | null>(null);
 
   const openPreview = useCallback(
     (clipId: string, fileName: string, shot: Shot) => {
@@ -116,7 +117,7 @@ export function PerceptionLabPage() {
                   targetDurationS={director.state.targetDurationS}
                   onRemove={director.removeItem}
                   onMove={director.moveItem}
-                  onPlay={() => setStoryboardOpen(true)}
+                  onPlay={setStoryboardStart}
                 />
               )}
               <SearchPanel
@@ -133,11 +134,12 @@ export function PerceptionLabPage() {
         )}
       </div>
       {preview && <ShotPreviewModal preview={preview} onClose={() => setPreview(null)} />}
-      {storyboardOpen && director.state.storyboard && (
+      {storyboardStart !== null && director.state.storyboard && (
         <StoryboardPreviewModal
           storyboard={director.state.storyboard}
           getFile={getFile}
-          onClose={() => setStoryboardOpen(false)}
+          initialIndex={storyboardStart}
+          onClose={() => setStoryboardStart(null)}
         />
       )}
     </div>

@@ -26,6 +26,12 @@ export interface DirectorState {
   error: string | null;
   /** Clips the current conversation is grounded on. */
   clipCount: number;
+  /**
+   * The verbatim conversation with the LLM — everything that leaves the
+   * machine, plus the model's replies and local tool results. Seeded at run
+   * start, replaced with the full history when a run finishes.
+   */
+  messages: ChatMessage[];
 }
 
 export interface UseDirectorDeps {
@@ -41,12 +47,18 @@ const initialState: DirectorState = {
   warnings: [],
   error: null,
   clipCount: 0,
+  messages: [],
 };
 
 type Action =
-  | { type: "run-start"; targetDurationS: number | null; clipCount: number }
+  | {
+      type: "run-start";
+      targetDurationS: number | null;
+      clipCount: number;
+      messages: ChatMessage[];
+    }
   | { type: "activity"; activity: DirectorActivity }
-  | { type: "success"; storyboard: Storyboard; warnings: string[] }
+  | { type: "success"; storyboard: Storyboard; warnings: string[]; messages: ChatMessage[] }
   | { type: "aborted" }
   | { type: "failure"; error: string }
   | { type: "remove-item"; index: number }
@@ -63,6 +75,7 @@ function reducer(state: DirectorState, action: Action): DirectorState {
         clipCount: action.clipCount,
         activity: [],
         error: null,
+        messages: action.messages,
       };
     case "activity":
       return { ...state, activity: [...state.activity, action.activity] };
@@ -72,6 +85,7 @@ function reducer(state: DirectorState, action: Action): DirectorState {
         phase: "awaiting-refine",
         storyboard: action.storyboard,
         warnings: action.warnings,
+        messages: action.messages,
       };
     case "aborted":
       return { ...state, phase: state.storyboard ? "awaiting-refine" : "idle" };
@@ -134,7 +148,12 @@ export function useDirector(deps: UseDirectorDeps) {
       const dossiers = dossiersRef.current;
       const controller = new AbortController();
       abortRef.current = controller;
-      dispatch({ type: "run-start", targetDurationS, clipCount: dossiers.length });
+      dispatch({
+        type: "run-start",
+        targetDurationS,
+        clipCount: dossiers.length,
+        messages,
+      });
       try {
         const result = await runDirectorLoop(messages, {
           complete: (msgs, tools, toolChoice) =>
@@ -157,7 +176,12 @@ export function useDirector(deps: UseDirectorDeps) {
           signal: controller.signal,
         });
         messagesRef.current = result.messages;
-        dispatch({ type: "success", storyboard: result.storyboard, warnings: result.warnings });
+        dispatch({
+          type: "success",
+          storyboard: result.storyboard,
+          warnings: result.warnings,
+          messages: result.messages,
+        });
       } catch (err) {
         if (err instanceof DirectorLoopError && err.code === "aborted") {
           dispatch({ type: "aborted" });
