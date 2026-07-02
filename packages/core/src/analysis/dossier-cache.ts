@@ -69,6 +69,8 @@ export function deserializeDossier(data: ArrayBuffer): ClipDossier {
         ...rest,
         embedding: embeddingB64 ? b64ToFloat32(embeddingB64) : null,
         frameEmbeddings: (frameEmbeddingsB64 ?? []).map(b64ToFloat32),
+        // Pre-caption caches lack the field; the orchestrator enriches lazily.
+        caption: rest.caption ?? null,
       };
     }),
   };

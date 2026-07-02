@@ -26,6 +26,7 @@ function makeDossier(): ClipDossier {
           new Float32Array([0.3, 0.1, -0.2, 0.9]),
         ],
         motion: { score: 4.2, peakTime: 3.1 },
+        caption: "a man walks through a market",
         quality: { sharpness: 812.5 },
       },
       {
@@ -37,6 +38,7 @@ function makeDossier(): ClipDossier {
         embedding: null, // embed pass failed for this shot
         frameEmbeddings: [],
         motion: { score: 0.8, peakTime: 7.5 },
+        caption: null,
         quality: { sharpness: 55 },
       },
     ],

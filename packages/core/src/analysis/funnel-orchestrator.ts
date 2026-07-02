@@ -8,6 +8,7 @@
  */
 
 import {
+  createCaptionWorker,
   createEmbeddingWorker,
   createFunnelWorker,
   createWhisperWorker,
@@ -24,6 +25,7 @@ import {
   type TranscriptSegment,
 } from "./types";
 import type {
+  CaptionWorkerResponse,
   EmbedResponse,
   FunnelResponse,
   WhisperResponse,
@@ -36,6 +38,11 @@ const MAX_EMBED_IN_FLIGHT = 4;
 
 interface PendingEmbed {
   resolve: (vector: Float32Array, ms: number) => void;
+  reject: (err: Error) => void;
+}
+
+interface PendingCaption {
+  resolve: (caption: string) => void;
   reject: (err: Error) => void;
 }
 
@@ -75,11 +82,13 @@ export class FunnelOrchestrator {
   private funnelWorker: Worker | null = null;
   private embeddingWorker: Worker | null = null;
   private whisperWorker: Worker | null = null;
+  private captionWorker: Worker | null = null;
 
   private readonly cache = new DossierCache();
   private readonly listeners = new Set<ProgressListener>();
 
   private readonly pendingEmbeds = new Map<string, PendingEmbed>();
+  private readonly pendingCaptions = new Map<string, PendingCaption>();
   private readonly runsByClipId = new Map<string, ClipRun>();
 
   private embedDevice: InferenceDevice | null = null;
@@ -89,6 +98,8 @@ export class FunnelOrchestrator {
 
   /** Serialize visual passes: one clip decodes at a time. */
   private funnelChain: Promise<void> = Promise.resolve();
+  /** Serialize caption generation: it's heavy and enrichment is background work. */
+  private captionChain: Promise<void> = Promise.resolve();
 
   onProgress(listener: ProgressListener): () => void {
     this.listeners.add(listener);
@@ -109,14 +120,20 @@ export class FunnelOrchestrator {
     this.funnelWorker?.terminate();
     this.embeddingWorker?.terminate();
     this.whisperWorker?.terminate();
+    this.captionWorker?.terminate();
     this.funnelWorker = null;
     this.embeddingWorker = null;
     this.whisperWorker = null;
+    this.captionWorker = null;
     this.listeners.clear();
     for (const [, pending] of this.pendingEmbeds) {
       pending.reject(new Error("disposed"));
     }
     this.pendingEmbeds.clear();
+    for (const [, pending] of this.pendingCaptions) {
+      pending.reject(new Error("disposed"));
+    }
+    this.pendingCaptions.clear();
     for (const [, run] of this.runsByClipId) {
       if (!run.finished) run.reject(new Error("disposed"));
     }
@@ -151,6 +168,8 @@ export class FunnelOrchestrator {
       for (const shot of dossier.shots) this.emit({ kind: "shot", clipId, shot });
       this.emit({ kind: "transcript", clipId, segments: dossier.transcript });
       this.emit({ kind: "clip-done", clipId, dossier });
+      // Pre-caption caches get their scene descriptions filled in place.
+      this.enrichCaptions(file, dossier, device);
       return dossier;
     }
 
@@ -310,7 +329,7 @@ export class FunnelOrchestrator {
 
   private handleShot(
     run: ClipRun,
-    partialShot: Omit<Shot, "embedding" | "frameEmbeddings" | "thumbnailDataUrl">,
+    partialShot: Omit<Shot, "embedding" | "frameEmbeddings" | "thumbnailDataUrl" | "caption">,
     thumbJpeg: ArrayBuffer,
     frames: Array<{ data: ArrayBuffer; width: number; height: number }>,
   ) {
@@ -320,6 +339,7 @@ export class FunnelOrchestrator {
       thumbnailDataUrl,
       embedding: null,
       frameEmbeddings: [],
+      caption: null,
     };
     run.shots.push(shot);
     this.emit({ kind: "shot", clipId: run.clipId, shot });
@@ -421,6 +441,53 @@ export class FunnelOrchestrator {
     void this.cache.save(run.file, dossier);
     this.emit({ kind: "clip-done", clipId: run.clipId, dossier });
     run.resolve(dossier);
+    // Scene descriptions are background enrichment: the dossier is already
+    // cached and usable; captions land shot by shot and re-save at the end.
+    this.enrichCaptions(run.file, dossier);
+  }
+
+  /**
+   * Fill in missing shot captions from the stored thumbnails (works for both
+   * fresh dossiers and pre-caption cache hits — no video decode involved).
+   * Serialized globally; failures are non-fatal per shot.
+   */
+  private enrichCaptions(
+    file: File,
+    dossier: ClipDossier,
+    device: "auto" | InferenceDevice = "auto",
+  ) {
+    const missing = dossier.shots.filter((s) => !s.caption && s.thumbnailDataUrl);
+    if (missing.length === 0) return;
+    this.ensureCaptionWorker(device);
+
+    this.captionChain = this.captionChain.then(async () => {
+      let updated = false;
+      for (const shot of missing) {
+        try {
+          const caption = await this.requestCaption(shot.thumbnailDataUrl);
+          if (!caption) continue;
+          shot.caption = caption;
+          updated = true;
+          this.emit({
+            kind: "shot-captioned",
+            clipId: dossier.clipId,
+            shotIndex: shot.index,
+            caption,
+          });
+        } catch {
+          // Captioning is best-effort; the shot keeps caption: null.
+        }
+      }
+      if (updated) await this.cache.save(file, dossier).catch(() => undefined);
+    });
+  }
+
+  private requestCaption(image: string): Promise<string> {
+    const requestId = uid("cap");
+    return new Promise<string>((resolve, reject) => {
+      this.pendingCaptions.set(requestId, { resolve, reject });
+      this.captionWorker!.postMessage({ type: "caption", requestId, image });
+    });
   }
 
   private failRun(run: ClipRun, message: string) {
@@ -473,6 +540,64 @@ export class FunnelOrchestrator {
       this.whisperWorker.postMessage({ type: "init", device });
     }
     return this.whisperWorker;
+  }
+
+  /** Created lazily on first caption need — Florence (~300MB) shouldn't gate page load. */
+  private ensureCaptionWorker(device: "auto" | InferenceDevice): Worker {
+    if (!this.captionWorker) {
+      this.captionWorker = createCaptionWorker();
+      this.captionWorker.addEventListener(
+        "message",
+        (event: MessageEvent<CaptionWorkerResponse>) => this.handleCaptionResponse(event.data),
+      );
+      this.captionWorker.addEventListener("error", (event) => {
+        console.error("[perception] caption worker crashed:", event.message, event);
+        for (const [, pending] of this.pendingCaptions) {
+          pending.reject(new Error(event.message || "caption worker crashed"));
+        }
+        this.pendingCaptions.clear();
+      });
+      this.captionWorker.postMessage({ type: "init", device });
+    }
+    return this.captionWorker;
+  }
+
+  private handleCaptionResponse(msg: CaptionWorkerResponse) {
+    switch (msg.type) {
+      case "ready":
+        this.emit({
+          kind: "model-ready",
+          model: "florence",
+          device: msg.device,
+          loadMs: msg.loadMs,
+        });
+        break;
+      case "model-progress":
+        this.emit({
+          kind: "model-progress",
+          model: "florence",
+          file: msg.file,
+          loaded: msg.loaded,
+          total: msg.total,
+        });
+        break;
+      case "caption": {
+        const pending = this.pendingCaptions.get(msg.requestId);
+        if (pending) {
+          this.pendingCaptions.delete(msg.requestId);
+          pending.resolve(msg.caption);
+        }
+        break;
+      }
+      case "error": {
+        const pending = msg.requestId ? this.pendingCaptions.get(msg.requestId) : undefined;
+        if (pending && msg.requestId) {
+          this.pendingCaptions.delete(msg.requestId);
+          pending.reject(new Error(msg.message));
+        }
+        break;
+      }
+    }
   }
 
   private handleEmbedResponse(msg: EmbedResponse) {

@@ -38,6 +38,12 @@ export interface Shot {
   frameEmbeddings: Float32Array[];
   motion: ShotMotion;
   quality: ShotQuality;
+  /**
+   * Machine-written scene description of the representative frame (local
+   * Florence-2 pass). Null until the caption pass reaches this shot. Good for
+   * scene gist; may miss small objects or assert details wrongly.
+   */
+  caption: string | null;
 }
 
 export interface TranscriptSegment {
@@ -119,15 +125,21 @@ export type FunnelProgressEvent =
       shot: Shot;
     }
   | { kind: "shot-embedded"; clipId: string; shotIndex: number }
+  | { kind: "shot-captioned"; clipId: string; shotIndex: number; caption: string }
   | { kind: "transcript"; clipId: string; segments: TranscriptSegment[] }
   | {
       kind: "model-progress";
-      model: "clip" | "whisper";
+      model: "clip" | "whisper" | "florence";
       file: string;
       loaded: number;
       total: number;
     }
-  | { kind: "model-ready"; model: "clip" | "whisper"; device: InferenceDevice; loadMs: number }
+  | {
+      kind: "model-ready";
+      model: "clip" | "whisper" | "florence";
+      device: InferenceDevice;
+      loadMs: number;
+    }
   | { kind: "clip-done"; clipId: string; dossier: ClipDossier }
   | { kind: "clip-error"; clipId: string; message: string };
 

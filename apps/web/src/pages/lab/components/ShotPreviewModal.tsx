@@ -67,6 +67,11 @@ export function ShotPreviewModal({ preview, onClose }: ShotPreviewModalProps) {
               shot {shot.index} · {fmtTime(shot.tStart)}–{fmtTime(shot.tEnd)}
               {pastEnd && " · past shot end"}
             </p>
+            {shot.caption && (
+              <p className="text-xs text-text-secondary/90 italic leading-snug mt-0.5">
+                {shot.caption}
+              </p>
+            )}
           </div>
           <button
             className="text-text-secondary hover:text-text-primary text-xl px-2"

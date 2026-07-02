@@ -47,6 +47,21 @@ describe("dossierToPromptText", () => {
     expect(text).not.toContain(`[45.0-46.0]`);
   });
 
+  it("includes scene descriptions when captioned, truncated at 160 chars", () => {
+    const long = "a ".repeat(120).trim();
+    const text = dossierToPromptText(
+      makeDossier({
+        shots: [
+          makeShot(0, 0, 10, { caption: "a man cuts open a durian at a market stall" }),
+          makeShot(1, 10, 25, { caption: long }),
+        ],
+      }),
+    );
+    expect(text).toContain('sharp 500  "a man cuts open a durian at a market stall"');
+    expect(text).toContain('..."');
+    expect(text).toContain("scene description");
+  });
+
   it("includes the recording time only when known", () => {
     expect(dossierToPromptText(makeDossier({ recordedAt: null }))).not.toContain("recorded");
     // 2026-06-24T05:42:00Z

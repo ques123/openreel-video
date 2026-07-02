@@ -83,7 +83,7 @@ export interface FunnelShotResponse {
   type: "shot";
   requestId: string;
   clipId: string;
-  shot: Omit<Shot, "embedding" | "frameEmbeddings" | "thumbnailDataUrl">;
+  shot: Omit<Shot, "embedding" | "frameEmbeddings" | "thumbnailDataUrl" | "caption">;
   thumbJpeg: ArrayBuffer;
   frames: RepFramePixels[];
 }
@@ -172,6 +172,57 @@ export type EmbedResponse =
   | EmbedModelProgressResponse
   | EmbedVectorResponse
   | EmbedErrorResponse;
+
+// ---------------------------------------------------------------------------
+// caption-worker: Florence-2 scene descriptions from shot thumbnails
+// ---------------------------------------------------------------------------
+
+export interface CaptionInitRequest {
+  type: "init";
+  device: "auto" | InferenceDevice;
+}
+
+export interface CaptionRequest {
+  type: "caption";
+  requestId: string;
+  /** JPEG data URL of the shot's representative frame (from the dossier). */
+  image: string;
+}
+
+export type CaptionWorkerRequest = CaptionInitRequest | CaptionRequest;
+
+export interface CaptionReadyResponse {
+  type: "ready";
+  device: InferenceDevice;
+  dtype: string;
+  loadMs: number;
+}
+
+export interface CaptionModelProgressResponse {
+  type: "model-progress";
+  file: string;
+  loaded: number;
+  total: number;
+}
+
+export interface CaptionTextResponse {
+  type: "caption";
+  requestId: string;
+  caption: string;
+  ms: number;
+}
+
+export interface CaptionErrorResponse {
+  type: "error";
+  requestId: string | null;
+  message: string;
+}
+
+export type CaptionWorkerResponse =
+  | CaptionReadyResponse
+  | CaptionModelProgressResponse
+  | CaptionTextResponse
+  | CaptionErrorResponse;
 
 // ---------------------------------------------------------------------------
 // whisper-worker: audio decode + resample + ASR

@@ -28,3 +28,10 @@ export function createWhisperWorker(): Worker {
     name: "perception-whisper",
   });
 }
+
+export function createCaptionWorker(): Worker {
+  return new Worker(new URL("./workers/caption-worker.ts", import.meta.url), {
+    type: "module",
+    name: "perception-caption",
+  });
+}

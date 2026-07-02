@@ -43,7 +43,7 @@ export interface ModelStatus {
 
 export interface LabState {
   clips: LabClip[];
-  models: { clip: ModelStatus; whisper: ModelStatus };
+  models: { clip: ModelStatus; whisper: ModelStatus; florence: ModelStatus };
   search: {
     query: string;
     hits: SearchHit[];
@@ -60,7 +60,11 @@ const initialModelStatus: ModelStatus = {
 
 const initialState: LabState = {
   clips: [],
-  models: { clip: { ...initialModelStatus }, whisper: { ...initialModelStatus } },
+  models: {
+    clip: { ...initialModelStatus },
+    whisper: { ...initialModelStatus },
+    florence: { ...initialModelStatus },
+  },
   search: { query: "", hits: [], searching: false },
 };
 
@@ -153,6 +157,10 @@ function reducer(state: LabState, action: Action): LabState {
             // array reference triggers re-render.
             shots: [...c.shots],
           }));
+        case "shot-captioned":
+          // shot.caption is set in place by the orchestrator; new array
+          // reference triggers re-render (same pattern as shot-embedded).
+          return updateClip(state, e.clipId, (c) => ({ ...c, shots: [...c.shots] }));
         case "transcript":
           return updateClip(state, e.clipId, (c) => ({ ...c, transcript: e.segments }));
         case "clip-done":
