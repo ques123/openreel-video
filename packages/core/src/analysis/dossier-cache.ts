@@ -82,7 +82,10 @@ export class DossierCache {
       const record = await this.storage.loadCache(dossierCacheKey(file));
       if (!record) return null;
       const dossier = deserializeDossier(record.data);
-      return dossier.version === DOSSIER_VERSION ? dossier : null;
+      if (dossier.version !== DOSSIER_VERSION) return null;
+      // Backfill for dossiers cached before recordedAt existed — the mtime is
+      // part of the cache key, so it is the same value analysis would store.
+      return { ...dossier, recordedAt: dossier.recordedAt ?? file.lastModified };
     } catch {
       return null;
     }

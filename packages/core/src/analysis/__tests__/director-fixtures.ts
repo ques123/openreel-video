@@ -42,6 +42,7 @@ export function makeDossier(
   opts: {
     clipId?: string;
     fileName?: string;
+    recordedAt?: number | null;
     durationS?: number;
     analyzedThroughS?: number | null;
     shots?: Shot[];
@@ -53,6 +54,7 @@ export function makeDossier(
     clipId: opts.clipId ?? "clip-a",
     cacheKey: "perception:v2:test:0:0",
     fileName: opts.fileName ?? "test.mp4",
+    recordedAt: opts.recordedAt ?? null,
     durationS: opts.durationS ?? 60,
     analyzedThroughS: opts.analyzedThroughS ?? null,
     width: 1920,

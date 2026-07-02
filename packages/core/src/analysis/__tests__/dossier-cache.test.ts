@@ -8,6 +8,7 @@ function makeDossier(): ClipDossier {
     clipId: "clip-1",
     cacheKey: "perception:v1:test.mp4:123:456",
     fileName: "test.mp4",
+    recordedAt: 456,
     durationS: 12.5,
     analyzedThroughS: null,
     width: 1920,

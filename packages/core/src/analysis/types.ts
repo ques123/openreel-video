@@ -78,6 +78,12 @@ export interface ClipDossier {
   /** Stable cache key: perception:v1:${name}:${size}:${lastModified}. */
   cacheKey: string;
   fileName: string;
+  /**
+   * When the clip was recorded (epoch ms), from the file's mtime — for camera
+   * files that is the moment recording STOPPED. Null when unknown. Used by
+   * the director to keep cuts in narrative (chronological) order.
+   */
+  recordedAt: number | null;
   durationS: number;
   /** Non-null when storage quota forced a partial analysis: shots/transcript cover [0, this]. */
   analyzedThroughS: number | null;

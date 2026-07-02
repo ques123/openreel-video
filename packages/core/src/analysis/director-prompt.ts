@@ -16,6 +16,10 @@ const DEFAULT_MAX_TRANSCRIPT_CHARS = 8000;
 
 const fmtS = (s: number) => s.toFixed(1);
 
+/** Deterministic "2026-06-24 05:42 UTC" — only relative order matters. */
+const fmtRecordedAt = (ms: number) =>
+  new Date(ms).toISOString().slice(0, 16).replace("T", " ") + " UTC";
+
 export function dossierToPromptText(
   dossier: ClipDossier,
   opts: { maxTranscriptChars?: number } = {},
@@ -24,7 +28,8 @@ export function dossierToPromptText(
   const lines: string[] = [];
 
   lines.push(
-    `CLIP ${dossier.clipId} "${dossier.fileName}"  duration ${fmtS(dossier.durationS)}s  ${dossier.width}x${dossier.height}`,
+    `CLIP ${dossier.clipId} "${dossier.fileName}"  duration ${fmtS(dossier.durationS)}s  ${dossier.width}x${dossier.height}` +
+      (dossier.recordedAt !== null ? `  recorded ${fmtRecordedAt(dossier.recordedAt)}` : ""),
   );
   if (dossier.analyzedThroughS !== null) {
     lines.push(
@@ -64,8 +69,17 @@ export function dossierToPromptText(
   return lines.join("\n");
 }
 
+/** Chronological copy: known recording times first (oldest→newest), unknown last. */
+export function sortByRecordedAt(dossiers: ClipDossier[]): ClipDossier[] {
+  return [...dossiers].sort(
+    (a, b) => (a.recordedAt ?? Infinity) - (b.recordedAt ?? Infinity),
+  );
+}
+
 export function dossiersToPromptText(dossiers: ClipDossier[]): string {
-  return dossiers.map((d) => dossierToPromptText(d)).join("\n\n");
+  return sortByRecordedAt(dossiers)
+    .map((d) => dossierToPromptText(d))
+    .join("\n\n");
 }
 
 export function buildSystemPrompt(): string {
@@ -80,6 +94,7 @@ EDITING CRAFT
 - Vary pacing: alternate segment lengths; high-motion shots can run shorter, calm scenic shots slightly longer. Avoid two near-identical shots back to back.
 - Prefer sharp shots (sharpness ~200+; higher is sharper). Motion is mean frame difference on a 0-255 scale, typically under 40: ~25+ is energetic, single digits is static. The peak@ time marks the liveliest moment — useful when trimming.
 - Cut speech on sentence boundaries using the transcript timings; never clip mid-word. Silence between segments is fine.
+- Respect chronology: clips carry recording times and are listed oldest-first. A montage reads as a story — by default keep segments in recording order so the viewer experiences the trip the way it happened. Deliberate exceptions are fine (e.g. pulling ONE strong later moment forward as the hook, then running chronologically), but never shuffle time arbitrarily.
 - Hit the target duration within ±10%. Add up your segment durations BEFORE submitting.
 
 DATA CAVEATS
@@ -102,7 +117,7 @@ export function buildBriefMessage(brief: string, targetDurationS: number | null)
 export function buildDossierMessage(dossiers: ClipDossier[]): string {
   return (
     `FOOTAGE: ${dossiers.length} analyzed clip${dossiers.length === 1 ? "" : "s"} — ` +
-    `this is ALL the available footage.\n\n` +
+    `this is ALL the available footage, listed in RECORDING ORDER (oldest first).\n\n` +
     dossiersToPromptText(dossiers)
   );
 }

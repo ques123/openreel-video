@@ -408,6 +408,7 @@ export class FunnelOrchestrator {
       clipId: run.clipId,
       cacheKey: "", // filled by DossierCache on save (derived from file)
       fileName: run.file.name,
+      recordedAt: run.file.lastModified ?? null,
       durationS,
       analyzedThroughS: run.analyzedThroughS,
       width: run.meta?.width ?? 0,
