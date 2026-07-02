@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { DirectorActivity } from "@openreel/core";
 import type { UseDirectorReturn } from "../use-director";
+import { PromptInspectorModal } from "./PromptInspectorModal";
 
 interface DirectorPanelProps {
   director: UseDirectorReturn;
@@ -28,6 +29,7 @@ export function DirectorPanel({ director, ready, clipsDone, clipsTotal }: Direct
   const [brief, setBrief] = useState("");
   const [target, setTarget] = useState("60");
   const [feedback, setFeedback] = useState("");
+  const [inspectorOpen, setInspectorOpen] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -39,7 +41,18 @@ export function DirectorPanel({ director, ready, clipsDone, clipsTotal }: Direct
 
   return (
     <div className="bg-background-secondary border border-border rounded-lg p-3">
-      <h3 className="text-sm font-semibold text-text-primary mb-2">Director</h3>
+      <div className="flex items-baseline justify-between mb-2">
+        <h3 className="text-sm font-semibold text-text-primary">Director</h3>
+        {state.messages.length > 0 && (
+          <button
+            onClick={() => setInspectorOpen(true)}
+            className="text-[10px] text-text-secondary hover:text-text-primary underline decoration-dotted"
+            title="Inspect the exact text sent to the model"
+          >
+            what was sent to the AI →
+          </button>
+        )}
+      </div>
       <p className="text-xs text-text-secondary mb-2">
         Describe the cut you want — an LLM reads the analysis (never the pixels) and
         drafts a storyboard.
@@ -159,6 +172,13 @@ export function DirectorPanel({ director, ready, clipsDone, clipsTotal }: Direct
             Refine
           </button>
         </form>
+      )}
+
+      {inspectorOpen && (
+        <PromptInspectorModal
+          messages={state.messages}
+          onClose={() => setInspectorOpen(false)}
+        />
       )}
     </div>
   );

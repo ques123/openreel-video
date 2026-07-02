@@ -6,7 +6,8 @@ interface StoryboardListProps {
   targetDurationS: number | null;
   onRemove: (index: number) => void;
   onMove: (from: number, to: number) => void;
-  onPlay: () => void;
+  /** Play the storyboard starting from this segment (0 = whole cut). */
+  onPlay: (startIndex: number) => void;
 }
 
 function fmtTime(s: number): string {
@@ -34,7 +35,7 @@ export function StoryboardList({
           {storyboard.title ?? "Storyboard"}
         </h3>
         <button
-          onClick={onPlay}
+          onClick={() => onPlay(0)}
           className="px-3 py-1 text-sm rounded-md bg-primary text-white shrink-0"
         >
           ▶ Play
@@ -46,17 +47,22 @@ export function StoryboardList({
 
       <ul className="space-y-1.5">
         {storyboard.items.map((item, i) => (
-          <li key={`${item.clipId}-${i}`} className="flex items-center gap-2 p-1 rounded-md">
-            <span className="text-xs text-text-secondary w-4 text-right">{i + 1}</span>
+          <li
+            key={`${item.clipId}-${i}`}
+            className="flex items-start gap-2 p-1 rounded-md hover:bg-background cursor-pointer"
+            onClick={() => onPlay(i)}
+            title="Play this scene"
+          >
+            <span className="text-xs text-text-secondary w-4 text-right pt-0.5">{i + 1}</span>
             {item.thumbnailDataUrl ? (
               <img
                 src={item.thumbnailDataUrl}
                 alt=""
-                className="w-16 aspect-video object-cover rounded bg-black"
+                className="w-16 aspect-video object-cover rounded bg-black shrink-0"
                 draggable={false}
               />
             ) : (
-              <div className="w-16 aspect-video rounded bg-black/40" />
+              <div className="w-16 aspect-video rounded bg-black/40 shrink-0" />
             )}
             <div className="min-w-0 flex-1">
               <p className="text-xs text-text-primary truncate">
@@ -66,12 +72,10 @@ export function StoryboardList({
                 {fmtTime(item.inS)}–{fmtTime(item.outS)} ({(item.outS - item.inS).toFixed(1)}s)
               </p>
               {item.why && (
-                <p className="text-[10px] text-text-secondary/80 truncate" title={item.why}>
-                  {item.why}
-                </p>
+                <p className="text-[10px] text-text-secondary/80 leading-snug">{item.why}</p>
               )}
             </div>
-            <div className="flex flex-col shrink-0">
+            <div className="flex flex-col shrink-0" onClick={(e) => e.stopPropagation()}>
               <button
                 onClick={() => onMove(i, i - 1)}
                 disabled={i === 0}
@@ -90,7 +94,10 @@ export function StoryboardList({
               </button>
             </div>
             <button
-              onClick={() => onRemove(i)}
+              onClick={(e) => {
+                e.stopPropagation();
+                onRemove(i);
+              }}
               className="text-text-secondary hover:text-red-400 text-sm px-1 shrink-0"
               aria-label="Remove segment"
             >

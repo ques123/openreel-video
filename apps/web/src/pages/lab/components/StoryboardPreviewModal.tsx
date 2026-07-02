@@ -4,6 +4,8 @@ import type { Storyboard } from "@openreel/core";
 interface StoryboardPreviewModalProps {
   storyboard: Storyboard;
   getFile: (clipId: string) => File | null;
+  /** Segment to start playback from (clicking a storyboard row jumps here). */
+  initialIndex?: number;
   onClose: () => void;
 }
 
@@ -22,11 +24,14 @@ function fmtTime(s: number): string {
 export function StoryboardPreviewModal({
   storyboard,
   getFile,
+  initialIndex = 0,
   onClose,
 }: StoryboardPreviewModalProps) {
   const items = storyboard.items;
   const videoRef = useRef<HTMLVideoElement>(null);
-  const [index, setIndex] = useState(0);
+  const [index, setIndex] = useState(() =>
+    Math.min(Math.max(initialIndex, 0), items.length - 1),
+  );
   const [done, setDone] = useState(false);
   const [playbackError, setPlaybackError] = useState<string | null>(null);
   // Guard so a burst of timeupdates past the boundary advances only once.
