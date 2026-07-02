@@ -29,6 +29,9 @@ export interface LabClip {
   ingestProgress: number | null;
   shots: Shot[];
   embeddedCount: number;
+  /** Dense caption pass progress (0/0 until the pass starts). */
+  captionsDone: number;
+  captionsTotal: number;
   transcript: TranscriptSegment[];
   dossier: ClipDossier | null;
 }
@@ -106,6 +109,8 @@ function reducer(state: LabState, action: Action): LabState {
             ingestProgress: null,
             shots: [],
             embeddedCount: 0,
+            captionsDone: 0,
+            captionsTotal: 0,
             transcript: [],
             dossier: null,
           },
@@ -161,6 +166,12 @@ function reducer(state: LabState, action: Action): LabState {
           // shot.caption is set in place by the orchestrator; new array
           // reference triggers re-render (same pattern as shot-embedded).
           return updateClip(state, e.clipId, (c) => ({ ...c, shots: [...c.shots] }));
+        case "dense-captions":
+          return updateClip(state, e.clipId, (c) => ({
+            ...c,
+            captionsDone: e.done,
+            captionsTotal: e.total,
+          }));
         case "transcript":
           return updateClip(state, e.clipId, (c) => ({ ...c, transcript: e.segments }));
         case "clip-done":

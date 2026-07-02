@@ -7,12 +7,15 @@
  * is fully unit-testable and the exact bytes sent to the LLM are auditable.
  */
 
+import { mergeDenseCaptions } from "./caption-text";
 import type { SearchResult } from "./retrieval";
 import type { ClipDossier } from "./types";
 import { storyboardDurationS, type Storyboard } from "./director-types";
 
 /** Per-clip transcript budget; talky clips get truncated, not dropped. */
 const DEFAULT_MAX_TRANSCRIPT_CHARS = 8000;
+/** Per-clip scene-timeline budget (merged segments, not raw captions). */
+const DEFAULT_MAX_TIMELINE_CHARS = 8000;
 
 const fmtS = (s: number) => s.toFixed(1);
 
@@ -51,6 +54,25 @@ export function dossierToPromptText(
         `motion ${Math.round(shot.motion.score)} peak@${fmtS(shot.motion.peakTime)}  ` +
         `sharp ${Math.round(shot.quality.sharpness)}${caption}`,
     );
+  }
+
+  if (dossier.denseCaptions.length > 0) {
+    const segments = mergeDenseCaptions(dossier.denseCaptions);
+    lines.push(
+      `  SCENE TIMELINE (machine descriptions sampled every ~2s, similar neighbors merged):`,
+    );
+    let used = 0;
+    for (const seg of segments) {
+      const range =
+        seg.t1 > seg.t0 ? `[${fmtS(seg.t0)}-${fmtS(seg.t1)}]` : `[${fmtS(seg.t0)}]`;
+      const line = `    ${range} ${seg.text}`;
+      if (used + line.length > DEFAULT_MAX_TIMELINE_CHARS) {
+        lines.push("    [timeline truncated]");
+        break;
+      }
+      lines.push(line);
+      used += line.length;
+    }
   }
 
   if (dossier.transcript.length === 0) {

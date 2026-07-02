@@ -11,6 +11,7 @@ export * from "./worker-protocol";
 export * from "./shot-metrics";
 export * from "./retrieval";
 export * from "./dossier-cache";
+export * from "./caption-text";
 export * from "./director-types";
 export * from "./director-prompt";
 export * from "./storyboard";

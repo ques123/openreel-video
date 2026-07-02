@@ -13,11 +13,13 @@ import {
   createFunnelWorker,
   createWhisperWorker,
 } from "./create-workers";
+import { cleanCaption } from "./caption-text";
 import { DossierCache } from "./dossier-cache";
 import {
   DOSSIER_VERSION,
   FUNNEL_DEFAULTS,
   type ClipDossier,
+  type DenseCaption,
   type DossierPerf,
   type FunnelProgressEvent,
   type InferenceDevice,
@@ -50,6 +52,7 @@ interface ClipRun {
   clipId: string;
   file: File;
   shots: Shot[];
+  denseFrames: Array<{ t: number; dataUrl: string }>;
   transcript: TranscriptSegment[];
   meta: { durationS: number; width: number; height: number } | null;
   startMs: number;
@@ -177,6 +180,7 @@ export class FunnelOrchestrator {
       clipId,
       file,
       shots: [],
+      denseFrames: [],
       transcript: [],
       meta: null,
       startMs: performance.now(),
@@ -274,6 +278,10 @@ export class FunnelOrchestrator {
 
           case "shot":
             this.handleShot(run, msg.shot, msg.thumbJpeg, msg.frames);
+            break;
+
+          case "dense-frame":
+            run.denseFrames.push({ t: msg.t, dataUrl: jpegToDataUrl(msg.jpeg) });
             break;
 
           case "ingest-progress":
@@ -434,6 +442,7 @@ export class FunnelOrchestrator {
       width: run.meta?.width ?? 0,
       height: run.meta?.height ?? 0,
       shots: run.shots,
+      denseCaptions: [],
       transcript: run.transcript,
       perf,
     };
@@ -442,8 +451,72 @@ export class FunnelOrchestrator {
     this.emit({ kind: "clip-done", clipId: run.clipId, dossier });
     run.resolve(dossier);
     // Scene descriptions are background enrichment: the dossier is already
-    // cached and usable; captions land shot by shot and re-save at the end.
-    this.enrichCaptions(run.file, dossier);
+    // cached and usable; captions land frame by frame and re-save as they go.
+    if (run.denseFrames.length > 0) {
+      this.captionDense(run.file, dossier, run.denseFrames);
+    } else {
+      this.enrichCaptions(run.file, dossier);
+    }
+  }
+
+  /**
+   * Caption every dense frame (one per ~2s of footage), filling the dossier's
+   * denseCaptions timeline and each shot's caption (nearest frame to its rep
+   * time). Serialized globally, incremental cache saves for crash resilience.
+   */
+  private captionDense(
+    file: File,
+    dossier: ClipDossier,
+    frames: Array<{ t: number; dataUrl: string }>,
+    device: "auto" | InferenceDevice = "auto",
+  ) {
+    this.ensureCaptionWorker(device);
+    const total = frames.length;
+
+    this.captionChain = this.captionChain.then(async () => {
+      const captions: DenseCaption[] = dossier.denseCaptions;
+      let done = 0;
+      for (const frame of frames) {
+        try {
+          const raw = await this.requestCaption(frame.dataUrl);
+          const text = cleanCaption(raw);
+          if (text) captions.push({ t: frame.t, text });
+        } catch {
+          // best-effort; skip this frame
+        }
+        done += 1;
+        this.emit({ kind: "dense-captions", clipId: dossier.clipId, done, total });
+        if (done % 25 === 0) {
+          this.syncShotCaptions(dossier);
+          await this.cache.save(file, dossier).catch(() => undefined);
+        }
+      }
+      this.syncShotCaptions(dossier);
+      await this.cache.save(file, dossier).catch(() => undefined);
+    });
+  }
+
+  /** Give each still-uncaptioned shot the dense caption nearest its rep frame. */
+  private syncShotCaptions(dossier: ClipDossier) {
+    for (const shot of dossier.shots) {
+      if (shot.caption) continue;
+      let best: DenseCaption | null = null;
+      for (const c of dossier.denseCaptions) {
+        if (c.t < shot.tStart - 1 || c.t > shot.tEnd + 1) continue;
+        if (!best || Math.abs(c.t - shot.repFrameTime) < Math.abs(best.t - shot.repFrameTime)) {
+          best = c;
+        }
+      }
+      if (best) {
+        shot.caption = best.text;
+        this.emit({
+          kind: "shot-captioned",
+          clipId: dossier.clipId,
+          shotIndex: shot.index,
+          caption: best.text,
+        });
+      }
+    }
   }
 
   /**

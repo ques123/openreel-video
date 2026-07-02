@@ -63,6 +63,7 @@ export function deserializeDossier(data: ArrayBuffer): ClipDossier {
   const parsed = JSON.parse(new TextDecoder().decode(data)) as SerializedDossier;
   return {
     ...parsed,
+    denseCaptions: parsed.denseCaptions ?? [],
     shots: parsed.shots.map((shot) => {
       const { embeddingB64, frameEmbeddingsB64, ...rest } = shot;
       return {

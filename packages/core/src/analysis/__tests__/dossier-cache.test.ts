@@ -4,7 +4,7 @@ import type { ClipDossier } from "../types";
 
 function makeDossier(): ClipDossier {
   return {
-    version: 2,
+    version: 3,
     clipId: "clip-1",
     cacheKey: "perception:v1:test.mp4:123:456",
     fileName: "test.mp4",
@@ -42,6 +42,7 @@ function makeDossier(): ClipDossier {
         quality: { sharpness: 55 },
       },
     ],
+    denseCaptions: [{ t: 2, text: "a market street" }],
     transcript: [{ t0: 0.5, t1: 4.2, text: "we finally made it to the falls" }],
     perf: {
       ingestMs: 800,

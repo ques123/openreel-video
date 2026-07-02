@@ -62,6 +62,22 @@ describe("dossierToPromptText", () => {
     expect(text).toContain("scene description");
   });
 
+  it("renders a merged scene timeline from dense captions", () => {
+    const text = dossierToPromptText(
+      makeDossier({
+        denseCaptions: [
+          { t: 0, text: "road, trees and sky" },
+          { t: 2, text: "road, trees and sky" },
+          { t: 4, text: "a person at a market stall" },
+        ],
+      }),
+    );
+    expect(text).toContain("SCENE TIMELINE");
+    expect(text).toContain("[0.0-2.0] road, trees and sky");
+    expect(text).toContain("[4.0] a person at a market stall");
+    expect(dossierToPromptText(makeDossier())).not.toContain("SCENE TIMELINE");
+  });
+
   it("includes the recording time only when known", () => {
     expect(dossierToPromptText(makeDossier({ recordedAt: null }))).not.toContain("recorded");
     // 2026-06-24T05:42:00Z
