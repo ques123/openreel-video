@@ -11,6 +11,10 @@ export * from "./worker-protocol";
 export * from "./shot-metrics";
 export * from "./retrieval";
 export * from "./dossier-cache";
+export * from "./director-types";
+export * from "./director-prompt";
+export * from "./storyboard";
+export * from "./director-loop";
 export { FunnelOrchestrator, type ProgressListener } from "./funnel-orchestrator";
 export {
   createFunnelWorker,
