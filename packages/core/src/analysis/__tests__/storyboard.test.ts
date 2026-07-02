@@ -127,4 +127,48 @@ describe("validateStoryboard", () => {
     const v = validateStoryboard(submit([item({ role: undefined })]), dossiers);
     expect(v.storyboard!.items[0].role).toBe("segment");
   });
+
+  describe("chronology", () => {
+    const dated = [
+      makeDossier({ clipId: "clip-early", fileName: "early.mp4", recordedAt: 1_000_000 }),
+      makeDossier({ clipId: "clip-late", fileName: "late.mp4", recordedAt: 9_000_000 }),
+    ];
+    const seg = (clipId: string, inS: number) => ({
+      clipId,
+      in: inS,
+      out: inS + 3,
+      role: "b-roll",
+      why: "x",
+    });
+
+    it("warns when a later-recorded clip precedes an earlier one", () => {
+      const v = validateStoryboard(
+        submit([seg("clip-late", 0), seg("clip-early", 0)]),
+        dated,
+      );
+      expect(v.errors).toEqual([]);
+      expect(v.warnings.some((w) => w.includes("jump BACK in time"))).toBe(true);
+    });
+
+    it("warns on backward jumps within one clip", () => {
+      const v = validateStoryboard(
+        submit([seg("clip-early", 20), seg("clip-early", 5)]),
+        dated,
+      );
+      expect(v.warnings.some((w) => w.includes("jump BACK in time"))).toBe(true);
+    });
+
+    it("stays quiet for chronological cuts and undated clips", () => {
+      const ordered = validateStoryboard(
+        submit([seg("clip-early", 0), seg("clip-late", 0)]),
+        dated,
+      );
+      expect(ordered.warnings).toEqual([]);
+      const undated = validateStoryboard(
+        submit([{ ...seg("clip-a", 30), clipId: "clip-a" }, { ...seg("clip-a", 5) }]),
+        dossiers,
+      );
+      expect(undated.warnings.every((w) => !w.includes("jump BACK"))).toBe(true);
+    });
+  });
 });

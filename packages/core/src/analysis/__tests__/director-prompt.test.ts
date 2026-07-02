@@ -46,12 +46,34 @@ describe("dossierToPromptText", () => {
     expect(text).toContain("[transcript truncated]");
     expect(text).not.toContain(`[45.0-46.0]`);
   });
+
+  it("includes the recording time only when known", () => {
+    expect(dossierToPromptText(makeDossier({ recordedAt: null }))).not.toContain("recorded");
+    // 2026-06-24T05:42:00Z
+    const text = dossierToPromptText(makeDossier({ recordedAt: 1782279720000 }));
+    expect(text).toContain("recorded 2026-06-24 05:42 UTC");
+  });
 });
 
 describe("buildDossierMessage / buildBriefMessage", () => {
   it("states the clip count", () => {
     const msg = buildDossierMessage([makeDossier(), makeDossier({ clipId: "clip-b" })]);
     expect(msg).toContain("FOOTAGE: 2 analyzed clips");
+  });
+
+  it("lists clips oldest-first, unknown recording times last", () => {
+    const msg = buildDossierMessage([
+      makeDossier({ clipId: "clip-late", recordedAt: 2000 }),
+      makeDossier({ clipId: "clip-undated", recordedAt: null }),
+      makeDossier({ clipId: "clip-early", recordedAt: 1000 }),
+    ]);
+    expect(msg).toContain("RECORDING ORDER");
+    const order = ["clip-early", "clip-late", "clip-undated"].map((id) =>
+      msg.indexOf(`CLIP ${id}`),
+    );
+    expect(order[0]).toBeGreaterThan(-1);
+    expect(order[0]).toBeLessThan(order[1]);
+    expect(order[1]).toBeLessThan(order[2]);
   });
 
   it("only mentions target duration when one is set", () => {

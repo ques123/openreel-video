@@ -138,6 +138,25 @@ export function validateStoryboard(
     return { storyboard: null, errors, warnings };
   }
 
+  // Flag backward jumps in real-world time (clip mtime + offset within the
+  // clip). Warning, not error: hook-first structures legitimately pull a
+  // later moment forward — but silent shuffling breaks the trip's narrative.
+  const byId = new Map(dossiers.map((d) => [d.clipId, d]));
+  for (let i = 1; i < items.length; i += 1) {
+    const prevClip = byId.get(items[i - 1].clipId);
+    const curClip = byId.get(items[i].clipId);
+    if (!prevClip || !curClip) continue;
+    if (prevClip.recordedAt === null || curClip.recordedAt === null) continue;
+    const prevT = prevClip.recordedAt + items[i - 1].inS * 1000;
+    const curT = curClip.recordedAt + items[i].inS * 1000;
+    if (curT < prevT) {
+      warnings.push(
+        `segments ${i}→${i + 1} jump BACK in time (${prevClip.fileName} was recorded after ` +
+          `${curClip.fileName}) — fine if deliberate (e.g. a hook), otherwise reorder`,
+      );
+    }
+  }
+
   if (targetDurationS !== null && targetDurationS > 0) {
     let total = 0;
     for (const item of items) total += item.outS - item.inS;
