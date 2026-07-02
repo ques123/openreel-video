@@ -16,7 +16,14 @@ export default defineConfig({
     format: "es",
   },
   optimizeDeps: {
-    exclude: ["@ffmpeg/ffmpeg", "@ffmpeg/util", "@ffmpeg/core", "@ffmpeg/core-mt"],
+    exclude: [
+      "@ffmpeg/ffmpeg",
+      "@ffmpeg/util",
+      "@ffmpeg/core",
+      "@ffmpeg/core-mt",
+      // Pre-bundling breaks transformers.js dynamic ORT/wasm loading.
+      "@huggingface/transformers",
+    ],
   },
   build: {
     target: "esnext",

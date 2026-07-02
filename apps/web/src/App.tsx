@@ -20,6 +20,12 @@ const EditorInterface = lazy(() =>
   }))
 );
 
+const PerceptionLabPage = lazy(() =>
+  import("./pages/lab/PerceptionLabPage").then((m) => ({
+    default: m.PerceptionLabPage,
+  }))
+);
+
 const LoadingSpinner: React.FC<{ message: string }> = ({ message }) => (
   <div className="h-screen w-screen bg-background flex flex-col items-center justify-center">
     <div className="w-10 h-10 border-2 border-primary border-t-transparent rounded-full animate-spin mb-3" />
@@ -91,7 +97,7 @@ function App() {
       navigate("editor");
     } else if (route === "editor" && skipWelcomeScreen) {
       hasHandledInitialRoute.current = true;
-    } else if (["welcome", "templates", "recent"].includes(route)) {
+    } else if (["welcome", "templates", "recent", "lab"].includes(route)) {
       hasHandledInitialRoute.current = true;
     }
   }, [
@@ -106,7 +112,7 @@ function App() {
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
-      if (e.key === "Escape" && route !== "editor") {
+      if (e.key === "Escape" && route !== "editor" && route !== "lab") {
         navigate("editor");
       }
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
@@ -131,12 +137,17 @@ function App() {
         ? "recent"
         : undefined;
   const isSharePage = route === "share" && params.shareId;
+  const isLabPage = route === "lab";
 
   return (
     <TooltipProvider>
       <div className="h-screen w-screen bg-background text-text-primary overflow-hidden">
         <MobileBlocker />
-        {isSharePage ? (
+        {isLabPage ? (
+          <Suspense fallback={<LoadingSpinner message="Loading perception lab..." />}>
+            <PerceptionLabPage />
+          </Suspense>
+        ) : isSharePage ? (
           <SharePage shareId={params.shareId!} />
         ) : showWelcome ? (
           <WelcomeScreen initialTab={initialTab} />

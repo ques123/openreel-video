@@ -1,0 +1,115 @@
+import { useCallback, useMemo, useState } from "react";
+import type { SearchHit, Shot, TranscriptSegment } from "@openreel/core";
+import { useRouter } from "../../hooks/use-router";
+import { ClipDropZone } from "./components/ClipDropZone";
+import { PerfPanel } from "./components/PerfPanel";
+import { SearchPanel } from "./components/SearchPanel";
+import { ShotFilmstrip } from "./components/ShotFilmstrip";
+import { ShotPreviewModal, type ShotPreview } from "./components/ShotPreviewModal";
+import { TranscriptPanel } from "./components/TranscriptPanel";
+import { usePerceptionLab, type LabClip } from "./use-perception-lab";
+
+export function PerceptionLabPage() {
+  const { params } = useRouter();
+  const forceDevice = params.device === "wasm" ? "wasm" : "auto";
+  const { state, addFiles, runSearch, getFile } = usePerceptionLab(forceDevice);
+  const [preview, setPreview] = useState<ShotPreview | null>(null);
+
+  const openPreview = useCallback(
+    (clipId: string, fileName: string, shot: Shot) => {
+      const file = getFile(clipId);
+      if (file) setPreview({ file, fileName, shot });
+    },
+    [getFile],
+  );
+
+  // clipId -> (shotIndex -> score) for filmstrip highlights (confident only —
+  // highlighting every top-K hit made weak matches look like real ones).
+  const highlightsByClip = useMemo(() => {
+    const map = new Map<string, Map<number, number>>();
+    for (const hit of state.search.hits) {
+      if (!hit.confident) continue;
+      let clipMap = map.get(hit.clipId);
+      if (!clipMap) {
+        clipMap = new Map();
+        map.set(hit.clipId, clipMap);
+      }
+      clipMap.set(hit.shot.index, hit.score);
+    }
+    return map;
+  }, [state.search.hits]);
+
+  const scrollToShot = useCallback((clipId: string, shotIndex: number) => {
+    document
+      .getElementById(`shot-${clipId}-${shotIndex}`)
+      ?.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
+  }, []);
+
+  const handleHitClick = useCallback(
+    (hit: SearchHit) => {
+      scrollToShot(hit.clipId, hit.shot.index);
+      openPreview(hit.clipId, hit.fileName, hit.shot);
+    },
+    [scrollToShot, openPreview],
+  );
+
+  const handleSegmentClick = useCallback(
+    (clip: LabClip, segment: TranscriptSegment) => {
+      const shot = clip.shots.find((s) => segment.t0 >= s.tStart && segment.t0 < s.tEnd);
+      if (shot) {
+        scrollToShot(clip.clipId, shot.index);
+        openPreview(clip.clipId, clip.fileName, shot);
+      }
+    },
+    [scrollToShot, openPreview],
+  );
+
+  const searchReady =
+    state.models.clip.state === "ready" &&
+    state.clips.some((c) => c.status === "done");
+
+  return (
+    <div className="h-full overflow-y-auto bg-background">
+      <div className="max-w-6xl mx-auto p-6">
+        <header className="mb-6">
+          <h1 className="text-xl font-semibold text-text-primary">Perception Lab</h1>
+          <p className="text-sm text-text-secondary">
+            Stage ② spike — drop clips, watch them get understood. 100% local:
+            shots, motion, CLIP embeddings & Whisper run in your browser.
+          </p>
+        </header>
+
+        {state.clips.length === 0 ? (
+          <ClipDropZone onFiles={addFiles} />
+        ) : (
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            <div className="lg:col-span-2 space-y-3">
+              {state.clips.map((clip) => (
+                <ShotFilmstrip
+                  key={clip.clipId}
+                  clip={clip}
+                  highlights={highlightsByClip.get(clip.clipId) ?? new Map()}
+                  onShotClick={(shot) => openPreview(clip.clipId, clip.fileName, shot)}
+                />
+              ))}
+              <ClipDropZone onFiles={addFiles} compact />
+            </div>
+
+            <div className="space-y-3">
+              <SearchPanel
+                hits={state.search.hits}
+                searching={state.search.searching}
+                ready={searchReady}
+                onSearch={runSearch}
+                onHitClick={handleHitClick}
+              />
+              <TranscriptPanel clips={state.clips} onSegmentClick={handleSegmentClick} />
+              <PerfPanel clips={state.clips} models={state.models} />
+            </div>
+          </div>
+        )}
+      </div>
+      {preview && <ShotPreviewModal preview={preview} onClose={() => setPreview(null)} />}
+    </div>
+  );
+}

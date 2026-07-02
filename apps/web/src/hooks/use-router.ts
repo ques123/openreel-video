@@ -6,7 +6,8 @@ export type AppRoute =
   | "new"
   | "templates"
   | "recent"
-  | "share";
+  | "share"
+  | "lab";
 
 export interface RouteParams {
   dimensions?: string;
@@ -16,6 +17,7 @@ export interface RouteParams {
   fps?: string;
   tab?: string;
   shareId?: string;
+  device?: string;
 }
 
 export interface RouterState {
@@ -44,6 +46,7 @@ function parseHash(hash: string): RouterState {
     "templates",
     "recent",
     "share",
+    "lab",
   ];
 
   if (route === "share" && pathParts[1]) {
