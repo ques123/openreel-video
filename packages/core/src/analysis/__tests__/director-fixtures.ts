@@ -5,7 +5,10 @@ export function makeShot(
   index: number,
   tStart: number,
   tEnd: number,
-  opts: Partial<Pick<Shot, "thumbnailDataUrl">> & { motion?: number; sharpness?: number } = {},
+  opts: Partial<Pick<Shot, "thumbnailDataUrl" | "caption">> & {
+    motion?: number;
+    sharpness?: number;
+  } = {},
 ): Shot {
   return {
     index,
@@ -15,6 +18,7 @@ export function makeShot(
     thumbnailDataUrl: opts.thumbnailDataUrl ?? `thumb-${index}`,
     embedding: null,
     frameEmbeddings: [],
+    caption: opts.caption ?? null,
     motion: { score: opts.motion ?? 10, peakTime: (tStart + tEnd) / 2 },
     quality: { sharpness: opts.sharpness ?? 500 },
   };

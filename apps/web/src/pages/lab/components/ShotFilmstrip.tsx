@@ -95,7 +95,7 @@ export function ShotFilmstrip({ clip, highlights, onShotClick }: ShotFilmstripPr
                   : "border-transparent hover:border-border"
               }`}
               onClick={() => onShotClick?.(shot)}
-              title={`shot ${shot.index} · ${fmtTime(shot.tStart)}–${fmtTime(shot.tEnd)}`}
+              title={`shot ${shot.index} · ${fmtTime(shot.tStart)}–${fmtTime(shot.tEnd)}${shot.caption ? `\n${shot.caption}` : ""}`}
             >
               <div className="relative">
                 <img

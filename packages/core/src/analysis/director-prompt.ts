@@ -39,14 +39,17 @@ export function dossierToPromptText(
   }
 
   lines.push(
-    "  SHOTS (index  start-end  len  motion(0-255, <40 typical)  peak@  sharpness(~200+ = sharp)):",
+    "  SHOTS (index  start-end  len  motion(0-255, <40 typical)  peak@  sharpness(~200+ = sharp)  scene description):",
   );
   for (const shot of dossier.shots) {
     const len = shot.tEnd - shot.tStart;
+    const caption = shot.caption
+      ? `  "${shot.caption.length > 160 ? shot.caption.slice(0, 157) + "..." : shot.caption}"`
+      : "";
     lines.push(
       `    #${shot.index}  ${fmtS(shot.tStart)}-${fmtS(shot.tEnd)}s  ${fmtS(len)}s  ` +
         `motion ${Math.round(shot.motion.score)} peak@${fmtS(shot.motion.peakTime)}  ` +
-        `sharp ${Math.round(shot.quality.sharpness)}`,
+        `sharp ${Math.round(shot.quality.sharpness)}${caption}`,
     );
   }
 
@@ -83,7 +86,7 @@ export function dossiersToPromptText(dossiers: ClipDossier[]): string {
 }
 
 export function buildSystemPrompt(): string {
-  return `You are a video editor's director. You receive machine analysis ("dossiers") of raw clips: shot boundaries with motion and sharpness metrics, and a timecoded speech transcript. You have NOT seen the pixels. To learn what a shot shows visually, use the search_shots tool (CLIP text-to-image retrieval over the shots).
+  return `You are a video editor's director. You receive machine analysis ("dossiers") of raw clips: shot boundaries with motion and sharpness metrics, a machine-written scene description per shot, and a timecoded speech transcript. You have NOT seen the pixels. The scene descriptions tell you what each shot shows; use the search_shots tool (CLIP text-to-image retrieval) to verify pivotal picks or find things the descriptions may have missed.
 
 TOOLS
 - search_shots(query, topK): use short caption-style visual queries ("a person cutting open a durian", not "durian cutting scene analysis"). Results carry a "confident" flag: confident hits clearly separate from the rest of the footage and are trustworthy; non-confident hits are weak — corroborate them (transcript, motion, another query) or avoid building key moments on them. No confident hits usually means the footage does not contain it; do not force it.
@@ -98,12 +101,13 @@ EDITING CRAFT
 - Hit the target duration within ±10%. Add up your segment durations BEFORE submitting.
 
 DATA CAVEATS
+- Scene descriptions are written by a small local vision model from ONE representative frame per shot: reliable for scene gist, but they can miss small objects, miss things happening away from that frame in long shots, and state wrong details confidently. Corroborate the shots your cut depends on with search_shots.
 - The transcript comes from Whisper and hallucinates on non-speech or non-English audio: repeated loops ("check, check, check…"), stray phrases over music or wind. Distrust repetitive or context-free lines; treat them as no-speech.
 - A clip marked PARTIAL was only analyzed through the stated time; never select ranges beyond it.
 - Metrics are heuristics, not ground truth: use them to rank candidates, not as facts to assert.
 
 PROCESS
-Read the brief and dossiers; plan the arc (hook -> development -> payoff); run a few targeted searches to verify what the shots actually show; then submit. Be decisive — you have a limited number of tool rounds.`;
+Read the brief and dossiers — the scene descriptions ARE the footage as far as you can see it; plan the arc (hook -> development -> payoff) from them, the transcript, and the metrics. Then run a few targeted searches to verify your pivotal picks or hunt for anything the descriptions might have missed, and submit. Be decisive — you have a limited number of tool rounds.`;
 }
 
 export function buildBriefMessage(brief: string, targetDurationS: number | null): string {

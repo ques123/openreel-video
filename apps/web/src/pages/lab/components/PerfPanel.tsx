@@ -2,7 +2,7 @@ import type { LabClip, ModelStatus } from "../use-perception-lab";
 
 interface PerfPanelProps {
   clips: LabClip[];
-  models: { clip: ModelStatus; whisper: ModelStatus };
+  models: { clip: ModelStatus; whisper: ModelStatus; florence: ModelStatus };
 }
 
 function ModelRow({ name, status }: { name: string; status: ModelStatus }) {
@@ -34,6 +34,7 @@ export function PerfPanel({ clips, models }: PerfPanelProps) {
       <div className="space-y-1 mb-3">
         <ModelRow name="CLIP (vision+text)" status={models.clip} />
         <ModelRow name="Whisper" status={models.whisper} />
+        <ModelRow name="Florence (captions)" status={models.florence} />
       </div>
 
       {done.length > 0 && (
