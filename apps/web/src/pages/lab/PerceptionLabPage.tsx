@@ -2,18 +2,25 @@ import { useCallback, useMemo, useState } from "react";
 import type { SearchHit, Shot, TranscriptSegment } from "@openreel/core";
 import { useRouter } from "../../hooks/use-router";
 import { ClipDropZone } from "./components/ClipDropZone";
+import { DirectorPanel } from "./components/DirectorPanel";
 import { PerfPanel } from "./components/PerfPanel";
 import { SearchPanel } from "./components/SearchPanel";
 import { ShotFilmstrip } from "./components/ShotFilmstrip";
 import { ShotPreviewModal, type ShotPreview } from "./components/ShotPreviewModal";
+import { StoryboardList } from "./components/StoryboardList";
+import { StoryboardPreviewModal } from "./components/StoryboardPreviewModal";
 import { TranscriptPanel } from "./components/TranscriptPanel";
+import { useDirector } from "./use-director";
 import { usePerceptionLab, type LabClip } from "./use-perception-lab";
 
 export function PerceptionLabPage() {
   const { params } = useRouter();
   const forceDevice = params.device === "wasm" ? "wasm" : "auto";
-  const { state, addFiles, runSearch, getFile } = usePerceptionLab(forceDevice);
+  const { state, addFiles, runSearch, getFile, getDossiers, embedQuery } =
+    usePerceptionLab(forceDevice);
+  const director = useDirector({ getDossiers, embedQuery });
   const [preview, setPreview] = useState<ShotPreview | null>(null);
+  const [storyboardOpen, setStoryboardOpen] = useState(false);
 
   const openPreview = useCallback(
     (clipId: string, fileName: string, shot: Shot) => {
@@ -96,6 +103,22 @@ export function PerceptionLabPage() {
             </div>
 
             <div className="space-y-3">
+              <DirectorPanel
+                director={director}
+                ready={searchReady}
+                clipsDone={state.clips.filter((c) => c.status === "done").length}
+                clipsTotal={state.clips.length}
+              />
+              {director.state.storyboard && (
+                <StoryboardList
+                  storyboard={director.state.storyboard}
+                  warnings={director.state.warnings}
+                  targetDurationS={director.state.targetDurationS}
+                  onRemove={director.removeItem}
+                  onMove={director.moveItem}
+                  onPlay={() => setStoryboardOpen(true)}
+                />
+              )}
               <SearchPanel
                 hits={state.search.hits}
                 searching={state.search.searching}
@@ -110,6 +133,13 @@ export function PerceptionLabPage() {
         )}
       </div>
       {preview && <ShotPreviewModal preview={preview} onClose={() => setPreview(null)} />}
+      {storyboardOpen && director.state.storyboard && (
+        <StoryboardPreviewModal
+          storyboard={director.state.storyboard}
+          getFile={getFile}
+          onClose={() => setStoryboardOpen(false)}
+        />
+      )}
     </div>
   );
 }

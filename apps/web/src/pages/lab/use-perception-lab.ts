@@ -283,5 +283,14 @@ export function usePerceptionLab(forceDevice: "auto" | InferenceDevice = "auto")
 
   const getFile = useCallback((clipId: string) => filesRef.current.get(clipId) ?? null, []);
 
-  return { state, addFiles, runSearch, getFile };
+  /** Snapshot of all completed dossiers (for the director). */
+  const getDossiers = useCallback(() => [...dossiersRef.current.values()], []);
+
+  /** Embed a text query with the local CLIP text tower (for the director's search tool). */
+  const embedQuery = useCallback(
+    (query: string) => getOrchestrator().embedText(templateQuery(query), forceDevice),
+    [getOrchestrator, forceDevice],
+  );
+
+  return { state, addFiles, runSearch, getFile, getDossiers, embedQuery };
 }

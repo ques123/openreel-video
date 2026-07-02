@@ -51,6 +51,14 @@ export default defineConfig({
       "Cross-Origin-Opener-Policy": "same-origin",
       "Cross-Origin-Embedder-Policy": "require-corp",
     },
+    proxy: {
+      // Director LLM calls: forward to the deployed nginx (tailnet), which
+      // injects the OpenAI key server-side — no key on this machine.
+      "/api/proxy/openai": {
+        target: "https://openreel.pbrain.dev",
+        changeOrigin: true,
+      },
+    },
   },
   preview: {
     headers: {
