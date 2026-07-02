@@ -144,7 +144,11 @@ export function formatValidationFeedback(errors: string[], warnings: string[]): 
  * or reorders the user made in the UI since the last submit) so the model
  * revises what the user actually sees, not what it last submitted.
  */
-export function buildRefineMessage(feedback: string, current: Storyboard): string {
+export function buildRefineMessage(
+  feedback: string,
+  current: Storyboard,
+  targetDurationS: number | null = null,
+): string {
   const items = current.items.map((it) => ({
     clipId: it.clipId,
     shotIndex: it.shotIndex,
@@ -158,6 +162,9 @@ export function buildRefineMessage(feedback: string, current: Storyboard): strin
     `total ${fmtS(storyboardDurationS(current))}s):\n` +
     JSON.stringify({ title: current.title, items }, null, 1) +
     `\n\nUSER FEEDBACK: ${feedback.trim()}\n` +
+    (targetDurationS !== null
+      ? `TARGET DURATION is now ${fmtS(targetDurationS)}s (stay within ±10%).\n`
+      : "") +
     `Revise the storyboard accordingly (search more if needed) and submit_storyboard again.`
   );
 }

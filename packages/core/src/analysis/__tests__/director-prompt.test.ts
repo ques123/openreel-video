@@ -117,5 +117,13 @@ describe("feedback + refine messages", () => {
     expect(text).toContain('"out": 14.6');
     expect(text).toContain("total 4.6s");
     expect(text).toContain("USER FEEDBACK: less talking");
+    expect(text).not.toContain("TARGET DURATION");
+  });
+
+  it("states the (possibly retuned) target on refine", () => {
+    const storyboard: Storyboard = { title: null, notes: null, items: [] };
+    expect(buildRefineMessage("shorter", storyboard, 12)).toContain(
+      "TARGET DURATION is now 12.0s",
+    );
   });
 });

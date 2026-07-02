@@ -193,17 +193,22 @@ export function useDirector(deps: UseDirectorDeps) {
   );
 
   const refine = useCallback(
-    (feedback: string) => {
+    // The target rides along so the user can retune duration between rounds
+    // (feedback like "make it 12s" would otherwise fight the old target).
+    (feedback: string, targetDurationS: number | null) => {
       if (state.phase !== "awaiting-refine" || !state.storyboard) return;
       // The refine message is committed to history only if the run succeeds
       // (runLoop stores result.messages) — a failed run doesn't pollute it.
       const messages: ChatMessage[] = [
         ...messagesRef.current,
-        { role: "user", content: buildRefineMessage(feedback, state.storyboard) },
+        {
+          role: "user",
+          content: buildRefineMessage(feedback, state.storyboard, targetDurationS),
+        },
       ];
-      void runLoop(messages, state.targetDurationS);
+      void runLoop(messages, targetDurationS);
     },
-    [state.phase, state.storyboard, state.targetDurationS, runLoop],
+    [state.phase, state.storyboard, runLoop],
   );
 
   const cancel = useCallback(() => abortRef.current?.abort(), []);

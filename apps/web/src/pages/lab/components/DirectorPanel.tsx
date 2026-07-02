@@ -138,7 +138,7 @@ export function DirectorPanel({ director, ready, clipsDone, clipsTotal }: Direct
           onSubmit={(e) => {
             e.preventDefault();
             if (feedback.trim()) {
-              refine(feedback.trim());
+              refine(feedback.trim(), targetS);
               setFeedback("");
             }
           }}
