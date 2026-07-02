@@ -65,6 +65,10 @@ export function ShotFilmstrip({ clip, highlights, onShotClick }: ShotFilmstripPr
           <span className="text-xs text-text-secondary">
             {clip.shots.length} shot{clip.shots.length === 1 ? "" : "s"}
             {clip.shots.length > 0 && ` · ${clip.embeddedCount} embedded`}
+            {clip.captionsTotal > 0 &&
+              (clip.captionsDone < clip.captionsTotal
+                ? ` · describing ${clip.captionsDone}/${clip.captionsTotal}`
+                : ` · ${clip.captionsTotal} descriptions`)}
           </span>
         </div>
       </div>

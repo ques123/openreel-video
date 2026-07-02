@@ -46,6 +46,13 @@ export interface Shot {
   caption: string | null;
 }
 
+/** One timestamped machine scene description from the dense caption pass. */
+export interface DenseCaption {
+  /** Media time of the described frame, seconds. */
+  t: number;
+  text: string;
+}
+
 export interface TranscriptSegment {
   t0: number;
   t1: number;
@@ -96,6 +103,12 @@ export interface ClipDossier {
   width: number;
   height: number;
   shots: Shot[];
+  /**
+   * Timestamped scene descriptions every ~2s of footage (Florence over frames
+   * sampled during decode). Far denser than shots — this is how the director
+   * "watches" long takes. Grows in the background after analysis.
+   */
+  denseCaptions: DenseCaption[];
   transcript: TranscriptSegment[];
   perf: DossierPerf;
 }
@@ -126,6 +139,7 @@ export type FunnelProgressEvent =
     }
   | { kind: "shot-embedded"; clipId: string; shotIndex: number }
   | { kind: "shot-captioned"; clipId: string; shotIndex: number; caption: string }
+  | { kind: "dense-captions"; clipId: string; done: number; total: number }
   | { kind: "transcript"; clipId: string; segments: TranscriptSegment[] }
   | {
       kind: "model-progress";
@@ -143,7 +157,7 @@ export type FunnelProgressEvent =
   | { kind: "clip-done"; clipId: string; dossier: ClipDossier }
   | { kind: "clip-error"; clipId: string; message: string };
 
-export const DOSSIER_VERSION = 2 as const;
+export const DOSSIER_VERSION = 3 as const;
 
 /** Default sampling parameters for the visual pass. */
 export const FUNNEL_DEFAULTS = {
@@ -156,6 +170,8 @@ export const FUNNEL_DEFAULTS = {
   boundaryK: 3,
   /** Sliding window (in samples) for the adaptive threshold (~4s at 6fps). */
   boundaryWindow: 24,
+  /** Capture a frame for dense captioning every this many seconds of media. */
+  denseCaptionEveryS: 2,
   /** Rep frame is the sharpest sample within this many seconds of the motion peak. */
   repFramePeakRadiusS: 0.5,
   thumbnailQuality: 0.7,

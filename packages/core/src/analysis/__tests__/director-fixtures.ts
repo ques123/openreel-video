@@ -50,6 +50,7 @@ export function makeDossier(
     durationS?: number;
     analyzedThroughS?: number | null;
     shots?: Shot[];
+    denseCaptions?: { t: number; text: string }[];
     transcript?: TranscriptSegment[];
   } = {},
 ): ClipDossier {
@@ -64,6 +65,7 @@ export function makeDossier(
     width: 1920,
     height: 1080,
     shots: opts.shots ?? [makeShot(0, 0, 10), makeShot(1, 10, 25), makeShot(2, 25, 60)],
+    denseCaptions: opts.denseCaptions ?? [],
     transcript: opts.transcript ?? [],
     perf,
   };

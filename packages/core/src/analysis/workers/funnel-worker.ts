@@ -175,6 +175,7 @@ async function analyze(req: Extract<FunnelRequest, { type: "analyze" }>) {
 
     let prevHist: Float32Array | null = null;
     let prevGray: Uint8Array | null = null;
+    let nextDenseAt = 0;
     let framesDone = 0;
     let shotStartIndex = 0;
     let shotIndex = 0;
@@ -265,6 +266,17 @@ async function analyze(req: Extract<FunnelRequest, { type: "analyze" }>) {
         sharpness: laplacianVariance(gray, img.width, img.height),
       });
       retained.set(i, { t: wrapped.timestamp, rgba: img.data, width: img.width, height: img.height });
+
+      // Dense caption frames: a small JPEG every ~2s of media time for the
+      // background Florence pass (shots are far too coarse on long takes).
+      if (wrapped.timestamp >= nextDenseAt) {
+        nextDenseAt = wrapped.timestamp + FUNNEL_DEFAULTS.denseCaptionEveryS;
+        const jpeg = await encodeJpeg(
+          { t: wrapped.timestamp, rgba: img.data, width: img.width, height: img.height },
+          FUNNEL_DEFAULTS.thumbnailQuality,
+        );
+        post({ type: "dense-frame", requestId, clipId, t: wrapped.timestamp, jpeg }, [jpeg]);
+      }
 
       // Keepers: spaced snapshots for multi-frame shot embeddings.
       if (i >= nextKeepAt) {

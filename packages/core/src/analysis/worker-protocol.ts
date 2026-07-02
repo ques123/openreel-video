@@ -88,6 +88,15 @@ export interface FunnelShotResponse {
   frames: RepFramePixels[];
 }
 
+/** A frame sampled every ~denseCaptionEveryS for the caption pass (jpeg transferred). */
+export interface FunnelDenseFrameResponse {
+  type: "dense-frame";
+  requestId: string;
+  clipId: string;
+  t: number;
+  jpeg: ArrayBuffer;
+}
+
 export interface FunnelDoneResponse {
   type: "done";
   requestId: string;
@@ -112,6 +121,7 @@ export type FunnelResponse =
   | FunnelProgressResponse
   | FunnelIngestProgressResponse
   | FunnelShotResponse
+  | FunnelDenseFrameResponse
   | FunnelDoneResponse
   | FunnelErrorResponse;
 
