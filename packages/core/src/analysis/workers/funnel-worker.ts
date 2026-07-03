@@ -155,14 +155,14 @@ async function analyze(req: Extract<FunnelRequest, { type: "analyze" }>) {
     const timestamps = Array.from({ length: frameCount }, (_, i) => i / sampleFps);
 
     // Pass 1 state: metrics per sampled frame + retained pixel copies.
-    // At 256px wide (~256x144 RGBA = ~148KB/frame) a 10-min clip at 6fps
-    // retains ~530MB — too much. We retain a bounded window: since shots are
-    // finalized as soon as the NEXT boundary fires, we only need frames since
-    // the last boundary. We cap retention and degrade gracefully by dropping
-    // the oldest non-candidate frames if a single shot runs very long.
+    // At 512px wide (~512x288 RGBA = ~590KB/frame) full retention is out of
+    // the question. We retain a bounded window: since shots are finalized as
+    // soon as the NEXT boundary fires, we only need frames since the last
+    // boundary. We cap retention and degrade gracefully by dropping the
+    // oldest non-candidate frames if a single shot runs very long.
     const samples: FrameSample[] = [];
     const retained = new Map<number, RetainedFrame>(); // sample index -> frame
-    const MAX_RETAINED = 240; // ~40s of shot at 6fps, ~35MB worst case
+    const MAX_RETAINED = 120; // ~20s of shot at 6fps, ~70MB worst case at 512px
 
     // "Keepers": spaced snapshots across the CURRENT shot so long shots get
     // several embedding frames (retained only covers the trailing window).
@@ -175,7 +175,10 @@ async function analyze(req: Extract<FunnelRequest, { type: "analyze" }>) {
 
     let prevHist: Float32Array | null = null;
     let prevGray: Uint8Array | null = null;
+    // Adaptive dense sampler state: last KEPT frame's histogram + time.
     let nextDenseAt = 0;
+    let lastDenseHist: Float32Array | null = null;
+    let lastDenseT = -Infinity;
     let framesDone = 0;
     let shotStartIndex = 0;
     let shotIndex = 0;
@@ -267,15 +270,26 @@ async function analyze(req: Extract<FunnelRequest, { type: "analyze" }>) {
       });
       retained.set(i, { t: wrapped.timestamp, rgba: img.data, width: img.width, height: img.height });
 
-      // Dense caption frames: a small JPEG every ~2s of media time for the
-      // background Florence pass (shots are far too coarse on long takes).
+      // Dense caption frames, adaptively sampled: consider a frame at most
+      // every denseCaptionEveryS, but KEEP it only when the scene visibly
+      // changed since the last kept frame (hist distance) or a max gap
+      // elapsed. Static takes cost a frame per maxGap; every real scene
+      // change still lands its own frame.
       if (wrapped.timestamp >= nextDenseAt) {
         nextDenseAt = wrapped.timestamp + FUNNEL_DEFAULTS.denseCaptionEveryS;
-        const jpeg = await encodeJpeg(
-          { t: wrapped.timestamp, rgba: img.data, width: img.width, height: img.height },
-          FUNNEL_DEFAULTS.thumbnailQuality,
-        );
-        post({ type: "dense-frame", requestId, clipId, t: wrapped.timestamp, jpeg }, [jpeg]);
+        const changed =
+          lastDenseHist === null ||
+          histDistance(lastDenseHist, hist) > FUNNEL_DEFAULTS.denseCaptionMinDelta ||
+          wrapped.timestamp - lastDenseT >= FUNNEL_DEFAULTS.denseCaptionMaxGapS;
+        if (changed) {
+          lastDenseHist = hist;
+          lastDenseT = wrapped.timestamp;
+          const jpeg = await encodeJpeg(
+            { t: wrapped.timestamp, rgba: img.data, width: img.width, height: img.height },
+            FUNNEL_DEFAULTS.denseFrameQuality,
+          );
+          post({ type: "dense-frame", requestId, clipId, t: wrapped.timestamp, jpeg }, [jpeg]);
+        }
       }
 
       // Keepers: spaced snapshots for multi-frame shot embeddings.

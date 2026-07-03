@@ -47,8 +47,8 @@ describe("dossierToPromptText", () => {
     expect(text).not.toContain(`[45.0-46.0]`);
   });
 
-  it("includes scene descriptions when captioned, truncated at 160 chars", () => {
-    const long = "a ".repeat(120).trim();
+  it("includes scene descriptions when captioned, truncated at 240 chars", () => {
+    const long = "a ".repeat(140).trim();
     const text = dossierToPromptText(
       makeDossier({
         shots: [
@@ -60,6 +60,26 @@ describe("dossierToPromptText", () => {
     expect(text).toContain('sharp 500  "a man cuts open a durian at a market stall"');
     expect(text).toContain('..."');
     expect(text).toContain("scene description");
+  });
+
+  it("prefers cloud captions and the cloud timeline when present", () => {
+    const text = dossierToPromptText(
+      makeDossier({
+        shots: [
+          makeShot(0, 0, 10, {
+            caption: "a market",
+            cloudCaption: "a vendor slices durian for waiting customers",
+          }),
+        ],
+        denseCaptions: [{ t: 0, text: "local caption" }],
+        cloudDenseCaptions: [{ t: 0, text: "cloud caption with real detail" }],
+      }),
+    );
+    expect(text).toContain('"a vendor slices durian for waiting customers"');
+    expect(text).not.toContain('"a market"');
+    expect(text).toContain("CLOUD-ENHANCED");
+    expect(text).toContain("cloud caption with real detail");
+    expect(text).not.toContain("local caption");
   });
 
   it("renders a merged scene timeline from dense captions", () => {

@@ -83,7 +83,10 @@ export interface FunnelShotResponse {
   type: "shot";
   requestId: string;
   clipId: string;
-  shot: Omit<Shot, "embedding" | "frameEmbeddings" | "thumbnailDataUrl" | "caption">;
+  shot: Omit<
+    Shot,
+    "embedding" | "frameEmbeddings" | "thumbnailDataUrl" | "caption" | "cloudCaption"
+  >;
   thumbJpeg: ArrayBuffer;
   frames: RepFramePixels[];
 }

@@ -5,7 +5,7 @@ export function makeShot(
   index: number,
   tStart: number,
   tEnd: number,
-  opts: Partial<Pick<Shot, "thumbnailDataUrl" | "caption">> & {
+  opts: Partial<Pick<Shot, "thumbnailDataUrl" | "caption" | "cloudCaption">> & {
     motion?: number;
     sharpness?: number;
   } = {},
@@ -19,6 +19,7 @@ export function makeShot(
     embedding: null,
     frameEmbeddings: [],
     caption: opts.caption ?? null,
+    cloudCaption: opts.cloudCaption ?? null,
     motion: { score: opts.motion ?? 10, peakTime: (tStart + tEnd) / 2 },
     quality: { sharpness: opts.sharpness ?? 500 },
   };
@@ -50,14 +51,17 @@ export function makeDossier(
     durationS?: number;
     analyzedThroughS?: number | null;
     shots?: Shot[];
+    denseFrames?: { t: number; dataUrl: string }[];
     denseCaptions?: { t: number; text: string }[];
+    cloudDenseCaptions?: { t: number; text: string }[];
+    cloudVision?: ClipDossier["cloudVision"];
     transcript?: TranscriptSegment[];
   } = {},
 ): ClipDossier {
   return {
     version: DOSSIER_VERSION,
     clipId: opts.clipId ?? "clip-a",
-    cacheKey: "perception:v2:test:0:0",
+    cacheKey: "perception:v4:test:0:0",
     fileName: opts.fileName ?? "test.mp4",
     recordedAt: opts.recordedAt ?? null,
     durationS: opts.durationS ?? 60,
@@ -65,7 +69,10 @@ export function makeDossier(
     width: 1920,
     height: 1080,
     shots: opts.shots ?? [makeShot(0, 0, 10), makeShot(1, 10, 25), makeShot(2, 25, 60)],
+    denseFrames: opts.denseFrames ?? [],
     denseCaptions: opts.denseCaptions ?? [],
+    cloudDenseCaptions: opts.cloudDenseCaptions ?? [],
+    cloudVision: opts.cloudVision ?? null,
     transcript: opts.transcript ?? [],
     perf,
   };

@@ -2,11 +2,12 @@
  * Text -> shot retrieval over dossier embeddings.
  * All embeddings are L2-normalized, so cosine similarity = dot product.
  *
- * CLIP cosine scores are only meaningful RELATIVE to each other — the
- * population of scores for a query typically sits around 0.15-0.22, with
- * true matches a few standard deviations above. We therefore label a hit
- * `confident` when it clearly separates from the field (z-score) or sits
- * within a whisker of the best hit; the UI de-emphasizes the rest.
+ * Two-tower cosine scores are only meaningful RELATIVE to each other — the
+ * population of scores for a query sits in a model-specific band (CLIP
+ * ~0.15-0.22; SigLIP2 lower, often near 0), with true matches a few standard
+ * deviations above. We therefore label a hit `confident` when it clearly
+ * separates from the field (z-score) or sits within a whisker of the best
+ * hit; the UI de-emphasizes the rest.
  */
 
 import { dot } from "./shot-metrics";

@@ -4,9 +4,9 @@ import type { ClipDossier } from "../types";
 
 function makeDossier(): ClipDossier {
   return {
-    version: 3,
+    version: 4,
     clipId: "clip-1",
-    cacheKey: "perception:v1:test.mp4:123:456",
+    cacheKey: "perception:v4:test.mp4:123:456",
     fileName: "test.mp4",
     recordedAt: 456,
     durationS: 12.5,
@@ -27,6 +27,7 @@ function makeDossier(): ClipDossier {
         ],
         motion: { score: 4.2, peakTime: 3.1 },
         caption: "a man walks through a market",
+        cloudCaption: "a man browses durian stalls in a covered market, warm light",
         quality: { sharpness: 812.5 },
       },
       {
@@ -39,10 +40,14 @@ function makeDossier(): ClipDossier {
         frameEmbeddings: [],
         motion: { score: 0.8, peakTime: 7.5 },
         caption: null,
+        cloudCaption: null,
         quality: { sharpness: 55 },
       },
     ],
+    denseFrames: [{ t: 2, dataUrl: "data:image/jpeg;base64,frame2" }],
     denseCaptions: [{ t: 2, text: "a market street" }],
+    cloudDenseCaptions: [{ t: 2, text: "a bustling market street at dusk" }],
+    cloudVision: { model: "gpt-5.2", scope: "timeline", enhancedAt: 1234567 },
     transcript: [{ t0: 0.5, t1: 4.2, text: "we finally made it to the falls" }],
     perf: {
       ingestMs: 800,

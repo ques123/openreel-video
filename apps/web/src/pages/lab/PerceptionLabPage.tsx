@@ -1,5 +1,11 @@
 import { useCallback, useMemo, useState } from "react";
-import type { DenseCaption, SearchHit, Shot, TranscriptSegment } from "@openreel/core";
+import type {
+  CloudScope,
+  DenseCaption,
+  SearchHit,
+  Shot,
+  TranscriptSegment,
+} from "@openreel/core";
 import { useRouter } from "../../hooks/use-router";
 import { ClipDropZone } from "./components/ClipDropZone";
 import { DirectorPanel } from "./components/DirectorPanel";
@@ -17,12 +23,16 @@ import { usePerceptionLab, type LabClip } from "./use-perception-lab";
 export function PerceptionLabPage() {
   const { params } = useRouter();
   const forceDevice = params.device === "wasm" ? "wasm" : "auto";
-  const { state, addFiles, runSearch, getFile, getDossiers, embedQuery } =
+  const { state, addFiles, runSearch, getFile, getDossiers, embedQuery, enhanceClip } =
     usePerceptionLab(forceDevice);
   const director = useDirector({ getDossiers, embedQuery });
   const [preview, setPreview] = useState<ShotPreview | null>(null);
   /** Segment index to start storyboard playback from; null = closed. */
   const [storyboardStart, setStoryboardStart] = useState<number | null>(null);
+  // Cloud vision opt-in: session-only (deliberately NOT persisted — each
+  // session re-consents) + per-run scope dial.
+  const [cloudEnabled, setCloudEnabled] = useState(false);
+  const [cloudScope, setCloudScope] = useState<CloudScope>("shots");
 
   const openPreview = useCallback(
     (clipId: string, fileName: string, shot: Shot) => {
@@ -104,18 +114,47 @@ export function PerceptionLabPage() {
   );
 
   const searchReady =
-    state.models.clip.state === "ready" &&
+    state.models.embed.state === "ready" &&
     state.clips.some((c) => c.status === "done");
 
   return (
     <div className="h-full overflow-y-auto bg-background">
       <div className="max-w-6xl mx-auto p-6">
-        <header className="mb-6">
-          <h1 className="text-xl font-semibold text-text-primary">Perception Lab</h1>
-          <p className="text-sm text-text-secondary">
-            Stage ② spike — drop clips, watch them get understood. 100% local:
-            shots, motion, CLIP embeddings & Whisper run in your browser.
-          </p>
+        <header className="mb-6 flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h1 className="text-xl font-semibold text-text-primary">Perception Lab</h1>
+            <p className="text-sm text-text-secondary">
+              Stage ② spike — drop clips, watch them get understood. 100% local:
+              shots, motion, SigLIP2 embeddings, FastVLM captions & Whisper run
+              in your browser.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 text-xs">
+            <label className="flex items-center gap-1.5 cursor-pointer select-none text-text-secondary">
+              <input
+                type="checkbox"
+                checked={cloudEnabled}
+                onChange={(e) => setCloudEnabled(e.target.checked)}
+              />
+              <span>
+                Cloud vision{" "}
+                <span className="text-text-secondary/70">
+                  — sampled frames leave this device (OpenAI)
+                </span>
+              </span>
+            </label>
+            {cloudEnabled && (
+              <select
+                className="bg-background-secondary border border-border rounded px-1.5 py-0.5 text-text-primary"
+                value={cloudScope}
+                onChange={(e) => setCloudScope(e.target.value as CloudScope)}
+                title="How much to send per enhance: one frame per shot, or the full sampled timeline"
+              >
+                <option value="shots">shots only</option>
+                <option value="timeline">full timeline</option>
+              </select>
+            )}
+          </div>
         </header>
 
         {state.clips.length === 0 ? (
@@ -129,6 +168,9 @@ export function PerceptionLabPage() {
                   clip={clip}
                   highlights={highlightsByClip.get(clip.clipId) ?? new Map()}
                   onShotClick={(shot) => openPreview(clip.clipId, clip.fileName, shot)}
+                  onEnhance={
+                    cloudEnabled ? () => void enhanceClip(clip.clipId, cloudScope) : null
+                  }
                 />
               ))}
               <ClipDropZone onFiles={addFiles} compact />
