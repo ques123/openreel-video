@@ -5,6 +5,10 @@ export interface ShotPreview {
   file: File;
   fileName: string;
   shot: Shot;
+  /** Seek here instead of the shot start (e.g. a scene-timeline caption's frame). */
+  startAtS?: number;
+  /** Caption to show in the header instead of the shot's own. */
+  caption?: string;
 }
 
 interface ShotPreviewModalProps {
@@ -25,6 +29,8 @@ function fmtTime(s: number): string {
  */
 export function ShotPreviewModal({ preview, onClose }: ShotPreviewModalProps) {
   const { file, fileName, shot } = preview;
+  const startAtS = preview.startAtS ?? shot.tStart;
+  const headerCaption = preview.caption ?? shot.caption;
   const videoRef = useRef<HTMLVideoElement>(null);
   const [pastEnd, setPastEnd] = useState(false);
   const [playbackError, setPlaybackError] = useState<string | null>(null);
@@ -67,9 +73,9 @@ export function ShotPreviewModal({ preview, onClose }: ShotPreviewModalProps) {
               shot {shot.index} · {fmtTime(shot.tStart)}–{fmtTime(shot.tEnd)}
               {pastEnd && " · past shot end"}
             </p>
-            {shot.caption && (
+            {headerCaption && (
               <p className="text-xs text-text-secondary/90 italic leading-snug mt-0.5">
-                {shot.caption}
+                {headerCaption}
               </p>
             )}
           </div>
@@ -103,7 +109,7 @@ export function ShotPreviewModal({ preview, onClose }: ShotPreviewModalProps) {
             setPlaybackError(e.currentTarget.error?.message || "format not supported")
           }
           onLoadedMetadata={(e) => {
-            e.currentTarget.currentTime = shot.tStart;
+            e.currentTarget.currentTime = startAtS;
           }}
           onTimeUpdate={(e) => {
             const v = e.currentTarget;
