@@ -1,6 +1,7 @@
 /**
  * Perception funnel: fully-local clip analysis (shots, motion, quality,
- * CLIP embeddings, Whisper transcript) producing cached ClipDossiers.
+ * SigLIP2 embeddings, VLM captions, Whisper transcript) producing cached
+ * ClipDossiers.
  *
  * NOTE: workers/* are worker entry points and are deliberately NOT exported
  * here — they are referenced only via create-workers.ts.
@@ -12,6 +13,7 @@ export * from "./shot-metrics";
 export * from "./retrieval";
 export * from "./dossier-cache";
 export * from "./caption-text";
+export * from "./cloud-vision-plan";
 export * from "./director-types";
 export * from "./director-prompt";
 export * from "./storyboard";

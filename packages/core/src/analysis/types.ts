@@ -26,9 +26,9 @@ export interface Shot {
   tEnd: number;
   /** Timestamp of the representative frame, seconds. */
   repFrameTime: number;
-  /** Small JPEG data URL (~256px wide) of the representative frame. */
+  /** JPEG data URL (~512px wide) of the representative frame. */
   thumbnailDataUrl: string;
-  /** 512-d L2-normalized CLIP embedding of the representative frame. Null until embedded. */
+  /** L2-normalized SigLIP2 embedding of the representative frame. Null until embedded. */
   embedding: Float32Array | null;
   /**
    * Embeddings of several frames sampled across the shot (rep frame first).
@@ -40,10 +40,15 @@ export interface Shot {
   quality: ShotQuality;
   /**
    * Machine-written scene description of the representative frame (local
-   * Florence-2 pass). Null until the caption pass reaches this shot. Good for
+   * VLM pass). Null until the caption pass reaches this shot. Good for
    * scene gist; may miss small objects or assert details wrongly.
    */
   caption: string | null;
+  /**
+   * Description from the opt-in cloud vision pass (large model, much more
+   * reliable than the local caption). Null unless the user ran an enhance.
+   */
+  cloudCaption: string | null;
 }
 
 /** One timestamped machine scene description from the dense caption pass. */
@@ -51,6 +56,21 @@ export interface DenseCaption {
   /** Media time of the described frame, seconds. */
   t: number;
   text: string;
+}
+
+/** One frame kept by the adaptive dense sampler (512px JPEG data URL). */
+export interface DenseFrame {
+  /** Media time, seconds. */
+  t: number;
+  dataUrl: string;
+}
+
+/** Provenance of an opt-in cloud vision enhance run. */
+export interface CloudVisionMeta {
+  model: string;
+  scope: "shots" | "timeline";
+  /** Epoch ms when the enhance completed. */
+  enhancedAt: number;
 }
 
 export interface TranscriptSegment {
@@ -104,11 +124,22 @@ export interface ClipDossier {
   height: number;
   shots: Shot[];
   /**
-   * Timestamped scene descriptions every ~2s of footage (Florence over frames
-   * sampled during decode). Far denser than shots — this is how the director
-   * "watches" long takes. Grows in the background after analysis.
+   * Frames the adaptive sampler kept during decode (512px JPEGs): one on
+   * every meaningful visual change, at most every denseCaptionMaxGapS.
+   * Persisted so captions can resume/re-run and cloud enhancement can send
+   * real frames — all WITHOUT re-decoding the video.
+   */
+  denseFrames: DenseFrame[];
+  /**
+   * Timestamped scene descriptions of the dense frames (local VLM). Far
+   * denser than shots — this is how the director "watches" long takes.
+   * Grows in the background after analysis.
    */
   denseCaptions: DenseCaption[];
+  /** Cloud descriptions of the dense frames (opt-in enhance, scope "timeline"). */
+  cloudDenseCaptions: DenseCaption[];
+  /** Non-null once an opt-in cloud vision enhance has run on this clip. */
+  cloudVision: CloudVisionMeta | null;
   transcript: TranscriptSegment[];
   perf: DossierPerf;
 }
@@ -143,26 +174,26 @@ export type FunnelProgressEvent =
   | { kind: "transcript"; clipId: string; segments: TranscriptSegment[] }
   | {
       kind: "model-progress";
-      model: "clip" | "whisper" | "florence";
+      model: "embed" | "whisper" | "captioner";
       file: string;
       loaded: number;
       total: number;
     }
   | {
       kind: "model-ready";
-      model: "clip" | "whisper" | "florence";
+      model: "embed" | "whisper" | "captioner";
       device: InferenceDevice;
       loadMs: number;
     }
   | { kind: "clip-done"; clipId: string; dossier: ClipDossier }
   | { kind: "clip-error"; clipId: string; message: string };
 
-export const DOSSIER_VERSION = 3 as const;
+export const DOSSIER_VERSION = 4 as const;
 
 /** Default sampling parameters for the visual pass. */
 export const FUNNEL_DEFAULTS = {
   sampleFps: 6,
-  targetWidth: 256,
+  targetWidth: 512,
   minShotLengthS: 1.0,
   /** Absolute floor for the boundary distance threshold (L1 on normalized hists, range 0..2). */
   boundaryAbsFloor: 0.35,
@@ -170,8 +201,18 @@ export const FUNNEL_DEFAULTS = {
   boundaryK: 3,
   /** Sliding window (in samples) for the adaptive threshold (~4s at 6fps). */
   boundaryWindow: 24,
-  /** Capture a frame for dense captioning every this many seconds of media. */
+  /** Consider a frame for dense captioning at most every this many seconds. */
   denseCaptionEveryS: 2,
+  /**
+   * Keep a considered frame only when its HSV-hist distance from the LAST
+   * KEPT frame exceeds this (scene visibly changed)... (L1, range 0..2 —
+   * cuts land ~0.35+, same-scene drift stays well under 0.1).
+   */
+  denseCaptionMinDelta: 0.12,
+  /** ...or when this many seconds passed since the last kept frame. */
+  denseCaptionMaxGapS: 10,
+  /** JPEG quality for persisted dense frames (they feed local + cloud captioning). */
+  denseFrameQuality: 0.8,
   /** Rep frame is the sharpest sample within this many seconds of the motion peak. */
   repFramePeakRadiusS: 0.5,
   thumbnailQuality: 0.7,

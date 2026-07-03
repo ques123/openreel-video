@@ -13,13 +13,16 @@ function fmtTime(s: number): string {
 }
 
 /**
- * Every dense Florence description, raw and timestamped — the unmerged
- * source material behind the director's SCENE TIMELINE. Grows live while
- * the background caption pass runs.
+ * Every raw timestamped scene description — the unmerged source material
+ * behind the director's SCENE TIMELINE. Grows live while the background
+ * caption pass runs; shows the cloud-enhanced timeline when one exists.
  */
 export function SceneTimelinePanel({ clips, onCaptionClick }: SceneTimelinePanelProps) {
   const withCaptions = clips.filter(
-    (c) => (c.dossier?.denseCaptions.length ?? 0) > 0 || c.captionsTotal > 0,
+    (c) =>
+      (c.dossier?.denseCaptions.length ?? 0) > 0 ||
+      (c.dossier?.cloudDenseCaptions.length ?? 0) > 0 ||
+      c.captionsTotal > 0,
   );
 
   return (
@@ -27,21 +30,24 @@ export function SceneTimelinePanel({ clips, onCaptionClick }: SceneTimelinePanel
       <h3 className="text-sm font-semibold text-text-primary mb-2">Scene timeline</h3>
       {withCaptions.length === 0 ? (
         <p className="text-xs text-text-secondary">
-          No scene descriptions yet. Florence describes a frame every ~2s of
-          footage after each clip's analysis finishes.
+          No scene descriptions yet. The local vision model describes sampled
+          frames after each clip's analysis finishes.
         </p>
       ) : (
         <div className="space-y-3 max-h-96 overflow-y-auto">
           {withCaptions.map((clip) => {
-            const captions = clip.dossier?.denseCaptions ?? [];
+            const cloud = clip.dossier?.cloudDenseCaptions ?? [];
+            const captions = cloud.length > 0 ? cloud : (clip.dossier?.denseCaptions ?? []);
             return (
               <div key={clip.clipId}>
                 <p className="text-xs font-medium text-text-secondary mb-1 truncate">
                   {clip.fileName}
                   <span className="font-normal ml-1.5">
-                    {clip.captionsTotal > 0 && clip.captionsDone < clip.captionsTotal
-                      ? `describing ${clip.captionsDone}/${clip.captionsTotal}…`
-                      : `${captions.length} descriptions`}
+                    {cloud.length > 0
+                      ? `${captions.length} descriptions · cloud`
+                      : clip.captionsTotal > 0 && clip.captionsDone < clip.captionsTotal
+                        ? `describing ${clip.captionsDone}/${clip.captionsTotal}…`
+                        : `${captions.length} descriptions`}
                   </span>
                 </p>
                 <ul className="space-y-0.5">

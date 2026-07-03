@@ -46,8 +46,11 @@ export function dossierToPromptText(
   );
   for (const shot of dossier.shots) {
     const len = shot.tEnd - shot.tStart;
-    const caption = shot.caption
-      ? `  "${shot.caption.length > 160 ? shot.caption.slice(0, 157) + "..." : shot.caption}"`
+    // Cloud descriptions (opt-in enhance, large model) trump local ones.
+    const text = shot.cloudCaption ?? shot.caption;
+    const maxLen = 240;
+    const caption = text
+      ? `  "${text.length > maxLen ? text.slice(0, maxLen - 3) + "..." : text}"`
       : "";
     lines.push(
       `    #${shot.index}  ${fmtS(shot.tStart)}-${fmtS(shot.tEnd)}s  ${fmtS(len)}s  ` +
@@ -56,10 +59,14 @@ export function dossierToPromptText(
     );
   }
 
-  if (dossier.denseCaptions.length > 0) {
-    const segments = mergeDenseCaptions(dossier.denseCaptions);
+  const useCloudTimeline = dossier.cloudDenseCaptions.length > 0;
+  const timeline = useCloudTimeline ? dossier.cloudDenseCaptions : dossier.denseCaptions;
+  if (timeline.length > 0) {
+    const segments = mergeDenseCaptions(timeline);
     lines.push(
-      `  SCENE TIMELINE (machine descriptions sampled every ~2s, similar neighbors merged):`,
+      useCloudTimeline
+        ? `  SCENE TIMELINE (CLOUD-ENHANCED — large vision model, considerably more reliable; sampled on visual change, similar neighbors merged):`
+        : `  SCENE TIMELINE (machine descriptions sampled on visual change, similar neighbors merged):`,
     );
     let used = 0;
     for (const seg of segments) {
@@ -108,7 +115,7 @@ export function dossiersToPromptText(dossiers: ClipDossier[]): string {
 }
 
 export function buildSystemPrompt(): string {
-  return `You are a video editor's director. You receive machine analysis ("dossiers") of raw clips: shot boundaries with motion and sharpness metrics, a machine-written scene description per shot, and a timecoded speech transcript. You have NOT seen the pixels. The scene descriptions tell you what each shot shows; use the search_shots tool (CLIP text-to-image retrieval) to verify pivotal picks or find things the descriptions may have missed.
+  return `You are a video editor's director. You receive machine analysis ("dossiers") of raw clips: shot boundaries with motion and sharpness metrics, a machine-written scene description per shot, and a timecoded speech transcript. You have NOT seen the pixels. The scene descriptions tell you what each shot shows; use the search_shots tool (text-to-image embedding retrieval) to verify pivotal picks or find things the descriptions may have missed.
 
 TOOLS
 - search_shots(query, topK): use short caption-style visual queries ("a person cutting open a durian", not "durian cutting scene analysis"). Results carry a "confident" flag: confident hits clearly separate from the rest of the footage and are trustworthy; non-confident hits are weak — corroborate them (transcript, motion, another query) or avoid building key moments on them. No confident hits usually means the footage does not contain it; do not force it.
@@ -123,7 +130,8 @@ EDITING CRAFT
 - Hit the target duration within ±10%. Add up your segment durations BEFORE submitting.
 
 DATA CAVEATS
-- Scene descriptions are written by a small local vision model from ONE representative frame per shot: reliable for scene gist, but they can miss small objects, miss things happening away from that frame in long shots, and state wrong details confidently. Corroborate the shots your cut depends on with search_shots.
+- Scene descriptions are written by a small local vision model from single frames: reliable for scene gist, subject, action and mood, but they can miss small objects, miss things happening between sampled frames, and state wrong details confidently. Corroborate the shots your cut depends on with search_shots.
+- Sections marked CLOUD-ENHANCED come from a large vision model and are considerably more reliable — trust them over metrics when they disagree.
 - The transcript comes from Whisper and hallucinates on non-speech or non-English audio: repeated loops ("check, check, check…"), stray phrases over music or wind. Distrust repetitive or context-free lines; treat them as no-speech.
 - A clip marked PARTIAL was only analyzed through the stated time; never select ranges beyond it.
 - Metrics are heuristics, not ground truth: use them to rank candidates, not as facts to assert.

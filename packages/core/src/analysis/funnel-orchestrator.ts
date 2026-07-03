@@ -171,8 +171,13 @@ export class FunnelOrchestrator {
       for (const shot of dossier.shots) this.emit({ kind: "shot", clipId, shot });
       this.emit({ kind: "transcript", clipId, segments: dossier.transcript });
       this.emit({ kind: "clip-done", clipId, dossier });
-      // Pre-caption caches get their scene descriptions filled in place.
-      this.enrichCaptions(file, dossier, device);
+      // Dense frames persist in the dossier, so an interrupted caption pass
+      // resumes from where it stopped — no re-decode.
+      if (dossier.denseFrames.length > 0) {
+        this.captionDense(file, dossier, device);
+      } else {
+        this.enrichCaptions(file, dossier, device);
+      }
       return dossier;
     }
 
@@ -337,7 +342,10 @@ export class FunnelOrchestrator {
 
   private handleShot(
     run: ClipRun,
-    partialShot: Omit<Shot, "embedding" | "frameEmbeddings" | "thumbnailDataUrl" | "caption">,
+    partialShot: Omit<
+      Shot,
+      "embedding" | "frameEmbeddings" | "thumbnailDataUrl" | "caption" | "cloudCaption"
+    >,
     thumbJpeg: ArrayBuffer,
     frames: Array<{ data: ArrayBuffer; width: number; height: number }>,
   ) {
@@ -348,6 +356,7 @@ export class FunnelOrchestrator {
       embedding: null,
       frameEmbeddings: [],
       caption: null,
+      cloudCaption: null,
     };
     run.shots.push(shot);
     this.emit({ kind: "shot", clipId: run.clipId, shot });
@@ -442,7 +451,10 @@ export class FunnelOrchestrator {
       width: run.meta?.width ?? 0,
       height: run.meta?.height ?? 0,
       shots: run.shots,
+      denseFrames: run.denseFrames,
       denseCaptions: [],
+      cloudDenseCaptions: [],
+      cloudVision: null,
       transcript: run.transcript,
       perf,
     };
@@ -452,30 +464,41 @@ export class FunnelOrchestrator {
     run.resolve(dossier);
     // Scene descriptions are background enrichment: the dossier is already
     // cached and usable; captions land frame by frame and re-save as they go.
-    if (run.denseFrames.length > 0) {
-      this.captionDense(run.file, dossier, run.denseFrames);
+    if (dossier.denseFrames.length > 0) {
+      this.captionDense(run.file, dossier);
     } else {
       this.enrichCaptions(run.file, dossier);
     }
   }
 
   /**
-   * Caption every dense frame (one per ~2s of footage), filling the dossier's
-   * denseCaptions timeline and each shot's caption (nearest frame to its rep
-   * time). Serialized globally, incremental cache saves for crash resilience.
+   * Caption the dossier's dense frames, filling the denseCaptions timeline
+   * and each shot's caption (nearest frame to its rep time). Frames already
+   * captioned (resume after an interrupted pass) are skipped by timestamp.
+   * Serialized globally, incremental cache saves for crash resilience.
    */
   private captionDense(
     file: File,
     dossier: ClipDossier,
-    frames: Array<{ t: number; dataUrl: string }>,
     device: "auto" | InferenceDevice = "auto",
   ) {
+    // Resume point: captions are appended in frame order, so anything at or
+    // before the last captioned timestamp is done (failed frames retry).
+    const lastT =
+      dossier.denseCaptions.length > 0
+        ? dossier.denseCaptions[dossier.denseCaptions.length - 1].t
+        : -Infinity;
+    const frames = dossier.denseFrames.filter((f) => f.t > lastT);
+    if (frames.length === 0) {
+      this.syncShotCaptions(dossier);
+      return;
+    }
     this.ensureCaptionWorker(device);
-    const total = frames.length;
+    const total = dossier.denseFrames.length;
 
     this.captionChain = this.captionChain.then(async () => {
       const captions: DenseCaption[] = dossier.denseCaptions;
-      let done = 0;
+      let done = total - frames.length;
       for (const frame of frames) {
         try {
           const raw = await this.requestCaption(frame.dataUrl);
@@ -494,6 +517,11 @@ export class FunnelOrchestrator {
       this.syncShotCaptions(dossier);
       await this.cache.save(file, dossier).catch(() => undefined);
     });
+  }
+
+  /** Persist a dossier mutated outside the orchestrator (e.g. cloud enhance). */
+  saveDossier(file: File, dossier: ClipDossier): Promise<void> {
+    return this.cache.save(file, dossier);
   }
 
   /** Give each still-uncaptioned shot the dense caption nearest its rep frame. */
@@ -615,7 +643,7 @@ export class FunnelOrchestrator {
     return this.whisperWorker;
   }
 
-  /** Created lazily on first caption need — Florence (~300MB) shouldn't gate page load. */
+  /** Created lazily on first caption need — FastVLM (~1GB) shouldn't gate page load. */
   private ensureCaptionWorker(device: "auto" | InferenceDevice): Worker {
     if (!this.captionWorker) {
       this.captionWorker = createCaptionWorker();
@@ -640,7 +668,7 @@ export class FunnelOrchestrator {
       case "ready":
         this.emit({
           kind: "model-ready",
-          model: "florence",
+          model: "captioner",
           device: msg.device,
           loadMs: msg.loadMs,
         });
@@ -648,7 +676,7 @@ export class FunnelOrchestrator {
       case "model-progress":
         this.emit({
           kind: "model-progress",
-          model: "florence",
+          model: "captioner",
           file: msg.file,
           loaded: msg.loaded,
           total: msg.total,
@@ -678,12 +706,12 @@ export class FunnelOrchestrator {
       case "ready":
         this.embedDevice = msg.device;
         this.clipModelLoadMs = msg.loadMs;
-        this.emit({ kind: "model-ready", model: "clip", device: msg.device, loadMs: msg.loadMs });
+        this.emit({ kind: "model-ready", model: "embed", device: msg.device, loadMs: msg.loadMs });
         break;
       case "model-progress":
         this.emit({
           kind: "model-progress",
-          model: "clip",
+          model: "embed",
           file: msg.file,
           loaded: msg.loaded,
           total: msg.total,

@@ -19,9 +19,11 @@ interface ShotFilmstripProps {
   /** shot indices highlighted by search, mapped to score. */
   highlights: Map<number, number>;
   onShotClick?: (shot: Shot) => void;
+  /** Non-null when the cloud-vision toggle is on: clicking sends frames. */
+  onEnhance?: (() => void) | null;
 }
 
-export function ShotFilmstrip({ clip, highlights, onShotClick }: ShotFilmstripProps) {
+export function ShotFilmstrip({ clip, highlights, onShotClick, onEnhance }: ShotFilmstripProps) {
   const analysisSpanS = clip.analyzedThroughS ?? clip.durationS;
   const progress = analysisSpanS > 0 ? Math.min(1, clip.decodeT / analysisSpanS) : 0;
 
@@ -37,6 +39,33 @@ export function ShotFilmstrip({ clip, highlights, onShotClick }: ShotFilmstripPr
           </span>
         </div>
         <div className="flex items-center gap-2 shrink-0">
+          {clip.dossier?.cloudVision && !clip.cloud?.busy && (
+            <span
+              className="text-xs px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-600"
+              title={`Cloud-enhanced (${clip.dossier.cloudVision.scope}, ${clip.dossier.cloudVision.model})`}
+            >
+              cloud ✓
+            </span>
+          )}
+          {clip.cloud?.busy && (
+            <span className="text-xs text-sky-600">
+              enhancing… {clip.cloud.done}/{clip.cloud.total} frames
+            </span>
+          )}
+          {clip.cloud?.error && (
+            <span className="text-xs text-red-400" title={clip.cloud.error}>
+              cloud failed
+            </span>
+          )}
+          {onEnhance && clip.status === "done" && !clip.cloud?.busy && (
+            <button
+              className="text-xs px-1.5 py-0.5 rounded border border-sky-500/50 text-sky-600 hover:bg-sky-500/10"
+              onClick={onEnhance}
+              title="Send this clip's sampled frames to the cloud vision model for much better descriptions"
+            >
+              {clip.dossier?.cloudVision ? "re-enhance" : "enhance"}
+            </button>
+          )}
           {clip.dossier?.perf.cacheHit && (
             <span className="text-xs px-1.5 py-0.5 rounded bg-primary/20 text-primary">
               cached
@@ -99,7 +128,11 @@ export function ShotFilmstrip({ clip, highlights, onShotClick }: ShotFilmstripPr
                   : "border-transparent hover:border-border"
               }`}
               onClick={() => onShotClick?.(shot)}
-              title={`shot ${shot.index} · ${fmtTime(shot.tStart)}–${fmtTime(shot.tEnd)}${shot.caption ? `\n${shot.caption}` : ""}`}
+              title={`shot ${shot.index} · ${fmtTime(shot.tStart)}–${fmtTime(shot.tEnd)}${
+                shot.cloudCaption ?? shot.caption
+                  ? `\n${shot.cloudCaption ?? shot.caption}`
+                  : ""
+              }`}
             >
               <div className="relative">
                 <img

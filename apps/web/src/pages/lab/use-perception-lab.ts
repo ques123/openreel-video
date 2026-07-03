@@ -1,15 +1,19 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
 import {
+  applyCloudResults,
   FunnelOrchestrator,
   searchShots,
+  selectCloudFrames,
   templateQuery,
   type ClipDossier,
+  type CloudScope,
   type FunnelProgressEvent,
   type InferenceDevice,
   type SearchHit,
   type Shot,
   type TranscriptSegment,
 } from "@openreel/core";
+import { describeFramesCloud } from "../../services/cloud-vision";
 
 export type ClipStatus = "analyzing" | "done" | "error";
 
@@ -32,6 +36,8 @@ export interface LabClip {
   /** Dense caption pass progress (0/0 until the pass starts). */
   captionsDone: number;
   captionsTotal: number;
+  /** Cloud enhance run state (null = never started this session). */
+  cloud: { busy: boolean; done: number; total: number; error: string | null } | null;
   transcript: TranscriptSegment[];
   dossier: ClipDossier | null;
 }
@@ -46,7 +52,7 @@ export interface ModelStatus {
 
 export interface LabState {
   clips: LabClip[];
-  models: { clip: ModelStatus; whisper: ModelStatus; florence: ModelStatus };
+  models: { embed: ModelStatus; whisper: ModelStatus; captioner: ModelStatus };
   search: {
     query: string;
     hits: SearchHit[];
@@ -64,9 +70,9 @@ const initialModelStatus: ModelStatus = {
 const initialState: LabState = {
   clips: [],
   models: {
-    clip: { ...initialModelStatus },
+    embed: { ...initialModelStatus },
     whisper: { ...initialModelStatus },
-    florence: { ...initialModelStatus },
+    captioner: { ...initialModelStatus },
   },
   search: { query: "", hits: [], searching: false },
 };
@@ -76,7 +82,11 @@ type Action =
   | { type: "event"; event: FunnelProgressEvent }
   | { type: "search-start"; query: string }
   | { type: "search-done"; query: string; hits: SearchHit[] }
-  | { type: "search-clear" };
+  | { type: "search-clear" }
+  | { type: "cloud-start"; clipId: string; total: number }
+  | { type: "cloud-progress"; clipId: string; done: number; total: number }
+  | { type: "cloud-done"; clipId: string }
+  | { type: "cloud-error"; clipId: string; message: string };
 
 function updateClip(
   state: LabState,
@@ -111,11 +121,39 @@ function reducer(state: LabState, action: Action): LabState {
             embeddedCount: 0,
             captionsDone: 0,
             captionsTotal: 0,
+            cloud: null,
             transcript: [],
             dossier: null,
           },
         ],
       };
+
+    case "cloud-start":
+      return updateClip(state, action.clipId, (c) => ({
+        ...c,
+        cloud: { busy: true, done: 0, total: action.total, error: null },
+      }));
+
+    case "cloud-progress":
+      return updateClip(state, action.clipId, (c) => ({
+        ...c,
+        cloud: { busy: true, done: action.done, total: action.total, error: null },
+      }));
+
+    case "cloud-done":
+      return updateClip(state, action.clipId, (c) => ({
+        ...c,
+        cloud: { busy: false, done: 0, total: 0, error: null },
+        // cloud captions were written into the dossier in place; new shot
+        // array reference triggers re-render of captions everywhere.
+        shots: [...c.shots],
+      }));
+
+    case "cloud-error":
+      return updateClip(state, action.clipId, (c) => ({
+        ...c,
+        cloud: { busy: false, done: 0, total: 0, error: action.message },
+      }));
 
     case "search-start":
       return { ...state, search: { query: action.query, hits: [], searching: true } };
@@ -305,11 +343,49 @@ export function usePerceptionLab(forceDevice: "auto" | InferenceDevice = "auto")
   /** Snapshot of all completed dossiers (for the director). */
   const getDossiers = useCallback(() => [...dossiersRef.current.values()], []);
 
-  /** Embed a text query with the local CLIP text tower (for the director's search tool). */
+  /** Embed a text query with the local text tower (for the director's search tool). */
   const embedQuery = useCallback(
     (query: string) => getOrchestrator().embedText(templateQuery(query), forceDevice),
     [getOrchestrator, forceDevice],
   );
 
-  return { state, addFiles, runSearch, getFile, getDossiers, embedQuery };
+  /**
+   * Opt-in cloud vision enhance: sends the selected frames for one clip to
+   * the OpenAI proxy and merges the returned descriptions into the dossier
+   * (persisted, so it costs once per clip+scope). The ONLY path where pixels
+   * leave the device — reachable only from the explicit Enhance button.
+   */
+  const enhanceClip = useCallback(
+    async (clipId: string, scope: CloudScope) => {
+      const dossier = dossiersRef.current.get(clipId);
+      const file = filesRef.current.get(clipId);
+      if (!dossier || !file) return;
+      const frames = selectCloudFrames(dossier, scope);
+      if (frames.length === 0) {
+        dispatch({ type: "cloud-error", clipId, message: "no frames available yet" });
+        return;
+      }
+      dispatch({ type: "cloud-start", clipId, total: frames.length });
+      try {
+        const run = await describeFramesCloud(frames, (done, total) =>
+          dispatch({ type: "cloud-progress", clipId, done, total }),
+        );
+        applyCloudResults(dossier, scope, run.captions, {
+          model: run.model,
+          enhancedAt: Date.now(),
+        });
+        await getOrchestrator().saveDossier(file, dossier);
+        dispatch({ type: "cloud-done", clipId });
+      } catch (err) {
+        dispatch({
+          type: "cloud-error",
+          clipId,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+    [getOrchestrator],
+  );
+
+  return { state, addFiles, runSearch, getFile, getDossiers, embedQuery, enhanceClip };
 }

@@ -1,33 +1,40 @@
 /**
- * Caption worker: Florence-2 (onnx-community/Florence-2-base-ft) via
- * transformers.js. Writes a plain-English scene description for a shot's
- * representative frame so the director can READ the footage instead of
- * discovering it query-by-query through CLIP search.
+ * Caption worker: FastVLM-0.5B (onnx-community/FastVLM-0.5B-ONNX) via
+ * transformers.js. Writes an editor-framed scene description for a frame so
+ * the director can READ the footage instead of discovering it query-by-query
+ * through embedding search.
  *
- * Runs on the shot thumbnails already stored in dossiers — no video decode,
- * which is what lets cached (pre-caption) dossiers be enriched in place.
+ * FastVLM replaced Florence-2 after a head-to-head on real footage
+ * (2026-07-03): it is promptable (subject/action/mood/quality in one ask),
+ * identifies specifics Florence missed (durian, blur ruining a shot), and
+ * writes coherent prose instead of annotation fragments, at ~2x the
+ * per-frame cost. This worker is deliberately the ONLY model-specific file
+ * in the caption path.
  *
- * Device ladder: webgpu (fp16 vision / q4 text, per the transformers.js
- * guidance that encoder-decoder models are quantization-sensitive) -> wasm q8.
- * Generation is heavy; the orchestrator serializes requests.
+ * Runs on the dense frames / thumbnails already stored in dossiers — no
+ * video decode, which is what lets cached dossiers be enriched in place.
+ *
+ * Device ladder: webgpu (fp16 embeddings / q4 vision+decoder, per the model
+ * card) -> wasm q8. Generation is heavy; the orchestrator serializes requests.
  */
 
 import {
+  AutoModelForImageTextToText,
   AutoProcessor,
-  AutoTokenizer,
-  Florence2ForConditionalGeneration,
   RawImage,
   type PreTrainedModel,
-  type PreTrainedTokenizer,
   type Processor,
   type Tensor,
 } from "@huggingface/transformers";
 import type { InferenceDevice } from "../types";
 import type { CaptionWorkerRequest, CaptionWorkerResponse } from "../worker-protocol";
 
-const MODEL_ID = "onnx-community/Florence-2-base-ft";
-const TASK = "<DETAILED_CAPTION>";
-const MAX_NEW_TOKENS = 128;
+const MODEL_ID = "onnx-community/FastVLM-0.5B-ONNX";
+const PROMPT =
+  "Describe this video frame for an editor choosing shots: subject, action, " +
+  "setting, mood, and anything visually striking or wrong (blur, bad framing). " +
+  "2-3 short sentences.";
+const MAX_NEW_TOKENS = 110;
 
 function post(message: CaptionWorkerResponse) {
   (self as unknown as Worker).postMessage(message);
@@ -36,7 +43,6 @@ function post(message: CaptionWorkerResponse) {
 interface Loaded {
   model: PreTrainedModel;
   processor: Processor;
-  tokenizer: PreTrainedTokenizer;
   device: InferenceDevice;
   dtype: string;
 }
@@ -59,8 +65,7 @@ function ladderFor(requested: "auto" | InferenceDevice): LadderStep[] {
       device: "webgpu",
       dtype: {
         embed_tokens: "fp16",
-        vision_encoder: "fp16",
-        encoder_model: "q4",
+        vision_encoder: "q4",
         decoder_model_merged: "q4",
       },
       label: "fp16/q4",
@@ -82,47 +87,43 @@ async function loadAt(step: LadderStep): Promise<Loaded> {
     }
   };
 
-  const [model, processor, tokenizer] = await Promise.all([
-    Florence2ForConditionalGeneration.from_pretrained(MODEL_ID, {
+  const [processor, model] = await Promise.all([
+    AutoProcessor.from_pretrained(MODEL_ID, {}),
+    AutoModelForImageTextToText.from_pretrained(MODEL_ID, {
       device: step.device,
       dtype: step.dtype as never,
       progress_callback,
     }),
-    AutoProcessor.from_pretrained(MODEL_ID, {}),
-    AutoTokenizer.from_pretrained(MODEL_ID),
   ]);
 
-  return { model, processor, tokenizer, device: step.device, dtype: step.label };
+  return { model, processor, device: step.device, dtype: step.label };
 }
 
 async function captionWith(m: Loaded, imageUrl: string): Promise<string> {
   const image = await RawImage.fromURL(imageUrl);
 
-  const florence = m.processor as Processor & {
-    construct_prompts(task: string): string[];
-    post_process_generation(
-      text: string,
-      task: string,
-      size: [number, number],
-    ): Record<string, string>;
+  const chat = m.processor as Processor & {
+    apply_chat_template(messages: object[], opts: object): string;
+    batch_decode(t: Tensor, o: object): string[];
   };
-  const prompts = florence.construct_prompts(TASK);
-  const textInputs = m.tokenizer(prompts);
-  const visionInputs = await m.processor(image);
+  const prompt = chat.apply_chat_template(
+    [{ role: "user", content: `<image>${PROMPT}` }],
+    { add_generation_prompt: true },
+  );
+  const inputs = await m.processor(image, prompt, { add_special_tokens: false });
 
-  const generatedIds = (await (
+  const outputs = (await (
     m.model as PreTrainedModel & { generate(opts: object): Promise<Tensor> }
   ).generate({
-    ...textInputs,
-    ...visionInputs,
+    ...inputs,
     max_new_tokens: MAX_NEW_TOKENS,
-  })) as Tensor;
+    do_sample: false,
+  })) as Tensor & { slice(...args: unknown[]): Tensor };
 
-  const generatedText = m.tokenizer.batch_decode(generatedIds, {
-    skip_special_tokens: false,
-  })[0];
-  const result = florence.post_process_generation(generatedText, TASK, image.size);
-  return (result[TASK] ?? "").trim();
+  // Decode only the newly generated tokens (drop the prompt prefix).
+  const promptLength = (inputs.input_ids as Tensor & { dims: number[] }).dims.at(-1);
+  const generated = outputs.slice(null, [promptLength, null]);
+  return chat.batch_decode(generated, { skip_special_tokens: true })[0].trim();
 }
 
 async function init(requested: "auto" | InferenceDevice): Promise<Loaded> {

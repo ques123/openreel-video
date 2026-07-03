@@ -1,5 +1,5 @@
 /**
- * Pure text helpers for the dense caption timeline: strip Florence's
+ * Pure text helpers for the dense caption timeline: strip the captioner's
  * boilerplate framing, and run-length merge consecutive near-identical
  * descriptions so a 15-minute drive ("road, trees, sky" x200) compresses to
  * a handful of readable timeline segments for the director prompt.
@@ -7,11 +7,22 @@
 
 import type { DenseCaption } from "./types";
 
-/** "In this image we can see a wall." -> "a wall" */
+/**
+ * Strip caption-model boilerplate:
+ *   Florence: "In this image we can see a wall."        -> "a wall"
+ *   FastVLM:  "The image depicts a bustling market..."  -> "a bustling market..."
+ */
 export function cleanCaption(raw: string): string {
   return raw
+    // Generation hit its token cap mid-sentence: drop the trailing fragment
+    // (only when at least one complete sentence remains).
+    .replace(/([.!?])\s+[^.!?]*[^.!?\s]$/s, "$1")
     .replace(/^in this image[,]?\s*(we can see|i can see|there is|there are)\s*/i, "")
     .replace(/\s*\.\s*(In this image[,]?\s*)?(we can see|i can see|we can also see|i can also see)\s*/gi, "; ")
+    .replace(
+      /^the (?:image|frame|photo|picture|video frame|scene) (?:depicts|shows|presents|captures|features|displays|is of)\s*/i,
+      "",
+    )
     .replace(/\s+/g, " ")
     .replace(/[.;\s]+$/, "")
     .trim();

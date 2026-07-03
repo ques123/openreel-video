@@ -63,7 +63,10 @@ export function deserializeDossier(data: ArrayBuffer): ClipDossier {
   const parsed = JSON.parse(new TextDecoder().decode(data)) as SerializedDossier;
   return {
     ...parsed,
+    denseFrames: parsed.denseFrames ?? [],
     denseCaptions: parsed.denseCaptions ?? [],
+    cloudDenseCaptions: parsed.cloudDenseCaptions ?? [],
+    cloudVision: parsed.cloudVision ?? null,
     shots: parsed.shots.map((shot) => {
       const { embeddingB64, frameEmbeddingsB64, ...rest } = shot;
       return {
@@ -72,6 +75,7 @@ export function deserializeDossier(data: ArrayBuffer): ClipDossier {
         frameEmbeddings: (frameEmbeddingsB64 ?? []).map(b64ToFloat32),
         // Pre-caption caches lack the field; the orchestrator enriches lazily.
         caption: rest.caption ?? null,
+        cloudCaption: rest.cloudCaption ?? null,
       };
     }),
   };

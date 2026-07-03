@@ -11,8 +11,38 @@ describe("cleanCaption", () => {
     ).toBe("a person standing; trees and sky");
   });
 
+  it("strips FastVLM's boilerplate framing", () => {
+    expect(
+      cleanCaption(
+        "The image depicts a bustling outdoor market scene where a vendor is selling durian fruits.",
+      ),
+    ).toBe("a bustling outdoor market scene where a vendor is selling durian fruits");
+    expect(cleanCaption("The frame shows a person's hand holding a document.")).toBe(
+      "a person's hand holding a document",
+    );
+    // Only the LEADING boilerplate goes; later sentences keep their prose.
+    expect(
+      cleanCaption("The image captures a calm lobby. The mood is elegant and formal."),
+    ).toBe("a calm lobby. The mood is elegant and formal");
+  });
+
+  it("drops a trailing sentence fragment from token-capped generations", () => {
+    expect(
+      cleanCaption(
+        "The image depicts a calm scene. The image is well-composed, with the main subject (",
+      ),
+    ).toBe("a calm scene");
+    // A caption that is ALL fragment (no complete sentence) stays intact.
+    expect(cleanCaption("a person waiting at a carousel")).toBe(
+      "a person waiting at a carousel",
+    );
+  });
+
   it("leaves plain captions alone", () => {
     expect(cleanCaption("a red car on a bridge")).toBe("a red car on a bridge");
+    expect(cleanCaption("A man in a grey shirt grimaces as rain soaks the stalls.")).toBe(
+      "A man in a grey shirt grimaces as rain soaks the stalls",
+    );
   });
 });
 
