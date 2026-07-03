@@ -1,9 +1,10 @@
 import { useCallback, useMemo, useState } from "react";
-import type { SearchHit, Shot, TranscriptSegment } from "@openreel/core";
+import type { DenseCaption, SearchHit, Shot, TranscriptSegment } from "@openreel/core";
 import { useRouter } from "../../hooks/use-router";
 import { ClipDropZone } from "./components/ClipDropZone";
 import { DirectorPanel } from "./components/DirectorPanel";
 import { PerfPanel } from "./components/PerfPanel";
+import { SceneTimelinePanel } from "./components/SceneTimelinePanel";
 import { SearchPanel } from "./components/SearchPanel";
 import { ShotFilmstrip } from "./components/ShotFilmstrip";
 import { ShotPreviewModal, type ShotPreview } from "./components/ShotPreviewModal";
@@ -72,6 +73,36 @@ export function PerceptionLabPage() {
     [scrollToShot, openPreview],
   );
 
+  const handleCaptionClick = useCallback(
+    (clip: LabClip, dc: DenseCaption) => {
+      const file = getFile(clip.clipId);
+      if (!file) return;
+      // Containing shot, or nearest one (the final dense frame can sit exactly
+      // on the last shot's end boundary).
+      const shot =
+        clip.shots.find((s) => dc.t >= s.tStart && dc.t < s.tEnd) ??
+        clip.shots.reduce<Shot | null>(
+          (best, s) =>
+            !best ||
+            Math.abs(dc.t - (s.tStart + s.tEnd) / 2) <
+              Math.abs(dc.t - (best.tStart + best.tEnd) / 2)
+              ? s
+              : best,
+          null,
+        );
+      if (!shot) return;
+      scrollToShot(clip.clipId, shot.index);
+      setPreview({
+        file,
+        fileName: clip.fileName,
+        shot,
+        startAtS: dc.t,
+        caption: dc.text,
+      });
+    },
+    [getFile, scrollToShot],
+  );
+
   const searchReady =
     state.models.clip.state === "ready" &&
     state.clips.some((c) => c.status === "done");
@@ -127,6 +158,7 @@ export function PerceptionLabPage() {
                 onSearch={runSearch}
                 onHitClick={handleHitClick}
               />
+              <SceneTimelinePanel clips={state.clips} onCaptionClick={handleCaptionClick} />
               <TranscriptPanel clips={state.clips} onSegmentClick={handleSegmentClick} />
               <PerfPanel clips={state.clips} models={state.models} />
             </div>
