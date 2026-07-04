@@ -1,5 +1,6 @@
-import { useCallback, useReducer, useRef } from "react";
+import { useCallback, useEffect, useReducer, useRef } from "react";
 import {
+  DEFAULT_PROMPT_SOURCES,
   DirectorLoopError,
   buildBriefMessage,
   buildDossierMessage,
@@ -10,8 +11,10 @@ import {
   type ChatMessage,
   type ClipDossier,
   type DirectorActivity,
+  type PromptSources,
   type Storyboard,
 } from "@openreel/core";
+import { saveExperiment, type DirectorExperiment } from "../../services/experiments";
 import { DIRECTOR_MODEL, chatComplete } from "../../services/openai-proxy";
 
 export type DirectorPhase = "idle" | "running" | "awaiting-refine" | "error";
@@ -32,6 +35,10 @@ export interface DirectorState {
    * start, replaced with the full history when a run finishes.
    */
   messages: ChatMessage[];
+  /** Source mixer used by the current conversation (locked at start). */
+  promptSources: PromptSources;
+  /** Persisted experiment id for the current conversation. */
+  experimentId: string | null;
 }
 
 export interface UseDirectorDeps {
@@ -48,6 +55,8 @@ const initialState: DirectorState = {
   error: null,
   clipCount: 0,
   messages: [],
+  promptSources: DEFAULT_PROMPT_SOURCES,
+  experimentId: null,
 };
 
 type Action =
@@ -56,6 +65,8 @@ type Action =
       targetDurationS: number | null;
       clipCount: number;
       messages: ChatMessage[];
+      promptSources: PromptSources;
+      experimentId: string;
     }
   | { type: "activity"; activity: DirectorActivity }
   | { type: "success"; storyboard: Storyboard; warnings: string[]; messages: ChatMessage[] }
@@ -76,6 +87,8 @@ function reducer(state: DirectorState, action: Action): DirectorState {
         activity: [],
         error: null,
         messages: action.messages,
+        promptSources: action.promptSources,
+        experimentId: action.experimentId,
       };
     case "activity":
       return { ...state, activity: [...state.activity, action.activity] };
@@ -141,18 +154,35 @@ export function useDirector(deps: UseDirectorDeps) {
   const messagesRef = useRef<ChatMessage[]>([]);
   const dossiersRef = useRef<ClipDossier[]>([]);
   const abortRef = useRef<AbortController | null>(null);
+  /** The persisted record of the current conversation, updated as it grows. */
+  const experimentRef = useRef<DirectorExperiment | null>(null);
+  const activityLogRef = useRef<DirectorActivity[]>([]);
   const { getDossiers, embedQuery } = deps;
+
+  const persistExperiment = useCallback(
+    (patch: Partial<DirectorExperiment>) => {
+      const exp = experimentRef.current;
+      if (!exp) return;
+      Object.assign(exp, patch, { updatedAt: Date.now() });
+      void saveExperiment(exp).catch(() => undefined);
+    },
+    [],
+  );
 
   const runLoop = useCallback(
     async (messages: ChatMessage[], targetDurationS: number | null) => {
       const dossiers = dossiersRef.current;
+      const exp = experimentRef.current;
       const controller = new AbortController();
       abortRef.current = controller;
+      const runStart = performance.now();
       dispatch({
         type: "run-start",
         targetDurationS,
         clipCount: dossiers.length,
         messages,
+        promptSources: exp?.promptSources ?? DEFAULT_PROMPT_SOURCES,
+        experimentId: exp?.id ?? "",
       });
       try {
         const result = await runDirectorLoop(messages, {
@@ -168,11 +198,20 @@ export function useDirector(deps: UseDirectorDeps) {
                     : undefined,
               },
               controller.signal,
+              (usage) => {
+                if (!exp) return;
+                exp.usage.promptTokens += usage.promptTokens;
+                exp.usage.completionTokens += usage.completionTokens;
+                exp.usage.calls += 1;
+              },
             ),
           search: async (query, topK) => searchShots(await embedQuery(query), dossiers, topK),
           dossiers,
           targetDurationS,
-          onActivity: (activity) => dispatch({ type: "activity", activity }),
+          onActivity: (activity) => {
+            activityLogRef.current.push(activity);
+            dispatch({ type: "activity", activity });
+          },
           signal: controller.signal,
         });
         messagesRef.current = result.messages;
@@ -181,6 +220,14 @@ export function useDirector(deps: UseDirectorDeps) {
           storyboard: result.storyboard,
           warnings: result.warnings,
           messages: result.messages,
+        });
+        persistExperiment({
+          targetDurationS,
+          messages: result.messages,
+          activity: [...activityLogRef.current],
+          storyboard: result.storyboard,
+          warnings: result.warnings,
+          durationMs: (exp?.durationMs ?? 0) + Math.round(performance.now() - runStart),
         });
       } catch (err) {
         if (err instanceof DirectorLoopError && err.code === "aborted") {
@@ -192,25 +239,50 @@ export function useDirector(deps: UseDirectorDeps) {
         abortRef.current = null;
       }
     },
-    [embedQuery],
+    [embedQuery, persistExperiment],
   );
 
   const start = useCallback(
-    (brief: string, targetDurationS: number | null) => {
+    (brief: string, targetDurationS: number | null, sources?: PromptSources) => {
       const dossiers = getDossiers();
       if (dossiers.length === 0) {
         dispatch({ type: "failure", error: "No analyzed clips yet — drop footage first." });
         return;
       }
+      const promptSources = sources ?? DEFAULT_PROMPT_SOURCES;
       dossiersRef.current = dossiers;
       const seed: ChatMessage[] = [
         { role: "system", content: buildSystemPrompt() },
         {
           role: "user",
-          content: buildDossierMessage(dossiers) + "\n\n" + buildBriefMessage(brief, targetDurationS),
+          content:
+            buildDossierMessage(dossiers, promptSources) +
+            "\n\n" +
+            buildBriefMessage(brief, targetDurationS),
         },
       ];
       messagesRef.current = seed;
+      activityLogRef.current = [];
+      experimentRef.current = {
+        id: `exp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+        at: Date.now(),
+        updatedAt: Date.now(),
+        brief,
+        targetDurationS,
+        promptSources,
+        model: DIRECTOR_MODEL,
+        clips: dossiers.map((d) => ({
+          clipId: d.clipId,
+          cacheKey: d.cacheKey,
+          fileName: d.fileName,
+        })),
+        messages: seed,
+        activity: [],
+        storyboard: null,
+        warnings: [],
+        usage: { promptTokens: 0, completionTokens: 0, calls: 0 },
+        durationMs: 0,
+      };
       void runLoop(seed, targetDurationS);
     },
     [getDossiers, runLoop],
@@ -235,6 +307,14 @@ export function useDirector(deps: UseDirectorDeps) {
     [state.phase, state.storyboard, runLoop],
   );
 
+  // Manual storyboard edits (remove/reorder) update the persisted experiment,
+  // so what you re-watch later is what you actually kept.
+  useEffect(() => {
+    if (state.phase === "awaiting-refine" && state.storyboard && experimentRef.current) {
+      persistExperiment({ storyboard: state.storyboard });
+    }
+  }, [state.phase, state.storyboard, persistExperiment]);
+
   const cancel = useCallback(() => abortRef.current?.abort(), []);
   const removeItem = useCallback((index: number) => dispatch({ type: "remove-item", index }), []);
   const moveItem = useCallback(
@@ -243,7 +323,10 @@ export function useDirector(deps: UseDirectorDeps) {
   );
   const reset = useCallback(() => dispatch({ type: "reset" }), []);
 
-  return { state, start, refine, cancel, removeItem, moveItem, reset };
+  /** The persisted record of the current conversation (for export/history). */
+  const getExperiment = useCallback(() => experimentRef.current, []);
+
+  return { state, start, refine, cancel, removeItem, moveItem, reset, getExperiment };
 }
 
 export type UseDirectorReturn = ReturnType<typeof useDirector>;

@@ -73,6 +73,28 @@ export interface CloudVisionMeta {
   enhancedAt: number;
 }
 
+/**
+ * Full stats for one cloud enhance run — kept PER SCOPE so shots-only and
+ * full-timeline results coexist and their quality/cost/speed can be compared.
+ */
+export interface CloudRunMeta {
+  model: string;
+  enhancedAt: number;
+  framesSent: number;
+  framesFailed: number;
+  /** Wall-clock duration of the whole run. */
+  ms: number;
+  /** Real usage summed across the run's API calls (0 when unreported). */
+  promptTokens: number;
+  completionTokens: number;
+}
+
+/** Local caption pass stats (speed side of the local-vs-cloud comparison). */
+export interface LocalCaptionPerf {
+  totalMs: number;
+  frames: number;
+}
+
 export interface TranscriptSegment {
   t0: number;
   t1: number;
@@ -138,8 +160,18 @@ export interface ClipDossier {
   denseCaptions: DenseCaption[];
   /** Cloud descriptions of the dense frames (opt-in enhance, scope "timeline"). */
   cloudDenseCaptions: DenseCaption[];
-  /** Non-null once an opt-in cloud vision enhance has run on this clip. */
+  /**
+   * Cloud descriptions from a shots-scope enhance (one per shot, at the shot's
+   * rep time). Separate from cloudDenseCaptions so both variants coexist and
+   * can be A/B compared against each other and the local pass.
+   */
+  cloudShotCaptions: DenseCaption[];
+  /** Per-scope enhance stats; null = that scope never ran. */
+  cloudRuns: { shots: CloudRunMeta | null; timeline: CloudRunMeta | null };
+  /** Legacy "last enhance" marker (kept for the filmstrip badge). */
   cloudVision: CloudVisionMeta | null;
+  /** Local caption pass timing; null until the pass finishes at least once. */
+  localCaptionPerf: LocalCaptionPerf | null;
   transcript: TranscriptSegment[];
   perf: DossierPerf;
 }

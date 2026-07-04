@@ -61,12 +61,45 @@ export function serializeDossier(dossier: ClipDossier): ArrayBuffer {
 
 export function deserializeDossier(data: ArrayBuffer): ClipDossier {
   const parsed = JSON.parse(new TextDecoder().decode(data)) as SerializedDossier;
+  // Migrate pre-split records (single cloudVision marker, no per-scope
+  // stores): a shots-scope enhance lived only on shot.cloudCaption, and run
+  // stats were untracked (zeros).
+  const legacy = parsed.cloudVision ?? null;
+  const cloudShotCaptions =
+    parsed.cloudShotCaptions ??
+    (legacy?.scope === "shots"
+      ? parsed.shots
+          .filter((s) => s.cloudCaption)
+          .map((s) => ({ t: s.repFrameTime, text: s.cloudCaption! }))
+      : []);
+  const legacyRun = (count: number) =>
+    legacy
+      ? {
+          model: legacy.model,
+          enhancedAt: legacy.enhancedAt,
+          framesSent: count,
+          framesFailed: 0,
+          ms: 0,
+          promptTokens: 0,
+          completionTokens: 0,
+        }
+      : null;
+  const cloudRuns = parsed.cloudRuns ?? {
+    shots: legacy?.scope === "shots" ? legacyRun(cloudShotCaptions.length) : null,
+    timeline:
+      legacy?.scope === "timeline"
+        ? legacyRun((parsed.cloudDenseCaptions ?? []).length)
+        : null,
+  };
   return {
     ...parsed,
     denseFrames: parsed.denseFrames ?? [],
     denseCaptions: parsed.denseCaptions ?? [],
     cloudDenseCaptions: parsed.cloudDenseCaptions ?? [],
-    cloudVision: parsed.cloudVision ?? null,
+    cloudShotCaptions,
+    cloudRuns,
+    cloudVision: legacy,
+    localCaptionPerf: parsed.localCaptionPerf ?? null,
     shots: parsed.shots.map((shot) => {
       const { embeddingB64, frameEmbeddingsB64, ...rest } = shot;
       return {
@@ -92,13 +125,21 @@ export class DossierCache {
       if (dossier.version !== DOSSIER_VERSION) return null;
       // Backfill for dossiers cached before recordedAt existed — the mtime is
       // part of the cache key, so it is the same value analysis would store.
-      return { ...dossier, recordedAt: dossier.recordedAt ?? file.lastModified };
+      // cacheKey is recomputed (older saves left it empty).
+      return {
+        ...dossier,
+        recordedAt: dossier.recordedAt ?? file.lastModified,
+        cacheKey: dossierCacheKey(file),
+      };
     } catch {
       return null;
     }
   }
 
   async save(file: File, dossier: ClipDossier): Promise<void> {
+    // The stable identity used to re-find this clip across sessions
+    // (clipIds are per-session; experiments and Stage 6 remap through this).
+    dossier.cacheKey = dossierCacheKey(file);
     const data = serializeDossier(dossier);
     await this.storage.saveCache({
       key: dossierCacheKey(file),

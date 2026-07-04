@@ -142,7 +142,17 @@ export const DIRECTOR_TOOLS: ToolDef[] = [
 
 export type DirectorActivity =
   | { kind: "round"; round: number }
-  | { kind: "search"; query: string; hitCount: number; confidentCount: number }
+  | {
+      kind: "search";
+      query: string;
+      hitCount: number;
+      confidentCount: number;
+      /**
+       * The shots each query surfaced — lets debug tooling answer "which
+       * search found this storyboard pick".
+       */
+      hits?: { clipId: string; shotIndex: number; confident: boolean }[];
+    }
   /** Assistant prose emitted between tool calls (thinking out loud). */
   | { kind: "note"; text: string }
   /** A submit_storyboard call bounced by validation; errors were fed back. */

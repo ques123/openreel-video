@@ -28,10 +28,16 @@ interface ContentPart {
   image_url?: { url: string; detail: "low" | "high" };
 }
 
+interface BatchResult {
+  captions: DenseCaption[];
+  promptTokens: number;
+  completionTokens: number;
+}
+
 async function describeBatch(
   frames: DenseFrame[],
   signal?: AbortSignal,
-): Promise<DenseCaption[]> {
+): Promise<BatchResult> {
   const header =
     `${INSTRUCTIONS}\n\nYou are given ${frames.length} frames. Frame timestamps (seconds): ` +
     frames.map((f, i) => `#${i + 1}=${f.t.toFixed(1)}s`).join(", ");
@@ -61,6 +67,7 @@ async function describeBatch(
   }
   const data = (await res.json()) as {
     choices?: { message?: { content?: string } }[];
+    usage?: { prompt_tokens?: number; completion_tokens?: number };
   };
   const raw = data.choices?.[0]?.message?.content ?? "";
   const parsed = JSON.parse(raw) as { captions?: { i?: number; text?: string }[] };
@@ -72,7 +79,11 @@ async function describeBatch(
     }
   }
   if (out.length === 0) throw new Error("cloud vision returned no captions");
-  return out;
+  return {
+    captions: out,
+    promptTokens: data.usage?.prompt_tokens ?? 0,
+    completionTokens: data.usage?.completion_tokens ?? 0,
+  };
 }
 
 export interface CloudVisionRun {
@@ -80,6 +91,11 @@ export interface CloudVisionRun {
   framesSent: number;
   framesFailed: number;
   model: string;
+  /** Wall-clock for the whole run. */
+  ms: number;
+  /** Real usage summed across batches (0 when the API omits it). */
+  promptTokens: number;
+  completionTokens: number;
 }
 
 export async function describeFramesCloud(
@@ -87,16 +103,24 @@ export async function describeFramesCloud(
   onProgress?: (done: number, total: number) => void,
   signal?: AbortSignal,
 ): Promise<CloudVisionRun> {
+  const startMs = performance.now();
   const captions: DenseCaption[] = [];
   let framesFailed = 0;
+  let promptTokens = 0;
+  let completionTokens = 0;
+  const absorb = (b: BatchResult) => {
+    captions.push(...b.captions);
+    promptTokens += b.promptTokens;
+    completionTokens += b.completionTokens;
+  };
   for (let i = 0; i < frames.length; i += BATCH_SIZE) {
     const batch = frames.slice(i, i + BATCH_SIZE);
     try {
-      captions.push(...(await describeBatch(batch, signal)));
+      absorb(await describeBatch(batch, signal));
     } catch (err) {
       if (signal?.aborted) throw err;
       try {
-        captions.push(...(await describeBatch(batch, signal))); // one retry
+        absorb(await describeBatch(batch, signal)); // one retry
       } catch {
         framesFailed += batch.length;
       }
@@ -106,5 +130,13 @@ export async function describeFramesCloud(
   if (captions.length === 0 && frames.length > 0) {
     throw new Error("cloud vision failed for every batch — is the proxy reachable?");
   }
-  return { captions, framesSent: frames.length, framesFailed, model: DIRECTOR_MODEL };
+  return {
+    captions,
+    framesSent: frames.length,
+    framesFailed,
+    model: DIRECTOR_MODEL,
+    ms: Math.round(performance.now() - startMs),
+    promptTokens,
+    completionTokens,
+  };
 }

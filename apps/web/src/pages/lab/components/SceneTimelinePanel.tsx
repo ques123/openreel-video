@@ -1,6 +1,12 @@
 import { useState } from "react";
 import type { DenseCaption } from "@openreel/core";
-import { cloudCaptionsOf } from "../caption-views";
+import {
+  availableVariants,
+  captionsOf,
+  localCaptionsOf,
+  VARIANT_LABEL,
+  type CaptionVariant,
+} from "../caption-views";
 import type { LabClip } from "../use-perception-lab";
 
 interface SceneTimelinePanelProps {
@@ -9,8 +15,6 @@ interface SceneTimelinePanelProps {
   /** Open the side-by-side frame/local/cloud comparison for a clip. */
   onCompare: (clip: LabClip) => void;
 }
-
-type View = "local" | "cloud";
 
 function fmtTime(s: number): string {
   const m = Math.floor(s / 60);
@@ -21,20 +25,17 @@ function fmtTime(s: number): string {
 /**
  * Every raw timestamped scene description — the unmerged source material
  * behind the director's SCENE TIMELINE. Grows live while the background
- * caption pass runs. Clips with a cloud enhance get local/cloud tabs;
- * the cloud view pairs each row with the local description of the same
- * moment so the two models can be compared directly.
+ * caption pass runs. Clips with multiple caption variants (local pass,
+ * cloud shots, cloud timeline) get tabs; cloud views pair each row with the
+ * local description of the same moment so variants compare directly.
  */
 export function SceneTimelinePanel({ clips, onCaptionClick, onCompare }: SceneTimelinePanelProps) {
-  // Per-clip view override; without one, clips with cloud data open on the
-  // cloud view (so a finished enhance is immediately visible).
-  const [viewByClip, setViewByClip] = useState<Record<string, View>>({});
+  // Per-clip view override; without one, clips open on their richest cloud
+  // variant (so a finished enhance is immediately visible).
+  const [viewByClip, setViewByClip] = useState<Record<string, CaptionVariant>>({});
 
   const withCaptions = clips.filter(
-    (c) =>
-      (c.dossier?.denseCaptions.length ?? 0) > 0 ||
-      cloudCaptionsOf(c.dossier).length > 0 ||
-      c.captionsTotal > 0,
+    (c) => availableVariants(c.dossier).length > 0 || c.captionsTotal > 0,
   );
 
   return (
@@ -48,13 +49,14 @@ export function SceneTimelinePanel({ clips, onCaptionClick, onCompare }: SceneTi
       ) : (
         <div className="space-y-3 max-h-96 overflow-y-auto">
           {withCaptions.map((clip) => {
-            const local = clip.dossier?.denseCaptions ?? [];
-            const cloud = cloudCaptionsOf(clip.dossier);
-            const view: View =
-              viewByClip[clip.clipId] ?? (cloud.length > 0 ? "cloud" : "local");
-            const captions = view === "cloud" ? cloud : local;
-            // For the compare line under cloud rows: local caption at (or
-            // nearest to) the same timestamp, within a sampling gap.
+            const variants = availableVariants(clip.dossier);
+            const local = localCaptionsOf(clip.dossier);
+            const defaultView =
+              variants.find((v) => v === "cloud-timeline") ??
+              variants.find((v) => v === "cloud-shots") ??
+              "local";
+            const view = viewByClip[clip.clipId] ?? defaultView;
+            const captions = captionsOf(clip.dossier, view);
             const localAt = (t: number): DenseCaption | null => {
               let best: DenseCaption | null = null;
               for (const c of local) {
@@ -72,9 +74,9 @@ export function SceneTimelinePanel({ clips, onCaptionClick, onCompare }: SceneTi
                       ? `describing ${clip.captionsDone}/${clip.captionsTotal}…`
                       : `${captions.length} description${captions.length === 1 ? "" : "s"}`}
                   </span>
-                  {cloud.length > 0 && (
+                  {variants.length > 1 && (
                     <span className="shrink-0 inline-flex rounded border border-border overflow-hidden">
-                      {(["local", "cloud"] as const).map((v) => (
+                      {variants.map((v) => (
                         <button
                           key={v}
                           className={`px-1.5 py-0.5 font-normal ${
@@ -86,16 +88,16 @@ export function SceneTimelinePanel({ clips, onCaptionClick, onCompare }: SceneTi
                             setViewByClip((m) => ({ ...m, [clip.clipId]: v }))
                           }
                         >
-                          {v}
+                          {VARIANT_LABEL[v]}
                         </button>
                       ))}
                     </span>
                   )}
-                  {cloud.length > 0 && (
+                  {variants.some((v) => v !== "local") && (
                     <button
                       className="shrink-0 px-1.5 py-0.5 font-normal rounded border border-border text-text-secondary hover:bg-background"
                       onClick={() => onCompare(clip)}
-                      title="Side-by-side: frame, local caption, cloud caption"
+                      title="Side-by-side: frame, local caption, cloud captions"
                     >
                       compare ⇆
                     </button>
@@ -103,7 +105,7 @@ export function SceneTimelinePanel({ clips, onCaptionClick, onCompare }: SceneTi
                 </p>
                 <ul className="space-y-0.5">
                   {captions.map((dc, i) => {
-                    const paired = view === "cloud" ? localAt(dc.t) : null;
+                    const paired = view !== "local" ? localAt(dc.t) : null;
                     return (
                       <li
                         key={i}

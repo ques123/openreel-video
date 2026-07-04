@@ -373,6 +373,11 @@ export function usePerceptionLab(forceDevice: "auto" | InferenceDevice = "auto")
         applyCloudResults(dossier, scope, run.captions, {
           model: run.model,
           enhancedAt: Date.now(),
+          framesSent: run.framesSent,
+          framesFailed: run.framesFailed,
+          ms: run.ms,
+          promptTokens: run.promptTokens,
+          completionTokens: run.completionTokens,
         });
         await getOrchestrator().saveDossier(file, dossier);
         dispatch({ type: "cloud-done", clipId });

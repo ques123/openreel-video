@@ -4,7 +4,7 @@
  * which frames to send for a scope, and how results land back in the dossier.
  */
 
-import type { ClipDossier, CloudVisionMeta, DenseCaption, DenseFrame } from "./types";
+import type { ClipDossier, CloudRunMeta, DenseCaption, DenseFrame } from "./types";
 
 export type CloudScope = "shots" | "timeline";
 
@@ -42,28 +42,33 @@ export function selectCloudFrames(dossier: ClipDossier, scope: CloudScope): Dens
 
 /**
  * Write cloud results into the dossier (mutates, matching how local captions
- * land). Timeline scope fills cloudDenseCaptions; both scopes give each shot
- * the cloud description nearest its rep frame.
+ * land). Each scope owns its own store so runs COEXIST for comparison:
+ * timeline fills cloudDenseCaptions; shots fills cloudShotCaptions and each
+ * shot's cloudCaption (nearest to its rep frame). Per-scope stats land in
+ * cloudRuns; the legacy cloudVision marker tracks the latest run.
  */
 export function applyCloudResults(
   dossier: ClipDossier,
   scope: CloudScope,
   results: DenseCaption[],
-  meta: Omit<CloudVisionMeta, "scope">,
+  meta: CloudRunMeta,
 ): void {
   const sorted = [...results].sort((a, b) => a.t - b.t);
   if (scope === "timeline") {
     dossier.cloudDenseCaptions = sorted;
-  }
-  for (const shot of dossier.shots) {
-    let best: DenseCaption | null = null;
-    for (const c of sorted) {
-      if (c.t < shot.tStart - 1 || c.t > shot.tEnd + 1) continue;
-      if (!best || Math.abs(c.t - shot.repFrameTime) < Math.abs(best.t - shot.repFrameTime)) {
-        best = c;
+  } else {
+    dossier.cloudShotCaptions = sorted;
+    for (const shot of dossier.shots) {
+      let best: DenseCaption | null = null;
+      for (const c of sorted) {
+        if (c.t < shot.tStart - 1 || c.t > shot.tEnd + 1) continue;
+        if (!best || Math.abs(c.t - shot.repFrameTime) < Math.abs(best.t - shot.repFrameTime)) {
+          best = c;
+        }
       }
+      if (best) shot.cloudCaption = best.text;
     }
-    if (best) shot.cloudCaption = best.text;
   }
-  dossier.cloudVision = { ...meta, scope };
+  dossier.cloudRuns[scope] = meta;
+  dossier.cloudVision = { model: meta.model, enhancedAt: meta.enhancedAt, scope };
 }

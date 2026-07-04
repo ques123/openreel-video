@@ -1,26 +1,57 @@
 /**
- * Shared read-model helpers for viewing a dossier's captions: normalize the
- * two cloud shapes (timeline scope vs per-shot) into one timestamped list,
+ * Shared read-model helpers for viewing a dossier's captions: one accessor
+ * per caption variant (local pass, cloud shots scope, cloud timeline scope),
  * and subtitle-style lookup of the caption in effect at a playback time.
  */
 
 import type { ClipDossier, DenseCaption } from "@openreel/core";
 
-/**
- * Cloud descriptions regardless of enhance scope: the timeline scope filled
- * cloudDenseCaptions; the shots scope only wrote per-shot cloudCaptions,
- * which we surface at each shot's rep time.
- */
-export function cloudCaptionsOf(dossier: ClipDossier | null): DenseCaption[] {
-  if (!dossier) return [];
-  if (dossier.cloudDenseCaptions.length > 0) return dossier.cloudDenseCaptions;
-  return dossier.shots
-    .filter((s) => s.cloudCaption)
-    .map((s) => ({ t: s.repFrameTime, text: s.cloudCaption! }));
-}
+/** The three caption variants a clip can carry. */
+export type CaptionVariant = "local" | "cloud-shots" | "cloud-timeline";
 
 export function localCaptionsOf(dossier: ClipDossier | null): DenseCaption[] {
   return dossier?.denseCaptions ?? [];
+}
+
+export function cloudShotCaptionsOf(dossier: ClipDossier | null): DenseCaption[] {
+  return dossier?.cloudShotCaptions ?? [];
+}
+
+export function cloudTimelineCaptionsOf(dossier: ClipDossier | null): DenseCaption[] {
+  return dossier?.cloudDenseCaptions ?? [];
+}
+
+export function captionsOf(
+  dossier: ClipDossier | null,
+  variant: CaptionVariant,
+): DenseCaption[] {
+  if (variant === "local") return localCaptionsOf(dossier);
+  if (variant === "cloud-shots") return cloudShotCaptionsOf(dossier);
+  return cloudTimelineCaptionsOf(dossier);
+}
+
+/** Variants present on a clip, in display order. */
+export function availableVariants(dossier: ClipDossier | null): CaptionVariant[] {
+  const out: CaptionVariant[] = [];
+  if (localCaptionsOf(dossier).length > 0) out.push("local");
+  if (cloudShotCaptionsOf(dossier).length > 0) out.push("cloud-shots");
+  if (cloudTimelineCaptionsOf(dossier).length > 0) out.push("cloud-timeline");
+  return out;
+}
+
+export const VARIANT_LABEL: Record<CaptionVariant, string> = {
+  local: "local",
+  "cloud-shots": "cloud·shots",
+  "cloud-timeline": "cloud·timeline",
+};
+
+/**
+ * Best available cloud descriptions (timeline preferred — it is denser).
+ * Kept for call sites that just want "the cloud view".
+ */
+export function cloudCaptionsOf(dossier: ClipDossier | null): DenseCaption[] {
+  const timeline = cloudTimelineCaptionsOf(dossier);
+  return timeline.length > 0 ? timeline : cloudShotCaptionsOf(dossier);
 }
 
 /**

@@ -54,6 +54,8 @@ export function makeDossier(
     denseFrames?: { t: number; dataUrl: string }[];
     denseCaptions?: { t: number; text: string }[];
     cloudDenseCaptions?: { t: number; text: string }[];
+    cloudShotCaptions?: { t: number; text: string }[];
+    cloudRuns?: ClipDossier["cloudRuns"];
     cloudVision?: ClipDossier["cloudVision"];
     transcript?: TranscriptSegment[];
   } = {},
@@ -72,7 +74,10 @@ export function makeDossier(
     denseFrames: opts.denseFrames ?? [],
     denseCaptions: opts.denseCaptions ?? [],
     cloudDenseCaptions: opts.cloudDenseCaptions ?? [],
+    cloudShotCaptions: opts.cloudShotCaptions ?? [],
+    cloudRuns: opts.cloudRuns ?? { shots: null, timeline: null },
     cloudVision: opts.cloudVision ?? null,
+    localCaptionPerf: null,
     transcript: opts.transcript ?? [],
     perf,
   };

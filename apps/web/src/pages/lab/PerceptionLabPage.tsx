@@ -1,16 +1,21 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   CloudScope,
   DenseCaption,
   SearchHit,
   Shot,
+  Storyboard,
   TranscriptSegment,
 } from "@openreel/core";
+import { downloadBlob, exportDebugVideo } from "../../services/debug-export";
+import type { DirectorExperiment } from "../../services/experiments";
 import { useRouter } from "../../hooks/use-router";
-import { cloudCaptionsOf, localCaptionsOf } from "./caption-views";
+import { cloudShotCaptionsOf, cloudTimelineCaptionsOf, localCaptionsOf } from "./caption-views";
 import { CaptionCompareModal } from "./components/CaptionCompareModal";
 import { ClipDropZone } from "./components/ClipDropZone";
 import { DirectorPanel } from "./components/DirectorPanel";
+import { ExperimentDetailModal } from "./components/ExperimentDetailModal";
+import { ExperimentsPanel } from "./components/ExperimentsPanel";
 import { PerfPanel } from "./components/PerfPanel";
 import { SceneTimelinePanel } from "./components/SceneTimelinePanel";
 import { SearchPanel } from "./components/SearchPanel";
@@ -33,6 +38,16 @@ export function PerceptionLabPage() {
   const [storyboardStart, setStoryboardStart] = useState<number | null>(null);
   /** Clip whose side-by-side caption comparison is open; null = closed. */
   const [compareClip, setCompareClip] = useState<LabClip | null>(null);
+  /** Stored experiment being inspected; null = closed. */
+  const [experimentOpen, setExperimentOpen] = useState<string | null>(null);
+  const [experimentsRefresh, setExperimentsRefresh] = useState(0);
+  /** Live progress line while a debug export renders; null = idle. */
+  const [exportProgress, setExportProgress] = useState<string | null>(null);
+  /** Replay of a stored experiment's cut (storyboard + remapped files). */
+  const [replay, setReplay] = useState<{
+    storyboard: Storyboard;
+    getFile: (clipId: string) => File | null;
+  } | null>(null);
   // Cloud vision opt-in: session-only (deliberately NOT persisted — each
   // session re-consents) + per-run scope dial.
   const [cloudEnabled, setCloudEnabled] = useState(false);
@@ -47,8 +62,8 @@ export function PerceptionLabPage() {
   const [bulkRunning, setBulkRunning] = useState(false);
 
   const isSelected = useCallback(
-    (clip: LabClip) => selectedOverride[clip.clipId] ?? !clip.dossier?.cloudVision,
-    [selectedOverride],
+    (clip: LabClip) => selectedOverride[clip.clipId] ?? !clip.dossier?.cloudRuns?.[cloudScope],
+    [selectedOverride, cloudScope],
   );
 
   const selectedClips = state.clips.filter(
@@ -73,7 +88,11 @@ export function PerceptionLabPage() {
   const timelinesFor = useCallback(
     (clip: LabClip | undefined) =>
       clip?.dossier
-        ? { local: localCaptionsOf(clip.dossier), cloud: cloudCaptionsOf(clip.dossier) }
+        ? {
+            local: localCaptionsOf(clip.dossier),
+            "cloud-shots": cloudShotCaptionsOf(clip.dossier),
+            "cloud-timeline": cloudTimelineCaptionsOf(clip.dossier),
+          }
         : undefined,
     [],
   );
@@ -164,6 +183,82 @@ export function PerceptionLabPage() {
     [openPreviewAt],
   );
 
+  // Refresh the experiments list whenever a run lands or updates.
+  useEffect(() => {
+    if (director.state.phase === "awaiting-refine") {
+      setExperimentsRefresh((n) => n + 1);
+    }
+  }, [director.state.phase, director.state.messages]);
+
+  /** Find a clip's File in THIS session by its stable cross-session identity. */
+  const fileByCacheKey = useCallback(
+    (cacheKey: string) => {
+      const clip = state.clips.find((c) => c.dossier?.cacheKey === cacheKey);
+      return clip ? getFile(clip.clipId) : null;
+    },
+    [state.clips, getFile],
+  );
+
+  /** clipId -> File resolver for an experiment (old ids remapped via cacheKey). */
+  const experimentGetFile = useCallback(
+    (exp: DirectorExperiment) => (clipId: string) => {
+      const ref = exp.clips.find((c) => c.clipId === clipId);
+      return (ref ? fileByCacheKey(ref.cacheKey) : null) ?? getFile(clipId);
+    },
+    [fileByCacheKey, getFile],
+  );
+
+  const experimentMissingFiles = useCallback(
+    (exp: DirectorExperiment) =>
+      exp.clips.filter((ref) => !fileByCacheKey(ref.cacheKey)).map((r) => r.fileName),
+    [fileByCacheKey],
+  );
+
+  /** Render + download the debug WebM for an experiment's storyboard. */
+  const runDebugExport = useCallback(
+    async (exp: DirectorExperiment, storyboard: Storyboard) => {
+      if (exportProgress !== null) return;
+      setExportProgress("starting…");
+      try {
+        const blob = await exportDebugVideo({
+          storyboard,
+          meta: {
+            brief: exp.brief,
+            targetDurationS: exp.targetDurationS,
+            promptSources: exp.promptSources,
+            model: exp.model,
+            at: exp.at,
+            usage: exp.usage,
+          },
+          activity: exp.activity,
+          getFile: experimentGetFile(exp),
+          fileNameOf: (clipId) =>
+            exp.clips.find((c) => c.clipId === clipId)?.fileName ??
+            state.clips.find((c) => c.clipId === clipId)?.fileName ??
+            clipId,
+          onProgress: setExportProgress,
+        });
+        const slug = (storyboard.title ?? "cut").replace(/\W+/g, "-").toLowerCase();
+        downloadBlob(blob, `debug-${slug}-${exp.id}.webm`);
+      } catch (err) {
+        console.error("[debug-export]", err);
+        window.alert(
+          "Debug export failed: " + (err instanceof Error ? err.message : String(err)),
+        );
+      } finally {
+        setExportProgress(null);
+      }
+    },
+    [exportProgress, experimentGetFile, state.clips],
+  );
+
+  const exportCurrentRun = useCallback(() => {
+    const exp = director.getExperiment();
+    if (exp && director.state.storyboard) {
+      void runDebugExport(exp, director.state.storyboard);
+    }
+  }, [director, runDebugExport]);
+
   /** Enhance every selected clip, one at a time (per-clip progress shows in each row). */
   const enhanceSelected = useCallback(async () => {
     const ids = selectedClips.map((c) => c.clipId);
@@ -253,7 +348,15 @@ export function PerceptionLabPage() {
         </header>
 
         {state.clips.length === 0 ? (
-          <ClipDropZone onFiles={addFiles} />
+          <div className="space-y-4">
+            <ClipDropZone onFiles={addFiles} />
+            <div className="max-w-md">
+              <ExperimentsPanel
+                refreshToken={experimentsRefresh}
+                onOpen={setExperimentOpen}
+              />
+            </div>
+          </div>
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
             <div className="lg:col-span-2 space-y-3">
@@ -291,6 +394,8 @@ export function PerceptionLabPage() {
                   onRemove={director.removeItem}
                   onMove={director.moveItem}
                   onPlay={setStoryboardStart}
+                  onExportDebug={exportProgress === null ? exportCurrentRun : null}
+                  exportProgress={exportProgress}
                 />
               )}
               <SearchPanel
@@ -307,6 +412,10 @@ export function PerceptionLabPage() {
               />
               <TranscriptPanel clips={state.clips} onSegmentClick={handleSegmentClick} />
               <PerfPanel clips={state.clips} models={state.models} />
+              <ExperimentsPanel
+                refreshToken={experimentsRefresh}
+                onOpen={setExperimentOpen}
+              />
             </div>
           </div>
         )}
@@ -320,6 +429,34 @@ export function PerceptionLabPage() {
             setCompareClip(null);
             openPreviewAt(compareClip, t);
           }}
+        />
+      )}
+      {experimentOpen && (
+        <ExperimentDetailModal
+          experimentId={experimentOpen}
+          missingFiles={experimentMissingFiles}
+          exportProgress={exportProgress}
+          onWatch={(exp) => {
+            if (exp.storyboard) {
+              setReplay({ storyboard: exp.storyboard, getFile: experimentGetFile(exp) });
+            }
+          }}
+          onExportDebug={(exp) => {
+            if (exp.storyboard) void runDebugExport(exp, exp.storyboard);
+          }}
+          onDeleted={() => {
+            setExperimentOpen(null);
+            setExperimentsRefresh((n) => n + 1);
+          }}
+          onClose={() => setExperimentOpen(null)}
+        />
+      )}
+      {replay && (
+        <StoryboardPreviewModal
+          storyboard={replay.storyboard}
+          getFile={replay.getFile}
+          initialIndex={0}
+          onClose={() => setReplay(null)}
         />
       )}
       {storyboardStart !== null && director.state.storyboard && (

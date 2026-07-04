@@ -8,6 +8,10 @@ interface StoryboardListProps {
   onMove: (from: number, to: number) => void;
   /** Play the storyboard starting from this segment (0 = whole cut). */
   onPlay: (startIndex: number) => void;
+  /** Render + download the debug video; null while an export is running. */
+  onExportDebug: (() => void) | null;
+  /** Progress line for a running export ("rendering segment 2/6…"). */
+  exportProgress: string | null;
 }
 
 function fmtTime(s: number): string {
@@ -23,6 +27,8 @@ export function StoryboardList({
   onRemove,
   onMove,
   onPlay,
+  onExportDebug,
+  exportProgress,
 }: StoryboardListProps) {
   const total = storyboardDurationS(storyboard);
   const offTarget =
@@ -34,12 +40,22 @@ export function StoryboardList({
         <h3 className="text-sm font-semibold text-text-primary truncate">
           {storyboard.title ?? "Storyboard"}
         </h3>
-        <button
-          onClick={() => onPlay(0)}
-          className="px-3 py-1 text-sm rounded-md bg-primary text-white shrink-0"
-        >
-          ▶ Play
-        </button>
+        <span className="flex items-center gap-1.5 shrink-0">
+          <button
+            onClick={onExportDebug ?? undefined}
+            disabled={!onExportDebug}
+            className="px-2 py-1 text-xs rounded-md border border-border text-text-secondary hover:text-text-primary disabled:opacity-40"
+            title="Render the storyboard into one WebM with a burned-in debug overlay"
+          >
+            {exportProgress ? "rendering…" : "⬇ debug video"}
+          </button>
+          <button
+            onClick={() => onPlay(0)}
+            className="px-3 py-1 text-sm rounded-md bg-primary text-white"
+          >
+            ▶ Play
+          </button>
+        </span>
       </div>
       {storyboard.notes && (
         <p className="text-xs text-text-secondary mb-2">{storyboard.notes}</p>

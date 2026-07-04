@@ -133,6 +133,11 @@ export async function runDirectorLoop(
             query,
             hitCount: result.hits.length,
             confidentCount: result.hits.filter((h) => h.confident).length,
+            hits: result.hits.map((h) => ({
+              clipId: h.clipId,
+              shotIndex: h.shot.index,
+              confident: h.confident,
+            })),
           });
           reply(formatSearchResults(query, result));
         } catch (err) {

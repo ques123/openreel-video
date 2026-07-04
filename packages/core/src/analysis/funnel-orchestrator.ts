@@ -454,7 +454,10 @@ export class FunnelOrchestrator {
       denseFrames: run.denseFrames,
       denseCaptions: [],
       cloudDenseCaptions: [],
+      cloudShotCaptions: [],
+      cloudRuns: { shots: null, timeline: null },
       cloudVision: null,
+      localCaptionPerf: null,
       transcript: run.transcript,
       perf,
     };
@@ -500,10 +503,15 @@ export class FunnelOrchestrator {
       const captions: DenseCaption[] = dossier.denseCaptions;
       let done = total - frames.length;
       for (const frame of frames) {
+        const frameStart = performance.now();
         try {
           const raw = await this.requestCaption(frame.dataUrl);
           const text = cleanCaption(raw);
           if (text) captions.push({ t: frame.t, text });
+          const perf = dossier.localCaptionPerf ?? { totalMs: 0, frames: 0 };
+          perf.totalMs += performance.now() - frameStart;
+          perf.frames += 1;
+          dossier.localCaptionPerf = perf;
         } catch {
           // best-effort; skip this frame
         }

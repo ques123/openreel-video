@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { DenseCaption, Shot } from "@openreel/core";
-import { captionAt } from "../caption-views";
+import { captionAt, VARIANT_LABEL, type CaptionVariant } from "../caption-views";
 
 export interface ShotPreview {
   file: File;
@@ -11,11 +11,11 @@ export interface ShotPreview {
   /** Caption to show in the header instead of the shot's own. */
   caption?: string;
   /**
-   * Full caption timelines for the clip. When present, the header caption
-   * follows the playhead (subtitle-style) and a local/cloud switch appears
-   * whenever a cloud timeline exists.
+   * Caption timelines per variant. When present, the header caption follows
+   * the playhead (subtitle-style) and a variant switch appears whenever more
+   * than one variant exists.
    */
-  timelines?: { local: DenseCaption[]; cloud: DenseCaption[] };
+  timelines?: Partial<Record<CaptionVariant, DenseCaption[]>>;
 }
 
 interface ShotPreviewModalProps {
@@ -37,9 +37,14 @@ function fmtTime(s: number): string {
 export function ShotPreviewModal({ preview, onClose }: ShotPreviewModalProps) {
   const { file, fileName, shot, timelines } = preview;
   const startAtS = preview.startAtS ?? shot.tStart;
-  const hasCloud = (timelines?.cloud.length ?? 0) > 0;
-  const hasLocal = (timelines?.local.length ?? 0) > 0;
-  const [source, setSource] = useState<"local" | "cloud">(hasCloud ? "cloud" : "local");
+  const variants = (
+    ["local", "cloud-shots", "cloud-timeline"] as CaptionVariant[]
+  ).filter((v) => (timelines?.[v]?.length ?? 0) > 0);
+  const defaultVariant =
+    variants.find((v) => v === "cloud-timeline") ??
+    variants.find((v) => v === "cloud-shots") ??
+    "local";
+  const [source, setSource] = useState<CaptionVariant>(defaultVariant);
   const [playheadT, setPlayheadT] = useState(startAtS);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [pastEnd, setPastEnd] = useState(false);
@@ -81,7 +86,7 @@ export function ShotPreviewModal({ preview, onClose }: ShotPreviewModalProps) {
 
   // Header caption: follow the playhead through the selected timeline when
   // timelines are available; otherwise the static clicked/shot caption.
-  const timeline = source === "cloud" ? timelines?.cloud : timelines?.local;
+  const timeline = timelines?.[source];
   const synced = timeline && timeline.length > 0 ? captionAt(timeline, playheadT) : null;
   const headerCaption = synced?.text ?? preview.caption ?? shot.cloudCaption ?? shot.caption;
 
@@ -111,9 +116,9 @@ export function ShotPreviewModal({ preview, onClose }: ShotPreviewModalProps) {
             )}
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            {hasCloud && hasLocal && (
+            {variants.length > 1 && (
               <span className="inline-flex rounded border border-border overflow-hidden text-xs">
-                {(["local", "cloud"] as const).map((v) => (
+                {variants.map((v) => (
                   <button
                     key={v}
                     className={`px-1.5 py-0.5 ${
@@ -123,7 +128,7 @@ export function ShotPreviewModal({ preview, onClose }: ShotPreviewModalProps) {
                     }`}
                     onClick={() => setSource(v)}
                   >
-                    {v}
+                    {VARIANT_LABEL[v]}
                   </button>
                 ))}
               </span>

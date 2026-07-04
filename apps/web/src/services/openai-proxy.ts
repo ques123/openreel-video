@@ -20,9 +20,15 @@ export interface ChatCompleteRequest {
   tool_choice?: { type: "function"; function: { name: string } };
 }
 
+export interface ChatUsage {
+  promptTokens: number;
+  completionTokens: number;
+}
+
 export async function chatComplete(
   req: ChatCompleteRequest,
   signal?: AbortSignal,
+  onUsage?: (usage: ChatUsage) => void,
 ): Promise<AssistantTurn> {
   const res = await fetch(`${BASE}/chat/completions`, {
     method: "POST",
@@ -36,7 +42,14 @@ export async function chatComplete(
   }
   const data = (await res.json()) as {
     choices?: { message?: AssistantTurn }[];
+    usage?: { prompt_tokens?: number; completion_tokens?: number };
   };
+  if (data.usage && onUsage) {
+    onUsage({
+      promptTokens: data.usage.prompt_tokens ?? 0,
+      completionTokens: data.usage.completion_tokens ?? 0,
+    });
+  }
   const message = data.choices?.[0]?.message;
   if (!message) throw new Error("OpenAI response had no message");
   return message;

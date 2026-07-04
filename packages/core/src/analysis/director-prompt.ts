@@ -23,11 +23,31 @@ const fmtS = (s: number) => s.toFixed(1);
 const fmtRecordedAt = (ms: number) =>
   new Date(ms).toISOString().slice(0, 16).replace("T", " ") + " UTC";
 
+/**
+ * Which perception sources feed the director prompt — the A/B mixer.
+ * localCaptions covers both per-shot descriptions and the local scene
+ * timeline; the two cloud variants and the transcript toggle independently.
+ */
+export interface PromptSources {
+  localCaptions: boolean;
+  cloudShots: boolean;
+  cloudTimeline: boolean;
+  transcript: boolean;
+}
+
+export const DEFAULT_PROMPT_SOURCES: PromptSources = {
+  localCaptions: true,
+  cloudShots: true,
+  cloudTimeline: true,
+  transcript: true,
+};
+
 export function dossierToPromptText(
   dossier: ClipDossier,
-  opts: { maxTranscriptChars?: number } = {},
+  opts: { maxTranscriptChars?: number; sources?: PromptSources } = {},
 ): string {
   const maxTranscriptChars = opts.maxTranscriptChars ?? DEFAULT_MAX_TRANSCRIPT_CHARS;
+  const sources = opts.sources ?? DEFAULT_PROMPT_SOURCES;
   const lines: string[] = [];
 
   lines.push(
@@ -46,8 +66,11 @@ export function dossierToPromptText(
   );
   for (const shot of dossier.shots) {
     const len = shot.tEnd - shot.tStart;
-    // Cloud descriptions (opt-in enhance, large model) trump local ones.
-    const text = shot.cloudCaption ?? shot.caption;
+    // Cloud descriptions (opt-in enhance, large model) trump local ones —
+    // subject to the source mixer.
+    const text =
+      (sources.cloudShots ? shot.cloudCaption : null) ??
+      (sources.localCaptions ? shot.caption : null);
     const maxLen = 240;
     const caption = text
       ? `  "${text.length > maxLen ? text.slice(0, maxLen - 3) + "..." : text}"`
@@ -59,8 +82,12 @@ export function dossierToPromptText(
     );
   }
 
-  const useCloudTimeline = dossier.cloudDenseCaptions.length > 0;
-  const timeline = useCloudTimeline ? dossier.cloudDenseCaptions : dossier.denseCaptions;
+  const useCloudTimeline = sources.cloudTimeline && dossier.cloudDenseCaptions.length > 0;
+  const timeline = useCloudTimeline
+    ? dossier.cloudDenseCaptions
+    : sources.localCaptions
+      ? dossier.denseCaptions
+      : [];
   if (timeline.length > 0) {
     const segments = mergeDenseCaptions(timeline);
     lines.push(
@@ -82,7 +109,9 @@ export function dossierToPromptText(
     }
   }
 
-  if (dossier.transcript.length === 0) {
+  if (!sources.transcript) {
+    lines.push("  TRANSCRIPT: (withheld for this run — work from the visuals)");
+  } else if (dossier.transcript.length === 0) {
     lines.push("  TRANSCRIPT: (no speech detected)");
   } else {
     lines.push("  TRANSCRIPT:");
@@ -108,9 +137,12 @@ export function sortByRecordedAt(dossiers: ClipDossier[]): ClipDossier[] {
   );
 }
 
-export function dossiersToPromptText(dossiers: ClipDossier[]): string {
+export function dossiersToPromptText(
+  dossiers: ClipDossier[],
+  sources?: PromptSources,
+): string {
   return sortByRecordedAt(dossiers)
-    .map((d) => dossierToPromptText(d))
+    .map((d) => dossierToPromptText(d, { sources }))
     .join("\n\n");
 }
 
@@ -148,11 +180,14 @@ export function buildBriefMessage(brief: string, targetDurationS: number | null)
   return lines.join("\n");
 }
 
-export function buildDossierMessage(dossiers: ClipDossier[]): string {
+export function buildDossierMessage(
+  dossiers: ClipDossier[],
+  sources?: PromptSources,
+): string {
   return (
     `FOOTAGE: ${dossiers.length} analyzed clip${dossiers.length === 1 ? "" : "s"} — ` +
     `this is ALL the available footage, listed in RECORDING ORDER (oldest first).\n\n` +
-    dossiersToPromptText(dossiers)
+    dossiersToPromptText(dossiers, sources)
   );
 }
 
