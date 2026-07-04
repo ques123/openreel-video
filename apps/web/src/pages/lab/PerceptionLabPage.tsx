@@ -459,7 +459,13 @@ export function PerceptionLabPage() {
           onClose={() => setExperimentOpen(null)}
         />
       )}
-      {matrixOpen && <ExperimentMatrixModal onClose={() => setMatrixOpen(false)} />}
+      {matrixOpen && (
+        <ExperimentMatrixModal
+          resolveGetFile={experimentGetFile}
+          missingFiles={experimentMissingFiles}
+          onClose={() => setMatrixOpen(false)}
+        />
+      )}
       {replay && (
         <StoryboardPreviewModal
           storyboard={replay.storyboard}
