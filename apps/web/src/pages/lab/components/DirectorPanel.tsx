@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { DirectorActivity } from "@openreel/core";
+import { DEFAULT_PROMPT_SOURCES, type DirectorActivity, type PromptSources } from "@openreel/core";
 import type { UseDirectorReturn } from "../use-director";
 import { PromptInspectorModal } from "./PromptInspectorModal";
 
@@ -28,6 +28,7 @@ export function DirectorPanel({ director, ready, clipsDone, clipsTotal }: Direct
   const { state, start, refine, cancel, reset } = director;
   const [brief, setBrief] = useState("");
   const [target, setTarget] = useState("60");
+  const [sources, setSources] = useState<PromptSources>(DEFAULT_PROMPT_SOURCES);
   const [feedback, setFeedback] = useState("");
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
@@ -61,7 +62,7 @@ export function DirectorPanel({ director, ready, clipsDone, clipsTotal }: Direct
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          if (brief.trim() && !running) start(brief.trim(), targetS);
+          if (brief.trim() && !running) start(brief.trim(), targetS, sources);
         }}
         className="space-y-2"
       >
@@ -73,6 +74,29 @@ export function DirectorPanel({ director, ready, clipsDone, clipsTotal }: Direct
           rows={2}
           className="w-full bg-background border border-border rounded-md px-3 py-1.5 text-sm text-text-primary placeholder:text-text-secondary/60 outline-none focus:border-primary resize-none"
         />
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-text-secondary">
+          <span className="font-medium" title="Which perception sources the director gets — for A/B testing input combinations">
+            send:
+          </span>
+          {(
+            [
+              ["localCaptions", "local captions"],
+              ["cloudShots", "cloud shots"],
+              ["cloudTimeline", "cloud timeline"],
+              ["transcript", "transcript"],
+            ] as [keyof PromptSources, string][]
+          ).map(([key, label]) => (
+            <label key={key} className="flex items-center gap-1 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={sources[key]}
+                disabled={!ready || running}
+                onChange={(e) => setSources((s) => ({ ...s, [key]: e.target.checked }))}
+              />
+              {label}
+            </label>
+          ))}
+        </div>
         <div className="flex items-center gap-2">
           <label className="text-xs text-text-secondary flex items-center gap-1.5">
             target

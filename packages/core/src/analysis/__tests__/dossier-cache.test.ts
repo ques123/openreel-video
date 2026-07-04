@@ -47,7 +47,21 @@ function makeDossier(): ClipDossier {
     denseFrames: [{ t: 2, dataUrl: "data:image/jpeg;base64,frame2" }],
     denseCaptions: [{ t: 2, text: "a market street" }],
     cloudDenseCaptions: [{ t: 2, text: "a bustling market street at dusk" }],
+    cloudShotCaptions: [{ t: 3.1, text: "vendor mid-slice, knife raised" }],
+    cloudRuns: {
+      shots: {
+        model: "gpt-5.2",
+        enhancedAt: 1234000,
+        framesSent: 1,
+        framesFailed: 0,
+        ms: 900,
+        promptTokens: 500,
+        completionTokens: 60,
+      },
+      timeline: null,
+    },
     cloudVision: { model: "gpt-5.2", scope: "timeline", enhancedAt: 1234567 },
+    localCaptionPerf: { totalMs: 4200, frames: 3 },
     transcript: [{ t0: 0.5, t1: 4.2, text: "we finally made it to the falls" }],
     perf: {
       ingestMs: 800,
@@ -93,3 +107,36 @@ describe("dossier serialization", () => {
     expect(() => deserializeDossier(buffer)).not.toThrow();
   });
 });
+
+describe("legacy migration (pre-split cloud stores)", () => {
+  it("derives cloudShotCaptions and cloudRuns from a shots-scope legacy record", () => {
+    const legacy = makeDossier() as unknown as Record<string, unknown>;
+    delete legacy.cloudShotCaptions;
+    delete legacy.cloudRuns;
+    delete legacy.localCaptionPerf;
+    legacy.cloudDenseCaptions = [];
+    legacy.cloudVision = { model: "gpt-5.2", scope: "shots", enhancedAt: 42 };
+    const buf = new TextEncoder().encode(JSON.stringify(serializeForTest(legacy)));
+    const restored = deserializeDossier(
+      buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer,
+    );
+    // shot 0 had a cloudCaption -> becomes the shots-scope store at its rep time
+    expect(restored.cloudShotCaptions).toEqual([
+      { t: 3.1, text: "a man browses durian stalls in a covered market, warm light" },
+    ]);
+    expect(restored.cloudRuns.shots).toMatchObject({ model: "gpt-5.2", framesSent: 1 });
+    expect(restored.cloudRuns.timeline).toBeNull();
+    expect(restored.localCaptionPerf).toBeNull();
+  });
+});
+
+/** JSON-serialize embeddings the way serializeDossier does, for hand-built legacy records. */
+function serializeForTest(d: Record<string, unknown>): Record<string, unknown> {
+  const shots = (d.shots as Record<string, unknown>[]).map((shot) => {
+    const { embedding, frameEmbeddings, ...rest } = shot;
+    void embedding;
+    void frameEmbeddings;
+    return { ...rest, embeddingB64: null, frameEmbeddingsB64: [] };
+  });
+  return { ...d, shots };
+}

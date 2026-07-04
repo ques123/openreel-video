@@ -62,6 +62,39 @@ describe("dossierToPromptText", () => {
     expect(text).toContain("scene description");
   });
 
+  it("the source mixer excludes what it is told to", () => {
+    const dossier = makeDossier({
+      shots: [
+        makeShot(0, 0, 10, {
+          caption: "local shot text",
+          cloudCaption: "cloud shot text",
+        }),
+      ],
+      denseCaptions: [{ t: 0, text: "local timeline text" }],
+      cloudDenseCaptions: [{ t: 0, text: "cloud timeline text" }],
+      transcript: [{ t0: 0, t1: 2, text: "spoken words" }],
+    });
+
+    const noCloud = dossierToPromptText(dossier, {
+      sources: { localCaptions: true, cloudShots: false, cloudTimeline: false, transcript: true },
+    });
+    expect(noCloud).toContain("local shot text");
+    expect(noCloud).not.toContain("cloud shot text");
+    expect(noCloud).toContain("local timeline text");
+    expect(noCloud).not.toContain("cloud timeline text");
+    expect(noCloud).toContain("spoken words");
+
+    const cloudOnly = dossierToPromptText(dossier, {
+      sources: { localCaptions: false, cloudShots: true, cloudTimeline: true, transcript: false },
+    });
+    expect(cloudOnly).toContain("cloud shot text");
+    expect(cloudOnly).not.toContain("local shot text");
+    expect(cloudOnly).toContain("cloud timeline text");
+    expect(cloudOnly).not.toContain("local timeline text");
+    expect(cloudOnly).not.toContain("spoken words");
+    expect(cloudOnly).toContain("withheld for this run");
+  });
+
   it("prefers cloud captions and the cloud timeline when present", () => {
     const text = dossierToPromptText(
       makeDossier({

@@ -42,7 +42,7 @@ describe("selectCloudFrames", () => {
 });
 
 describe("applyCloudResults", () => {
-  const meta = { model: "gpt-5.2", enhancedAt: 111 };
+  const meta = { model: "gpt-5.2", enhancedAt: 111, framesSent: 2, framesFailed: 0, ms: 1500, promptTokens: 900, completionTokens: 120 };
 
   it("timeline scope fills cloudDenseCaptions sorted and stamps provenance", () => {
     const dossier = makeDossier({ denseFrames: frames });
@@ -56,7 +56,9 @@ describe("applyCloudResults", () => {
       meta,
     );
     expect(dossier.cloudDenseCaptions.map((c) => c.t)).toEqual([1, 9]);
-    expect(dossier.cloudVision).toEqual({ ...meta, scope: "timeline" });
+    expect(dossier.cloudVision).toEqual({ model: "gpt-5.2", enhancedAt: 111, scope: "timeline" });
+    expect(dossier.cloudRuns.timeline).toEqual(meta);
+    expect(dossier.cloudRuns.shots).toBeNull();
   });
 
   it("gives each shot the cloud caption nearest its rep frame", () => {

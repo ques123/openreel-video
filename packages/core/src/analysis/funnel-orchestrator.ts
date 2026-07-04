@@ -44,7 +44,7 @@ interface PendingEmbed {
 }
 
 interface PendingCaption {
-  resolve: (caption: string) => void;
+  resolve: (caption: string, ms: number) => void;
   reject: (err: Error) => void;
 }
 
@@ -454,7 +454,10 @@ export class FunnelOrchestrator {
       denseFrames: run.denseFrames,
       denseCaptions: [],
       cloudDenseCaptions: [],
+      cloudShotCaptions: [],
+      cloudRuns: { shots: null, timeline: null },
       cloudVision: null,
+      localCaptionPerf: null,
       transcript: run.transcript,
       perf,
     };
@@ -501,9 +504,13 @@ export class FunnelOrchestrator {
       let done = total - frames.length;
       for (const frame of frames) {
         try {
-          const raw = await this.requestCaption(frame.dataUrl);
+          const { caption: raw, ms } = await this.requestCaption(frame.dataUrl);
           const text = cleanCaption(raw);
           if (text) captions.push({ t: frame.t, text });
+          const perf = dossier.localCaptionPerf ?? { totalMs: 0, frames: 0 };
+          perf.totalMs += ms;
+          perf.frames += 1;
+          dossier.localCaptionPerf = perf;
         } catch {
           // best-effort; skip this frame
         }
@@ -565,7 +572,7 @@ export class FunnelOrchestrator {
       let updated = false;
       for (const shot of missing) {
         try {
-          const caption = await this.requestCaption(shot.thumbnailDataUrl);
+          const { caption } = await this.requestCaption(shot.thumbnailDataUrl);
           if (!caption) continue;
           shot.caption = caption;
           updated = true;
@@ -583,10 +590,15 @@ export class FunnelOrchestrator {
     });
   }
 
-  private requestCaption(image: string): Promise<string> {
+  /** Resolves with the caption and the worker-measured COMPUTE time (model
+   * load/download excluded — that would poison speed comparisons). */
+  private requestCaption(image: string): Promise<{ caption: string; ms: number }> {
     const requestId = uid("cap");
-    return new Promise<string>((resolve, reject) => {
-      this.pendingCaptions.set(requestId, { resolve, reject });
+    return new Promise<{ caption: string; ms: number }>((resolve, reject) => {
+      this.pendingCaptions.set(requestId, {
+        resolve: (caption, ms) => resolve({ caption, ms }),
+        reject,
+      });
       this.captionWorker!.postMessage({ type: "caption", requestId, image });
     });
   }
@@ -686,7 +698,7 @@ export class FunnelOrchestrator {
         const pending = this.pendingCaptions.get(msg.requestId);
         if (pending) {
           this.pendingCaptions.delete(msg.requestId);
-          pending.resolve(msg.caption);
+          pending.resolve(msg.caption, msg.ms);
         }
         break;
       }
