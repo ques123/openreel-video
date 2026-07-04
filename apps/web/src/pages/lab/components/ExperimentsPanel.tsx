@@ -5,6 +5,7 @@ interface ExperimentsPanelProps {
   /** Change this value to make the panel re-read the index (new run saved). */
   refreshToken: unknown;
   onOpen: (id: string) => void;
+  onCompareGrid: () => void;
 }
 
 function fmtWhen(ms: number): string {
@@ -25,7 +26,7 @@ function srcBadge(s: ExperimentSummary): string {
  * conversation and storyboard are all persisted, so experiments survive
  * reloads and can be re-watched/exported later.
  */
-export function ExperimentsPanel({ refreshToken, onOpen }: ExperimentsPanelProps) {
+export function ExperimentsPanel({ refreshToken, onOpen, onCompareGrid }: ExperimentsPanelProps) {
   const [experiments, setExperiments] = useState<ExperimentSummary[]>([]);
 
   useEffect(() => {
@@ -48,9 +49,17 @@ export function ExperimentsPanel({ refreshToken, onOpen }: ExperimentsPanelProps
 
   return (
     <div className="bg-background-secondary border border-border rounded-lg p-3">
-      <h3 className="text-sm font-semibold text-text-primary mb-2">
+      <h3 className="text-sm font-semibold text-text-primary mb-2 flex items-center">
         Experiments
         <span className="font-normal text-text-secondary ml-1.5">{experiments.length}</span>
+        <span className="flex-1" />
+        <button
+          className="text-[10px] font-normal px-1.5 py-0.5 rounded border border-border text-text-secondary hover:text-text-primary"
+          onClick={onCompareGrid}
+          title="Watch experiment renders side by side with setting differences highlighted"
+        >
+          compare grid ⊞
+        </button>
       </h3>
       <ul className="space-y-1 max-h-60 overflow-y-auto">
         {experiments.map((e) => (

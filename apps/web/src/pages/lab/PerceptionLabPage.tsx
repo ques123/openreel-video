@@ -8,13 +8,14 @@ import type {
   TranscriptSegment,
 } from "@openreel/core";
 import { downloadBlob, exportDebugVideo } from "../../services/debug-export";
-import type { DirectorExperiment } from "../../services/experiments";
+import { saveExperimentVideo, type DirectorExperiment } from "../../services/experiments";
 import { useRouter } from "../../hooks/use-router";
 import { cloudShotCaptionsOf, cloudTimelineCaptionsOf, localCaptionsOf } from "./caption-views";
 import { CaptionCompareModal } from "./components/CaptionCompareModal";
 import { ClipDropZone } from "./components/ClipDropZone";
 import { DirectorPanel } from "./components/DirectorPanel";
 import { ExperimentDetailModal } from "./components/ExperimentDetailModal";
+import { ExperimentMatrixModal } from "./components/ExperimentMatrixModal";
 import { ExperimentsPanel } from "./components/ExperimentsPanel";
 import { PerfPanel } from "./components/PerfPanel";
 import { SceneTimelinePanel } from "./components/SceneTimelinePanel";
@@ -40,6 +41,7 @@ export function PerceptionLabPage() {
   const [compareClip, setCompareClip] = useState<LabClip | null>(null);
   /** Stored experiment being inspected; null = closed. */
   const [experimentOpen, setExperimentOpen] = useState<string | null>(null);
+  const [matrixOpen, setMatrixOpen] = useState(false);
   const [experimentsRefresh, setExperimentsRefresh] = useState(0);
   /** Live progress line while a debug export renders; null = idle. */
   const [exportProgress, setExportProgress] = useState<string | null>(null);
@@ -239,6 +241,10 @@ export function PerceptionLabPage() {
           onProgress: setExportProgress,
         });
         const slug = (storyboard.title ?? "cut").replace(/\W+/g, "-").toLowerCase();
+        // Persist the render so the comparison matrix replays it without
+        // re-rendering (and without needing the source files present).
+        await saveExperimentVideo(exp.id, blob).catch(() => undefined);
+        setExperimentsRefresh((n) => n + 1);
         downloadBlob(blob, `debug-${slug}-${exp.id}.webm`);
       } catch (err) {
         console.error("[debug-export]", err);
@@ -354,6 +360,7 @@ export function PerceptionLabPage() {
               <ExperimentsPanel
                 refreshToken={experimentsRefresh}
                 onOpen={setExperimentOpen}
+                onCompareGrid={() => setMatrixOpen(true)}
               />
             </div>
           </div>
@@ -415,6 +422,7 @@ export function PerceptionLabPage() {
               <ExperimentsPanel
                 refreshToken={experimentsRefresh}
                 onOpen={setExperimentOpen}
+                onCompareGrid={() => setMatrixOpen(true)}
               />
             </div>
           </div>
@@ -451,6 +459,7 @@ export function PerceptionLabPage() {
           onClose={() => setExperimentOpen(null)}
         />
       )}
+      {matrixOpen && <ExperimentMatrixModal onClose={() => setMatrixOpen(false)} />}
       {replay && (
         <StoryboardPreviewModal
           storyboard={replay.storyboard}
