@@ -7,6 +7,8 @@ import type {
   TranscriptSegment,
 } from "@openreel/core";
 import { useRouter } from "../../hooks/use-router";
+import { cloudCaptionsOf, localCaptionsOf } from "./caption-views";
+import { CaptionCompareModal } from "./components/CaptionCompareModal";
 import { ClipDropZone } from "./components/ClipDropZone";
 import { DirectorPanel } from "./components/DirectorPanel";
 import { PerfPanel } from "./components/PerfPanel";
@@ -29,17 +31,30 @@ export function PerceptionLabPage() {
   const [preview, setPreview] = useState<ShotPreview | null>(null);
   /** Segment index to start storyboard playback from; null = closed. */
   const [storyboardStart, setStoryboardStart] = useState<number | null>(null);
+  /** Clip whose side-by-side caption comparison is open; null = closed. */
+  const [compareClip, setCompareClip] = useState<LabClip | null>(null);
   // Cloud vision opt-in: session-only (deliberately NOT persisted — each
   // session re-consents) + per-run scope dial.
   const [cloudEnabled, setCloudEnabled] = useState(false);
   const [cloudScope, setCloudScope] = useState<CloudScope>("shots");
 
+  /** Caption timelines for the preview modal's playhead-synced header. */
+  const timelinesFor = useCallback(
+    (clip: LabClip | undefined) =>
+      clip?.dossier
+        ? { local: localCaptionsOf(clip.dossier), cloud: cloudCaptionsOf(clip.dossier) }
+        : undefined,
+    [],
+  );
+
   const openPreview = useCallback(
     (clipId: string, fileName: string, shot: Shot) => {
       const file = getFile(clipId);
-      if (file) setPreview({ file, fileName, shot });
+      if (!file) return;
+      const clip = state.clips.find((c) => c.clipId === clipId);
+      setPreview({ file, fileName, shot, timelines: timelinesFor(clip) });
     },
-    [getFile],
+    [getFile, state.clips, timelinesFor],
   );
 
   // clipId -> (shotIndex -> score) for filmstrip highlights (confident only —
@@ -83,19 +98,18 @@ export function PerceptionLabPage() {
     [scrollToShot, openPreview],
   );
 
-  const handleCaptionClick = useCallback(
-    (clip: LabClip, dc: DenseCaption) => {
+  /** Open the preview seeked to a moment (shot = containing, else nearest). */
+  const openPreviewAt = useCallback(
+    (clip: LabClip, t: number, caption?: string) => {
       const file = getFile(clip.clipId);
       if (!file) return;
-      // Containing shot, or nearest one (the final dense frame can sit exactly
-      // on the last shot's end boundary).
       const shot =
-        clip.shots.find((s) => dc.t >= s.tStart && dc.t < s.tEnd) ??
+        clip.shots.find((s) => t >= s.tStart && t < s.tEnd) ??
         clip.shots.reduce<Shot | null>(
           (best, s) =>
             !best ||
-            Math.abs(dc.t - (s.tStart + s.tEnd) / 2) <
-              Math.abs(dc.t - (best.tStart + best.tEnd) / 2)
+            Math.abs(t - (s.tStart + s.tEnd) / 2) <
+              Math.abs(t - (best.tStart + best.tEnd) / 2)
               ? s
               : best,
           null,
@@ -106,11 +120,17 @@ export function PerceptionLabPage() {
         file,
         fileName: clip.fileName,
         shot,
-        startAtS: dc.t,
-        caption: dc.text,
+        startAtS: t,
+        caption,
+        timelines: timelinesFor(clip),
       });
     },
-    [getFile, scrollToShot],
+    [getFile, scrollToShot, timelinesFor],
+  );
+
+  const handleCaptionClick = useCallback(
+    (clip: LabClip, dc: DenseCaption) => openPreviewAt(clip, dc.t, dc.text),
+    [openPreviewAt],
   );
 
   const searchReady =
@@ -171,6 +191,7 @@ export function PerceptionLabPage() {
                   onEnhance={
                     cloudEnabled ? () => void enhanceClip(clip.clipId, cloudScope) : null
                   }
+                  onCompare={() => setCompareClip(clip)}
                 />
               ))}
               <ClipDropZone onFiles={addFiles} compact />
@@ -200,7 +221,11 @@ export function PerceptionLabPage() {
                 onSearch={runSearch}
                 onHitClick={handleHitClick}
               />
-              <SceneTimelinePanel clips={state.clips} onCaptionClick={handleCaptionClick} />
+              <SceneTimelinePanel
+                clips={state.clips}
+                onCaptionClick={handleCaptionClick}
+                onCompare={setCompareClip}
+              />
               <TranscriptPanel clips={state.clips} onSegmentClick={handleSegmentClick} />
               <PerfPanel clips={state.clips} models={state.models} />
             </div>
@@ -208,6 +233,16 @@ export function PerceptionLabPage() {
         )}
       </div>
       {preview && <ShotPreviewModal preview={preview} onClose={() => setPreview(null)} />}
+      {compareClip && (
+        <CaptionCompareModal
+          clip={compareClip}
+          onClose={() => setCompareClip(null)}
+          onJumpTo={(t) => {
+            setCompareClip(null);
+            openPreviewAt(compareClip, t);
+          }}
+        />
+      )}
       {storyboardStart !== null && director.state.storyboard && (
         <StoryboardPreviewModal
           storyboard={director.state.storyboard}
