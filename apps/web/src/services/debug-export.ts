@@ -87,6 +87,38 @@ function fmtS(s: number): string {
   return s.toFixed(1) + "s";
 }
 
+/** Compact source-mix label, shared style with the experiments panel. */
+export function sourcesBadge(src: PromptSources): string {
+  const parts: string[] = [];
+  if (src.localCaptions) parts.push("local");
+  if (src.cloudShots) parts.push("c·shots");
+  if (src.cloudTimeline) parts.push("c·timeline");
+  if (src.transcript) parts.push("script");
+  return parts.join("+") || "no sources";
+}
+
+/**
+ * Persistent top banner: the experiment this render belongs to + its caption
+ * settings — so side-by-side comparisons stay identifiable frame one.
+ */
+function drawExperimentBanner(
+  ctx: CanvasRenderingContext2D,
+  title: string,
+  badge: string,
+): void {
+  const h = 34;
+  ctx.fillStyle = "rgba(0,0,0,0.62)";
+  ctx.fillRect(0, 0, WIDTH, h);
+  ctx.font = "600 17px ui-monospace, monospace";
+  ctx.fillStyle = "#7dd3fc";
+  const titleText = title.length > 70 ? title.slice(0, 67) + "…" : title;
+  ctx.fillText(titleText, 14, 23);
+  const tw = ctx.measureText(titleText).width;
+  ctx.fillStyle = "#a3a3a3";
+  ctx.font = "15px ui-monospace, monospace";
+  ctx.fillText("· " + badge, 14 + tw + 10, 23);
+}
+
 function drawOverlay(
   ctx: CanvasRenderingContext2D,
   item: StoryboardItem,
@@ -212,6 +244,8 @@ async function waitMetadata(video: HTMLVideoElement): Promise<void> {
 export async function exportDebugVideo(context: DebugExportContext): Promise<Blob> {
   const { storyboard, meta, activity, getFile, fileNameOf, onProgress } = context;
   const queriesByShot = searchQueriesByShot(activity);
+  const banner = storyboard.title ?? "Untitled experiment";
+  const badge = sourcesBadge(meta.promptSources);
 
   const canvas = document.createElement("canvas");
   canvas.width = WIDTH;
@@ -269,6 +303,7 @@ export async function exportDebugVideo(context: DebugExportContext): Promise<Blo
           ctx.fillStyle = "#f87171";
           ctx.font = "24px ui-monospace, monospace";
           ctx.fillText(`missing file: ${fileName}`, 60, HEIGHT / 2);
+          drawExperimentBanner(ctx, banner, badge);
           drawOverlay(ctx, item, i, storyboard.items.length, fileName, item.inS, []);
         }, 2);
         continue;
@@ -295,6 +330,7 @@ export async function exportDebugVideo(context: DebugExportContext): Promise<Blo
               return;
             }
             ctx.drawImage(video, 0, 0, WIDTH, HEIGHT);
+            drawExperimentBanner(ctx, banner, badge);
             drawOverlay(
               ctx,
               item,
