@@ -21,9 +21,11 @@ interface ShotFilmstripProps {
   onShotClick?: (shot: Shot) => void;
   /** Non-null when the cloud-vision toggle is on: clicking sends frames. */
   onEnhance?: (() => void) | null;
+  /** Open the side-by-side frame/local/cloud caption comparison. */
+  onCompare?: () => void;
 }
 
-export function ShotFilmstrip({ clip, highlights, onShotClick, onEnhance }: ShotFilmstripProps) {
+export function ShotFilmstrip({ clip, highlights, onShotClick, onEnhance, onCompare }: ShotFilmstripProps) {
   const analysisSpanS = clip.analyzedThroughS ?? clip.durationS;
   const progress = analysisSpanS > 0 ? Math.min(1, clip.decodeT / analysisSpanS) : 0;
 
@@ -46,6 +48,15 @@ export function ShotFilmstrip({ clip, highlights, onShotClick, onEnhance }: Shot
             >
               cloud ✓
             </span>
+          )}
+          {onCompare && clip.dossier?.cloudVision && !clip.cloud?.busy && (
+            <button
+              className="text-xs px-1.5 py-0.5 rounded border border-border text-text-secondary hover:bg-background"
+              onClick={onCompare}
+              title="Side-by-side: frame, local caption, cloud caption"
+            >
+              compare ⇆
+            </button>
           )}
           {clip.cloud?.busy && (
             <span className="text-xs text-sky-600">
