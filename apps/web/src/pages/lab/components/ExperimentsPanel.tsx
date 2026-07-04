@@ -30,11 +30,17 @@ export function ExperimentsPanel({ refreshToken, onOpen }: ExperimentsPanelProps
 
   useEffect(() => {
     let cancelled = false;
-    void listExperiments().then((list) => {
-      if (!cancelled) setExperiments(list);
-    });
+    const fetch = () =>
+      void listExperiments().then((list) => {
+        if (!cancelled) setExperiments(list);
+      });
+    fetch();
+    // The refresh token flips in the same tick the run completes — the async
+    // IndexedDB save may still be in flight, so look again shortly after.
+    const late = setTimeout(fetch, 2500);
     return () => {
       cancelled = true;
+      clearTimeout(late);
     };
   }, [refreshToken]);
 
