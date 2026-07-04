@@ -21,8 +21,13 @@ function fmtWhen(ms: number): string {
 /**
  * Compact live storyboard player for one matrix cell — plays the cut
  * directly from the original files (the "watch" path), so nothing needs a
- * debug render first. Starts paused on the first segment; a "matrix-restart"
- * DOM event (dispatched by play-all) or the native controls start it.
+ * debug render first.
+ *
+ * Playback intent is tracked explicitly (wantPlayingRef): storyboards span
+ * MULTIPLE files, and each cross-file segment advance swaps the <video> src,
+ * which silently stops playback — every boundary must re-issue play() or the
+ * cut stalls mid-sequence. User pauses (controls / pause-all) clear the
+ * intent; segment advances and src swaps must not.
  */
 function StoryboardCellPlayer({
   storyboard,
@@ -36,6 +41,10 @@ function StoryboardCellPlayer({
   const [index, setIndex] = useState(0);
   const [done, setDone] = useState(false);
   const advancedFromRef = useRef(-1);
+  /** True while the cut SHOULD be playing (survives segment/file changes). */
+  const wantPlayingRef = useRef(false);
+  /** Suppress the pause events emitted by our own advance/finish machinery. */
+  const systemPauseRef = useRef(false);
 
   const item = items[index];
   const file = item ? getFile(item.clipId) : null;
@@ -54,33 +63,55 @@ function StoryboardCellPlayer({
     };
   }, [file]);
 
-  // Seek (and keep playing) when the segment changes mid-run.
+  /** Seek to the current segment and resume iff the cut should be playing. */
+  const seekIntoSegment = (v: HTMLVideoElement) => {
+    v.currentTime = item.inS;
+    if (wantPlayingRef.current) {
+      v.play().catch(() => undefined);
+    }
+  };
+
+  // Same-file segment change: the src did not swap, seek directly. (Cross-
+  // file changes land in onLoadedMetadata once the new src has metadata.)
   useEffect(() => {
     const v = videoRef.current;
     if (!v || !url || !item) return;
-    if (v.readyState >= 1) {
-      v.currentTime = item.inS;
-      if (index > 0 || advancedFromRef.current >= 0) v.play().catch(() => undefined);
-    }
-  }, [index, url, item]);
+    systemPauseRef.current = false;
+    if (v.readyState >= 1) seekIntoSegment(v);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [index, url]);
 
   // play-all support: parent dispatches "matrix-restart" on the video element.
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
     const restart = () => {
-      advancedFromRef.current = 0;
+      advancedFromRef.current = -1;
+      wantPlayingRef.current = true;
       setDone(false);
       if (index === 0) {
-        v.currentTime = items[0].inS;
-        v.play().catch(() => undefined);
+        if (v.readyState >= 1) seekIntoSegment(v);
+        // else: metadata still loading; onLoadedMetadata resumes for us.
       } else {
+        systemPauseRef.current = true;
         setIndex(0);
       }
     };
+    const hardPause = () => {
+      wantPlayingRef.current = false;
+      v.pause();
+    };
     v.addEventListener("matrix-restart", restart);
-    return () => v.removeEventListener("matrix-restart", restart);
-  }, [index, items]);
+    v.addEventListener("matrix-pause", hardPause);
+    return () => {
+      v.removeEventListener("matrix-restart", restart);
+      v.removeEventListener("matrix-pause", hardPause);
+    };
+    // `url` is load-bearing: the <video> only mounts once the object URL
+    // resolves, and without re-running this effect the listeners would attach
+    // to nothing (videoRef was null on first pass) — play/pause-all dead.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [index, items, url]);
 
   if (!item) return null;
 
@@ -94,8 +125,17 @@ function StoryboardCellPlayer({
           playsInline
           data-matrix-video
           className="w-full aspect-video bg-black rounded object-contain"
-          onLoadedMetadata={(e) => {
-            e.currentTarget.currentTime = item.inS;
+          onLoadedMetadata={(e) => seekIntoSegment(e.currentTarget)}
+          onPlay={() => {
+            wantPlayingRef.current = true;
+            setDone(false);
+          }}
+          onPause={(e) => {
+            // Native-controls / pause-all pauses clear the intent; pauses we
+            // caused ourselves (advance, finish) or seek hiccups do not.
+            if (!systemPauseRef.current && !e.currentTarget.seeking) {
+              wantPlayingRef.current = false;
+            }
           }}
           onTimeUpdate={(e) => {
             const v = e.currentTarget;
@@ -104,8 +144,11 @@ function StoryboardCellPlayer({
             }
             advancedFromRef.current = index;
             if (index + 1 < items.length) {
+              systemPauseRef.current = true; // src swap may emit a pause
               setIndex(index + 1);
             } else {
+              systemPauseRef.current = true;
+              wantPlayingRef.current = false;
               v.pause();
               setDone(true);
             }
@@ -227,7 +270,7 @@ export function ExperimentMatrixModal({
               <button
                 className="px-2 py-0.5 text-xs rounded border border-border text-text-secondary hover:text-text-primary"
                 onClick={() => {
-                  for (const v of allVideos()) v.pause();
+                  for (const v of allVideos()) v.dispatchEvent(new Event("matrix-pause"));
                 }}
               >
                 ⏸ pause all
