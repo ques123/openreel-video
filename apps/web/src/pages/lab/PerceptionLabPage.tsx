@@ -55,6 +55,20 @@ export function PerceptionLabPage() {
     (c) => c.status === "done" && !c.cloud?.busy && isSelected(c),
   );
 
+  /** Master selection: explicit all/none, from which any subset is a few clicks. */
+  const setAllSelected = useCallback(
+    (checked: boolean) => {
+      setSelectedOverride((m) => {
+        const next = { ...m };
+        for (const c of state.clips) {
+          if (c.status === "done") next[c.clipId] = checked;
+        }
+        return next;
+      });
+    },
+    [state.clips],
+  );
+
   /** Caption timelines for the preview modal's playhead-synced header. */
   const timelinesFor = useCallback(
     (clip: LabClip | undefined) =>
@@ -206,16 +220,34 @@ export function PerceptionLabPage() {
               </select>
             )}
             {cloudEnabled && state.clips.some((c) => c.status === "done") && (
-              <button
-                className="px-2 py-0.5 rounded border border-sky-500/50 text-sky-600 hover:bg-sky-500/10 disabled:opacity-40 disabled:cursor-default"
-                disabled={bulkRunning || selectedClips.length === 0}
-                onClick={() => void enhanceSelected()}
-                title="Send the checked clips' frames to the cloud vision model, one clip at a time"
-              >
-                {bulkRunning
-                  ? "enhancing…"
-                  : `enhance ${selectedClips.length} selected`}
-              </button>
+              <>
+                <span className="inline-flex rounded border border-border overflow-hidden">
+                  <button
+                    className="px-1.5 py-0.5 text-text-secondary hover:bg-background"
+                    onClick={() => setAllSelected(true)}
+                    title="Select every analyzed clip"
+                  >
+                    all
+                  </button>
+                  <button
+                    className="px-1.5 py-0.5 text-text-secondary hover:bg-background border-l border-border"
+                    onClick={() => setAllSelected(false)}
+                    title="Clear the selection, then hand-pick clips"
+                  >
+                    none
+                  </button>
+                </span>
+                <button
+                  className="px-2 py-0.5 rounded border border-sky-500/50 text-sky-600 hover:bg-sky-500/10 disabled:opacity-40 disabled:cursor-default"
+                  disabled={bulkRunning || selectedClips.length === 0}
+                  onClick={() => void enhanceSelected()}
+                  title="Send the checked clips' frames to the cloud vision model, one clip at a time"
+                >
+                  {bulkRunning
+                    ? "enhancing…"
+                    : `enhance ${selectedClips.length} selected`}
+                </button>
+              </>
             )}
           </div>
         </header>
