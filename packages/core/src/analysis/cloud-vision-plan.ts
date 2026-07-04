@@ -71,4 +71,12 @@ export function applyCloudResults(
   }
   dossier.cloudRuns[scope] = meta;
   dossier.cloudVision = { model: meta.model, enhancedAt: meta.enhancedAt, scope };
+  // Archive by (scope, model): rerunning a combination replaces its entry;
+  // other models' runs survive for side-by-side comparison.
+  dossier.cloudRunArchive = [
+    ...dossier.cloudRunArchive.filter(
+      (e) => !(e.scope === scope && e.model === meta.model),
+    ),
+    { scope, model: meta.model, captions: sorted, meta },
+  ];
 }

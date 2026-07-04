@@ -263,6 +263,14 @@ export function useDirector(deps: UseDirectorDeps) {
       ];
       messagesRef.current = seed;
       activityLogRef.current = [];
+      const captionModels =
+        [
+          ...new Set(
+            dossiers
+              .flatMap((d) => [d.cloudRuns.timeline?.model, d.cloudRuns.shots?.model])
+              .filter((m): m is string => !!m),
+          ),
+        ].join("+") || "local-only";
       experimentRef.current = {
         id: `exp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
         at: Date.now(),
@@ -270,6 +278,7 @@ export function useDirector(deps: UseDirectorDeps) {
         brief,
         targetDurationS,
         promptSources,
+        captionModels,
         model: DIRECTOR_MODEL,
         clips: dossiers.map((d) => ({
           clipId: d.clipId,

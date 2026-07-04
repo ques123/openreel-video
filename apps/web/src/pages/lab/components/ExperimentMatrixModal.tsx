@@ -192,6 +192,11 @@ function chipsFor(exp: ExperimentSummary, all: ExperimentSummary[]): SettingChip
       common: uniform((e) => e.targetDurationS ?? null),
     },
     { label: "model", value: exp.model, common: uniform((e) => e.model) },
+    {
+      label: "captions",
+      value: exp.captionModels ?? "?",
+      common: uniform((e) => e.captionModels ?? "?"),
+    },
   ];
 }
 

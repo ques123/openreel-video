@@ -1,11 +1,6 @@
 import { useEffect } from "react";
 import type { CloudRunMeta } from "@openreel/core";
-import {
-  captionNear,
-  cloudShotCaptionsOf,
-  cloudTimelineCaptionsOf,
-  localCaptionsOf,
-} from "../caption-views";
+import { captionNear, localCaptionsOf } from "../caption-views";
 import type { LabClip } from "../use-perception-lab";
 
 interface CaptionCompareModalProps {
@@ -42,9 +37,11 @@ export function CaptionCompareModal({ clip, onClose, onJumpTo }: CaptionCompareM
   const dossier = clip.dossier;
   const frames = dossier?.denseFrames ?? [];
   const local = localCaptionsOf(dossier);
-  const shots = cloudShotCaptionsOf(dossier);
-  const timeline = cloudTimelineCaptionsOf(dossier);
-  const runs = dossier?.cloudRuns ?? { shots: null, timeline: null };
+  // One column per archived (scope, model) run — different models COEXIST
+  // over the same frames, which is exactly what this modal compares.
+  const archive = [...(dossier?.cloudRunArchive ?? [])].sort((a, b) =>
+    a.scope === b.scope ? a.model.localeCompare(b.model) : a.scope === "shots" ? -1 : 1,
+  );
 
   const columns = [
     {
@@ -57,32 +54,16 @@ export function CaptionCompareModal({ clip, onClose, onJumpTo }: CaptionCompareM
       lookup: (t: number) => captionNear(local, t, 1),
       empty: "—",
     },
-    ...(shots.length > 0 || runs.shots
-      ? [
-          {
-            key: "cloud-shots",
-            header: "cloud · shots",
-            headerClass: "text-sky-600",
-            stats: fmtRun(runs.shots),
-            lookup: (t: number) => captionNear(shots, t, 5),
-            empty: "—",
-          },
-        ]
-      : []),
-    ...(timeline.length > 0 || runs.timeline
-      ? [
-          {
-            key: "cloud-timeline",
-            header: "cloud · timeline",
-            headerClass: "text-sky-600",
-            stats: fmtRun(runs.timeline),
-            lookup: (t: number) => captionNear(timeline, t, 1),
-            empty: "—",
-          },
-        ]
-      : []),
+    ...archive.map((entry) => ({
+      key: `${entry.scope}:${entry.model}`,
+      header: `${entry.scope === "shots" ? "shots" : "timeline"} · ${entry.model.replace("gpt-", "")}`,
+      headerClass: "text-sky-600",
+      stats: fmtRun(entry.meta),
+      lookup: (t: number) => captionNear(entry.captions, t, entry.scope === "shots" ? 5 : 1),
+      empty: "—",
+    })),
   ];
-  const gridTemplate = `10rem repeat(${columns.length}, 1fr)`;
+  const gridTemplate = `10rem repeat(${columns.length}, minmax(220px, 1fr))`;
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -123,8 +104,9 @@ export function CaptionCompareModal({ clip, onClose, onJumpTo }: CaptionCompareM
           </button>
         </div>
 
+        <div className="overflow-auto">
         <div
-          className="grid gap-x-3 px-4 py-1.5 text-[11px] border-b border-border"
+          className="grid gap-x-3 px-4 py-1.5 text-[11px] border-b border-border min-w-fit sticky top-0 bg-background-secondary z-10"
           style={{ gridTemplateColumns: gridTemplate }}
         >
           <span className="font-semibold text-text-secondary">frame</span>
@@ -138,11 +120,11 @@ export function CaptionCompareModal({ clip, onClose, onJumpTo }: CaptionCompareM
           ))}
         </div>
 
-        <div className="overflow-y-auto divide-y divide-border/50">
+        <div className="divide-y divide-border/50">
           {frames.map((frame) => (
             <div
               key={frame.t}
-              className="grid gap-x-3 px-4 py-2 items-start"
+              className="grid gap-x-3 px-4 py-2 items-start min-w-fit"
               style={{ gridTemplateColumns: gridTemplate }}
             >
               <div
@@ -174,6 +156,7 @@ export function CaptionCompareModal({ clip, onClose, onJumpTo }: CaptionCompareM
               No sampled frames stored for this clip yet.
             </p>
           )}
+        </div>
         </div>
       </div>
     </div>

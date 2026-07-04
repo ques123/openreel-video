@@ -7,6 +7,7 @@ import type {
   Storyboard,
   TranscriptSegment,
 } from "@openreel/core";
+import { CAPTION_MODELS, type CaptionModel } from "../../services/cloud-vision";
 import { downloadBlob, exportDebugVideo } from "../../services/debug-export";
 import { saveExperimentVideo, type DirectorExperiment } from "../../services/experiments";
 import { useRouter } from "../../hooks/use-router";
@@ -54,6 +55,7 @@ export function PerceptionLabPage() {
   // session re-consents) + per-run scope dial.
   const [cloudEnabled, setCloudEnabled] = useState(false);
   const [cloudScope, setCloudScope] = useState<CloudScope>("shots");
+  const [cloudModel, setCloudModel] = useState<CaptionModel>("gpt-5.2");
   /**
    * Bulk-enhance selection overrides. Default (no entry): a clip is selected
    * unless it already has a cloud enhance — so "enhance selected" is
@@ -272,12 +274,12 @@ export function PerceptionLabPage() {
     setBulkRunning(true);
     try {
       for (const clipId of ids) {
-        await enhanceClip(clipId, cloudScope);
+        await enhanceClip(clipId, cloudScope, cloudModel);
       }
     } finally {
       setBulkRunning(false);
     }
-  }, [selectedClips, enhanceClip, cloudScope]);
+  }, [selectedClips, enhanceClip, cloudScope, cloudModel]);
 
   const searchReady =
     state.models.embed.state === "ready" &&
@@ -318,6 +320,20 @@ export function PerceptionLabPage() {
               >
                 <option value="shots">shots only</option>
                 <option value="timeline">full timeline</option>
+              </select>
+            )}
+            {cloudEnabled && (
+              <select
+                className="bg-background-secondary border border-border rounded px-1.5 py-0.5 text-text-primary"
+                value={cloudModel}
+                onChange={(e) => setCloudModel(e.target.value as CaptionModel)}
+                title="Caption model: 5.2 = flagship; 5.4-mini ~3x cheaper; 5.4-nano ~11x cheaper. Runs per model coexist for comparison."
+              >
+                {CAPTION_MODELS.map((m) => (
+                  <option key={m} value={m}>
+                    {m.replace("gpt-", "")}
+                  </option>
+                ))}
               </select>
             )}
             {cloudEnabled && state.clips.some((c) => c.status === "done") && (
@@ -374,7 +390,7 @@ export function PerceptionLabPage() {
                   highlights={highlightsByClip.get(clip.clipId) ?? new Map()}
                   onShotClick={(shot) => openPreview(clip.clipId, clip.fileName, shot)}
                   onEnhance={
-                    cloudEnabled ? () => void enhanceClip(clip.clipId, cloudScope) : null
+                    cloudEnabled ? () => void enhanceClip(clip.clipId, cloudScope, cloudModel) : null
                   }
                   onCompare={() => setCompareClip(clip)}
                   selected={cloudEnabled ? isSelected(clip) : null}
