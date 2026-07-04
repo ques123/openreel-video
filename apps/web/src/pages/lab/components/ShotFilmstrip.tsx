@@ -129,9 +129,11 @@ export function ShotFilmstrip({ clip, highlights, onShotClick, onEnhance }: Shot
               }`}
               onClick={() => onShotClick?.(shot)}
               title={`shot ${shot.index} · ${fmtTime(shot.tStart)}–${fmtTime(shot.tEnd)}${
-                shot.cloudCaption ?? shot.caption
-                  ? `\n${shot.cloudCaption ?? shot.caption}`
-                  : ""
+                shot.cloudCaption && shot.caption
+                  ? `\ncloud: ${shot.cloudCaption}\nlocal: ${shot.caption}`
+                  : shot.cloudCaption ?? shot.caption
+                    ? `\n${shot.cloudCaption ?? shot.caption}`
+                    : ""
               }`}
             >
               <div className="relative">

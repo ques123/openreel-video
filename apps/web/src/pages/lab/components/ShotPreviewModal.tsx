@@ -30,7 +30,7 @@ function fmtTime(s: number): string {
 export function ShotPreviewModal({ preview, onClose }: ShotPreviewModalProps) {
   const { file, fileName, shot } = preview;
   const startAtS = preview.startAtS ?? shot.tStart;
-  const headerCaption = preview.caption ?? shot.caption;
+  const headerCaption = preview.caption ?? shot.cloudCaption ?? shot.caption;
   const videoRef = useRef<HTMLVideoElement>(null);
   const [pastEnd, setPastEnd] = useState(false);
   const [playbackError, setPlaybackError] = useState<string | null>(null);
