@@ -37,6 +37,23 @@ export function PerceptionLabPage() {
   // session re-consents) + per-run scope dial.
   const [cloudEnabled, setCloudEnabled] = useState(false);
   const [cloudScope, setCloudScope] = useState<CloudScope>("shots");
+  /**
+   * Bulk-enhance selection overrides. Default (no entry): a clip is selected
+   * unless it already has a cloud enhance — so "enhance selected" is
+   * enhance-everything-new out of the box, without silently re-billing
+   * already-enhanced clips.
+   */
+  const [selectedOverride, setSelectedOverride] = useState<Record<string, boolean>>({});
+  const [bulkRunning, setBulkRunning] = useState(false);
+
+  const isSelected = useCallback(
+    (clip: LabClip) => selectedOverride[clip.clipId] ?? !clip.dossier?.cloudVision,
+    [selectedOverride],
+  );
+
+  const selectedClips = state.clips.filter(
+    (c) => c.status === "done" && !c.cloud?.busy && isSelected(c),
+  );
 
   /** Caption timelines for the preview modal's playhead-synced header. */
   const timelinesFor = useCallback(
@@ -133,6 +150,20 @@ export function PerceptionLabPage() {
     [openPreviewAt],
   );
 
+  /** Enhance every selected clip, one at a time (per-clip progress shows in each row). */
+  const enhanceSelected = useCallback(async () => {
+    const ids = selectedClips.map((c) => c.clipId);
+    if (ids.length === 0) return;
+    setBulkRunning(true);
+    try {
+      for (const clipId of ids) {
+        await enhanceClip(clipId, cloudScope);
+      }
+    } finally {
+      setBulkRunning(false);
+    }
+  }, [selectedClips, enhanceClip, cloudScope]);
+
   const searchReady =
     state.models.embed.state === "ready" &&
     state.clips.some((c) => c.status === "done");
@@ -174,6 +205,18 @@ export function PerceptionLabPage() {
                 <option value="timeline">full timeline</option>
               </select>
             )}
+            {cloudEnabled && state.clips.some((c) => c.status === "done") && (
+              <button
+                className="px-2 py-0.5 rounded border border-sky-500/50 text-sky-600 hover:bg-sky-500/10 disabled:opacity-40 disabled:cursor-default"
+                disabled={bulkRunning || selectedClips.length === 0}
+                onClick={() => void enhanceSelected()}
+                title="Send the checked clips' frames to the cloud vision model, one clip at a time"
+              >
+                {bulkRunning
+                  ? "enhancing…"
+                  : `enhance ${selectedClips.length} selected`}
+              </button>
+            )}
           </div>
         </header>
 
@@ -192,6 +235,10 @@ export function PerceptionLabPage() {
                     cloudEnabled ? () => void enhanceClip(clip.clipId, cloudScope) : null
                   }
                   onCompare={() => setCompareClip(clip)}
+                  selected={cloudEnabled ? isSelected(clip) : null}
+                  onSelectChange={(checked) =>
+                    setSelectedOverride((m) => ({ ...m, [clip.clipId]: checked }))
+                  }
                 />
               ))}
               <ClipDropZone onFiles={addFiles} compact />

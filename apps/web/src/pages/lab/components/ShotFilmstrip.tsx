@@ -23,9 +23,20 @@ interface ShotFilmstripProps {
   onEnhance?: (() => void) | null;
   /** Open the side-by-side frame/local/cloud caption comparison. */
   onCompare?: () => void;
+  /** Non-null when bulk-enhance selection is active: this clip's checkbox state. */
+  selected?: boolean | null;
+  onSelectChange?: (checked: boolean) => void;
 }
 
-export function ShotFilmstrip({ clip, highlights, onShotClick, onEnhance, onCompare }: ShotFilmstripProps) {
+export function ShotFilmstrip({
+  clip,
+  highlights,
+  onShotClick,
+  onEnhance,
+  onCompare,
+  selected = null,
+  onSelectChange,
+}: ShotFilmstripProps) {
   const analysisSpanS = clip.analyzedThroughS ?? clip.durationS;
   const progress = analysisSpanS > 0 ? Math.min(1, clip.decodeT / analysisSpanS) : 0;
 
@@ -33,6 +44,15 @@ export function ShotFilmstrip({ clip, highlights, onShotClick, onEnhance, onComp
     <div className="bg-background-secondary border border-border rounded-lg p-3">
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2 min-w-0">
+          {selected !== null && clip.status === "done" && (
+            <input
+              type="checkbox"
+              className="shrink-0 accent-sky-600"
+              checked={selected}
+              onChange={(e) => onSelectChange?.(e.target.checked)}
+              title="Include this clip in 'enhance selected'"
+            />
+          )}
           <span className="font-medium text-text-primary truncate">{clip.fileName}</span>
           <span className="text-xs text-text-secondary shrink-0">
             {clip.width > 0 && `${clip.width}×${clip.height} · `}
