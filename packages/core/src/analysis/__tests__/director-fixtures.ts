@@ -76,6 +76,7 @@ export function makeDossier(
     cloudDenseCaptions: opts.cloudDenseCaptions ?? [],
     cloudShotCaptions: opts.cloudShotCaptions ?? [],
     cloudRuns: opts.cloudRuns ?? { shots: null, timeline: null },
+    cloudRunArchive: [],
     cloudVision: opts.cloudVision ?? null,
     localCaptionPerf: null,
     transcript: opts.transcript ?? [],

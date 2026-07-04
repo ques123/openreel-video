@@ -98,6 +98,17 @@ export function deserializeDossier(data: ArrayBuffer): ClipDossier {
     cloudDenseCaptions: parsed.cloudDenseCaptions ?? [],
     cloudShotCaptions,
     cloudRuns,
+    cloudRunArchive:
+      parsed.cloudRunArchive ??
+      // Pre-archive records: reconstruct entries from the active stores.
+      ([
+        cloudRuns.shots
+          ? { scope: "shots" as const, model: cloudRuns.shots.model, captions: cloudShotCaptions, meta: cloudRuns.shots }
+          : null,
+        cloudRuns.timeline
+          ? { scope: "timeline" as const, model: cloudRuns.timeline.model, captions: parsed.cloudDenseCaptions ?? [], meta: cloudRuns.timeline }
+          : null,
+      ].filter(Boolean) as ClipDossier["cloudRunArchive"]),
     cloudVision: legacy,
     localCaptionPerf: parsed.localCaptionPerf ?? null,
     shots: parsed.shots.map((shot) => {

@@ -60,6 +60,22 @@ function makeDossier(): ClipDossier {
       },
       timeline: null,
     },
+    cloudRunArchive: [
+      {
+        scope: "shots",
+        model: "gpt-5.2",
+        captions: [{ t: 3.1, text: "vendor mid-slice, knife raised" }],
+        meta: {
+          model: "gpt-5.2",
+          enhancedAt: 1234000,
+          framesSent: 1,
+          framesFailed: 0,
+          ms: 900,
+          promptTokens: 500,
+          completionTokens: 60,
+        },
+      },
+    ],
     cloudVision: { model: "gpt-5.2", scope: "timeline", enhancedAt: 1234567 },
     localCaptionPerf: { totalMs: 4200, frames: 3 },
     transcript: [{ t0: 0.5, t1: 4.2, text: "we finally made it to the falls" }],

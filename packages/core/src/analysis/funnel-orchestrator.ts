@@ -456,6 +456,7 @@ export class FunnelOrchestrator {
       cloudDenseCaptions: [],
       cloudShotCaptions: [],
       cloudRuns: { shots: null, timeline: null },
+      cloudRunArchive: [],
       cloudVision: null,
       localCaptionPerf: null,
       transcript: run.transcript,

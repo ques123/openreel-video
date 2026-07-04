@@ -356,7 +356,7 @@ export function usePerceptionLab(forceDevice: "auto" | InferenceDevice = "auto")
    * leave the device — reachable only from the explicit Enhance button.
    */
   const enhanceClip = useCallback(
-    async (clipId: string, scope: CloudScope) => {
+    async (clipId: string, scope: CloudScope, model?: string) => {
       const dossier = dossiersRef.current.get(clipId);
       const file = filesRef.current.get(clipId);
       if (!dossier || !file) return;
@@ -367,8 +367,11 @@ export function usePerceptionLab(forceDevice: "auto" | InferenceDevice = "auto")
       }
       dispatch({ type: "cloud-start", clipId, total: frames.length });
       try {
-        const run = await describeFramesCloud(frames, (done, total) =>
-          dispatch({ type: "cloud-progress", clipId, done, total }),
+        const run = await describeFramesCloud(
+          frames,
+          (done, total) => dispatch({ type: "cloud-progress", clipId, done, total }),
+          undefined,
+          model,
         );
         applyCloudResults(dossier, scope, run.captions, {
           model: run.model,

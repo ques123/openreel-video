@@ -80,3 +80,33 @@ describe("applyCloudResults", () => {
     expect(dossier.cloudDenseCaptions).toEqual([]);
   });
 });
+
+describe("cloudRunArchive", () => {
+  const metaFor = (model: string) => ({
+    model,
+    enhancedAt: 111,
+    framesSent: 2,
+    framesFailed: 0,
+    ms: 1500,
+    promptTokens: 900,
+    completionTokens: 120,
+  });
+
+  it("keeps runs from different models and replaces same (scope, model)", () => {
+    const dossier = makeDossier({ denseFrames: frames });
+    applyCloudResults(dossier, "timeline", [{ t: 1, text: "from 5.2" }], metaFor("gpt-5.2"));
+    applyCloudResults(dossier, "timeline", [{ t: 1, text: "from mini" }], metaFor("gpt-5.4-mini"));
+    applyCloudResults(dossier, "shots", [{ t: 5, text: "shot desc" }], metaFor("gpt-5.2"));
+    expect(dossier.cloudRunArchive).toHaveLength(3);
+    // Active store reflects the LATEST timeline run.
+    expect(dossier.cloudDenseCaptions[0].text).toBe("from mini");
+    // Rerun 5.2 timeline: replaces its archive entry, mini survives.
+    applyCloudResults(dossier, "timeline", [{ t: 1, text: "from 5.2 v2" }], metaFor("gpt-5.2"));
+    expect(dossier.cloudRunArchive).toHaveLength(3);
+    const models = dossier.cloudRunArchive.filter((e) => e.scope === "timeline").map((e) => e.model);
+    expect(models.sort()).toEqual(["gpt-5.2", "gpt-5.4-mini"]);
+    expect(
+      dossier.cloudRunArchive.find((e) => e.scope === "timeline" && e.model === "gpt-5.2")!.captions[0].text,
+    ).toBe("from 5.2 v2");
+  });
+});

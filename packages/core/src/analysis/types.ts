@@ -95,6 +95,18 @@ export interface LocalCaptionPerf {
   frames: number;
 }
 
+/**
+ * One archived cloud enhance run, keyed by (scope, model). Re-running the
+ * same combination replaces its entry; different models COEXIST so their
+ * quality/cost/speed can be compared over the same frames.
+ */
+export interface CloudRunArchiveEntry {
+  scope: "shots" | "timeline";
+  model: string;
+  captions: DenseCaption[];
+  meta: CloudRunMeta;
+}
+
 export interface TranscriptSegment {
   t0: number;
   t1: number;
@@ -166,8 +178,10 @@ export interface ClipDossier {
    * can be A/B compared against each other and the local pass.
    */
   cloudShotCaptions: DenseCaption[];
-  /** Per-scope enhance stats; null = that scope never ran. */
+  /** Per-scope enhance stats for the LATEST run; null = that scope never ran. */
   cloudRuns: { shots: CloudRunMeta | null; timeline: CloudRunMeta | null };
+  /** Every enhance run, one entry per (scope, model) — the A/B record. */
+  cloudRunArchive: CloudRunArchiveEntry[];
   /** Legacy "last enhance" marker (kept for the filmstrip badge). */
   cloudVision: CloudVisionMeta | null;
   /** Local caption pass timing; null until the pass finishes at least once. */

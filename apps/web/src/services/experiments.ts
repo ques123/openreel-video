@@ -37,6 +37,8 @@ export interface DirectorExperiment {
   targetDurationS: number | null;
   promptSources: PromptSources;
   model: string;
+  /** Cloud caption model(s) behind the timelines the director consumed ("" = local only). */
+  captionModels: string;
   clips: ExperimentClipRef[];
   /** Verbatim conversation (system prompt, dossiers, tool traffic, replies). */
   messages: ChatMessage[];
@@ -56,6 +58,7 @@ export interface ExperimentSummary {
   title: string | null;
   itemCount: number;
   model: string;
+  captionModels?: string;
   promptSources: PromptSources;
   targetDurationS?: number | null;
   /** Set when a rendered debug video is stored for this experiment. */
@@ -85,6 +88,7 @@ function summarize(exp: DirectorExperiment, prev?: ExperimentSummary): Experimen
     title: exp.storyboard?.title ?? null,
     itemCount: exp.storyboard?.items.length ?? 0,
     model: exp.model,
+    captionModels: exp.captionModels,
     promptSources: exp.promptSources,
     targetDurationS: exp.targetDurationS,
     videoAt: prev?.videoAt,
