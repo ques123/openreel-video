@@ -138,11 +138,35 @@ function summarize(exp: DirectorExperiment, prev?: ExperimentSummary): Experimen
   };
 }
 
+/**
+ * One-time lazy backfill: entries written before promptTokens/completionTokens/
+ * durationMs/captionStats existed lack `promptTokens`. Fill them in from the
+ * full record when possible; leave untouched (and try again next call) if the
+ * full record is missing or unreadable. Mutates `index` in place and returns
+ * whether anything changed, so the caller can persist once.
+ */
+async function backfillIndex(index: ExperimentSummary[]): Promise<boolean> {
+  let changed = false;
+  for (const entry of index) {
+    if (entry.promptTokens !== undefined) continue;
+    const full = await loadExperiment(entry.id);
+    if (!full) continue;
+    entry.promptTokens = full.usage.promptTokens;
+    entry.completionTokens = full.usage.completionTokens;
+    entry.durationMs = full.durationMs;
+    if (full.captionStats) entry.captionStats = full.captionStats;
+    changed = true;
+  }
+  return changed;
+}
+
 export async function listExperiments(): Promise<ExperimentSummary[]> {
   try {
     const record = await storage.loadCache(INDEX_KEY);
     if (!record) return [];
-    return fromBuffer<ExperimentSummary[]>(record.data);
+    const index = fromBuffer<ExperimentSummary[]>(record.data);
+    if (await backfillIndex(index)) await writeIndex(index);
+    return index;
   } catch {
     return [];
   }
