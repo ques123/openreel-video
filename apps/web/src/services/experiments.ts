@@ -60,6 +60,8 @@ export interface DirectorExperiment {
   at: number;
   updatedAt: number;
   brief: string;
+  /** Label of the suggested angle the brief was seeded from, if any (see brief-suggestions.ts). */
+  briefAngle?: string;
   targetDurationS: number | null;
   promptSources: PromptSources;
   model: string;
@@ -95,6 +97,7 @@ export interface ExperimentSummary {
   at: number;
   updatedAt: number;
   brief: string;
+  briefAngle?: string;
   title: string | null;
   itemCount: number;
   model: string;
@@ -219,6 +222,7 @@ function summarize(exp: DirectorExperiment, prev?: ExperimentSummary): Experimen
     at: exp.at,
     updatedAt: exp.updatedAt,
     brief: exp.brief,
+    briefAngle: exp.briefAngle,
     title: exp.storyboard?.title ?? null,
     itemCount: exp.storyboard?.items.length ?? 0,
     model: exp.model,

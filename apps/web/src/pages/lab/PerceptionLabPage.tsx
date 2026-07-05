@@ -7,6 +7,8 @@ import type {
   Storyboard,
   TranscriptSegment,
 } from "@openreel/core";
+import { buildFootageDigest } from "@openreel/core";
+import { suggestBriefs, type BriefSuggestion } from "../../services/brief-suggestions";
 import { CAPTION_MODELS, type CaptionModel } from "../../services/cloud-vision";
 import { downloadBlob, exportDebugVideo, type DebugExportMeta } from "../../services/debug-export";
 import {
@@ -400,6 +402,19 @@ export function PerceptionLabPage() {
     }
   }, [selectedClips, enhanceClip, cloudScope, cloudModel]);
 
+  /** Digest the analyzed footage and ask for grounded brief-angle suggestions. */
+  const requestBriefSuggestions = useCallback(
+    async (targetS: number | null): Promise<BriefSuggestion[]> => {
+      const dossiers = getDossiers();
+      if (dossiers.length === 0) {
+        throw new Error("No analyzed clips yet — drop footage first.");
+      }
+      const digest = buildFootageDigest(dossiers);
+      return suggestBriefs(digest, targetS);
+    },
+    [getDossiers],
+  );
+
   const searchReady =
     state.models.embed.state === "ready" &&
     state.clips.some((c) => c.status === "done");
@@ -554,6 +569,7 @@ export function PerceptionLabPage() {
                 onMusicEnabledChange={setMusicEnabled}
                 musicState={music.state}
                 onMusicRetry={runMusicGenerate}
+                requestBriefSuggestions={requestBriefSuggestions}
               />
               {director.state.storyboard && (
                 <StoryboardList

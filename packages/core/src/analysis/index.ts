@@ -13,6 +13,7 @@ export * from "./shot-metrics";
 export * from "./retrieval";
 export * from "./dossier-cache";
 export * from "./caption-text";
+export * from "./footage-digest";
 export * from "./cloud-vision-plan";
 export * from "./music-prompt";
 export * from "./director-types";

@@ -137,7 +137,14 @@ export function ExperimentDetailModal({
 
         <div className="overflow-y-auto p-4 space-y-3 text-xs">
           <div>
-            <p className="font-semibold text-text-primary mb-0.5">Brief</p>
+            <p className="font-semibold text-text-primary mb-0.5">
+              Brief
+              {exp.briefAngle && (
+                <span className="ml-1.5 px-1.5 py-0.5 text-[10px] rounded border border-primary/40 text-primary font-normal">
+                  {exp.briefAngle}
+                </span>
+              )}
+            </p>
             <p className="text-text-secondary whitespace-pre-wrap">{exp.brief}</p>
           </div>
           <div className="flex flex-wrap gap-x-4 gap-y-1 text-text-secondary">

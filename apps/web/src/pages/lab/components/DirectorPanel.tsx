@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { DEFAULT_PROMPT_SOURCES, type DirectorActivity, type PromptSources } from "@openreel/core";
+import type { BriefSuggestion } from "../../../services/brief-suggestions";
 import type { UseDirectorReturn } from "../use-director";
 import type { MusicState } from "../use-music";
 import { PromptInspectorModal } from "./PromptInspectorModal";
@@ -17,6 +18,8 @@ interface DirectorPanelProps {
   onMusicEnabledChange: (checked: boolean) => void;
   musicState: MusicState;
   onMusicRetry: () => void;
+  /** Digest-grounded editorial angle cards for the brief textarea; takes the parsed target so the page can mention it. */
+  requestBriefSuggestions: (targetS: number | null) => Promise<BriefSuggestion[]>;
 }
 
 /** "Xs" elapsed since a music generation started, ticking once a second while it's in flight. */
@@ -63,6 +66,7 @@ export function DirectorPanel({
   onMusicEnabledChange,
   musicState,
   onMusicRetry,
+  requestBriefSuggestions,
 }: DirectorPanelProps) {
   const { state, start, refine, cancel, reset } = director;
   const [brief, setBrief] = useState("");
@@ -70,7 +74,23 @@ export function DirectorPanel({
   const [sources, setSources] = useState<PromptSources>(DEFAULT_PROMPT_SOURCES);
   const [feedback, setFeedback] = useState("");
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [suggestions, setSuggestions] = useState<BriefSuggestion[]>([]);
+  const [suggestionsVisible, setSuggestionsVisible] = useState(true);
+  const [suggestLoading, setSuggestLoading] = useState(false);
+  const [suggestError, setSuggestError] = useState<string | null>(null);
+  const [appliedLabel, setAppliedLabel] = useState<string | null>(null);
+  // Generation counter, not a boolean flag: a second "new angles" click while
+  // one is in flight must make the FIRST call's eventual result a no-op
+  // rather than racing it (same idea as use-music's cancelledRef, simplified
+  // since there's no polling to tear down here).
+  const suggestGenRef = useRef(0);
   const logRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    return () => {
+      suggestGenRef.current += 1; // invalidate any in-flight request on unmount
+    };
+  }, []);
 
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
@@ -82,6 +102,27 @@ export function DirectorPanel({
     musicState.startedAtMs,
     musicState.phase === "generating" || musicState.phase === "partial",
   );
+
+  const requestSuggestions = () => {
+    if (!ready || running || suggestLoading) return;
+    const gen = ++suggestGenRef.current;
+    setSuggestLoading(true);
+    setSuggestError(null);
+    requestBriefSuggestions(targetS)
+      .then((result) => {
+        if (suggestGenRef.current !== gen) return; // a newer request (or unmount) won
+        setSuggestions(result);
+        setSuggestionsVisible(true);
+      })
+      .catch((err) => {
+        if (suggestGenRef.current !== gen) return;
+        setSuggestError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        if (suggestGenRef.current !== gen) return;
+        setSuggestLoading(false);
+      });
+  };
 
   return (
     <div className="bg-background-secondary border border-border rounded-lg p-3">
@@ -105,18 +146,71 @@ export function DirectorPanel({
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          if (brief.trim() && !running) start(brief.trim(), targetS, sources);
+          if (brief.trim() && !running) start(brief.trim(), targetS, sources, appliedLabel ?? undefined);
         }}
         className="space-y-2"
       >
         <textarea
           value={brief}
-          onChange={(e) => setBrief(e.target.value)}
+          onChange={(e) => {
+            const v = e.target.value;
+            setBrief(v);
+            // Clearing the textarea drops the angle seed; editing it in place
+            // keeps the label — the point of the label is to name the angle,
+            // and edits are the expected next step, not a break from it.
+            if (v === "") setAppliedLabel(null);
+          }}
           placeholder={ready ? 'e.g. "energetic highlight reel of the trip"' : "waiting for analyzed clips…"}
           disabled={!ready || running}
           rows={2}
           className="w-full bg-background border border-border rounded-md px-3 py-1.5 text-sm text-text-primary placeholder:text-text-secondary/60 outline-none focus:border-primary resize-none"
         />
+
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={requestSuggestions}
+            disabled={!ready || running || suggestLoading}
+            className="px-2 py-1 text-xs rounded-md border border-border text-text-secondary hover:text-text-primary disabled:opacity-40"
+          >
+            {suggestLoading ? "suggesting…" : suggestions.length > 0 ? "↻ new angles" : "✨ suggest briefs"}
+          </button>
+          {suggestError && <p className="flex-1 text-amber-500 text-[11px]">{suggestError}</p>}
+          {suggestions.length > 0 && suggestionsVisible && !suggestError && (
+            <button
+              type="button"
+              onClick={() => setSuggestionsVisible(false)}
+              className="ml-auto text-[11px] text-text-secondary hover:text-text-primary"
+            >
+              hide
+            </button>
+          )}
+        </div>
+
+        {suggestions.length > 0 && suggestionsVisible && (
+          <div className="grid grid-cols-2 gap-1.5">
+            {suggestions.map((s, i) => {
+              const applied = appliedLabel === s.label;
+              return (
+                <button
+                  key={i}
+                  type="button"
+                  onClick={() => {
+                    setBrief(s.brief);
+                    setAppliedLabel(s.label);
+                  }}
+                  title={s.brief}
+                  className={`text-left bg-background border rounded-md px-2 py-1.5 hover:border-primary/60 transition-colors ${
+                    applied ? "border-primary bg-primary/5" : "border-border"
+                  }`}
+                >
+                  <p className="text-[11px] font-medium text-text-primary">{s.label}</p>
+                  <p className="text-[11px] text-text-secondary line-clamp-3">{s.brief}</p>
+                </button>
+              );
+            })}
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-text-secondary">
           <span className="font-medium" title="Which perception sources the director gets — for A/B testing input combinations">
             send:

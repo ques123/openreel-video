@@ -270,7 +270,12 @@ export function useDirector(deps: UseDirectorDeps) {
   );
 
   const start = useCallback(
-    (brief: string, targetDurationS: number | null, sources?: PromptSources) => {
+    (
+      brief: string,
+      targetDurationS: number | null,
+      sources?: PromptSources,
+      briefAngle?: string,
+    ) => {
       const dossiers = getDossiers();
       if (dossiers.length === 0) {
         dispatch({ type: "failure", error: "No analyzed clips yet — drop footage first." });
@@ -347,6 +352,9 @@ export function useDirector(deps: UseDirectorDeps) {
         at: Date.now(),
         updatedAt: Date.now(),
         brief,
+        // Only set when a suggestion card seeded this brief — keeps old
+        // records' shape unchanged (absent key, not an explicit undefined).
+        ...(briefAngle ? { briefAngle } : {}),
         targetDurationS,
         promptSources,
         captionModels,

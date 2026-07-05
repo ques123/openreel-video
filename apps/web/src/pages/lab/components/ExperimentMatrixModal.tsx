@@ -460,6 +460,11 @@ export function ExperimentMatrixModal({
                       )}
                       <p className="text-xs font-medium text-text-primary break-words">
                         {e.title ?? "(untitled)"}
+                        {e.briefAngle && (
+                          <span className="ml-1.5 px-1.5 py-0.5 text-[10px] rounded border border-primary/40 text-primary font-normal align-middle">
+                            {e.briefAngle}
+                          </span>
+                        )}
                       </p>
                       <p
                         className="text-[11px] text-text-secondary leading-snug line-clamp-2"
