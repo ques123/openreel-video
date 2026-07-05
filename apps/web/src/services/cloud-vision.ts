@@ -9,7 +9,7 @@
  * best-effort: a failed batch is retried once, then skipped.
  */
 
-import type { DenseCaption, DenseFrame } from "@openreel/core";
+import type { CloudFrame, DenseCaption } from "@openreel/core";
 import { BASE, DIRECTOR_MODEL } from "./openai-proxy";
 
 const BATCH_SIZE = 8;
@@ -25,6 +25,8 @@ const INSTRUCTIONS =
   "For EACH image, in order, write 1-3 sentences: subject, action, setting, mood, " +
   "composition, and anything that makes the moment usable or unusable (blur, bad " +
   "framing, dead moment, great light, genuine emotion). Be specific and concrete. " +
+  "Some frames represent a visually static span (noted with their timestamp); " +
+  "describe the frame as usual — the description applies to the whole span. " +
   'Reply with STRICT JSON: {"captions":[{"i":<image number starting at 1>,"text":"..."}]} ' +
   "with exactly one entry per image.";
 
@@ -41,13 +43,19 @@ interface BatchResult {
 }
 
 async function describeBatch(
-  frames: DenseFrame[],
+  frames: CloudFrame[],
   model: string,
   signal?: AbortSignal,
 ): Promise<BatchResult> {
   const header =
     `${INSTRUCTIONS}\n\nYou are given ${frames.length} frames. Frame timestamps (seconds): ` +
-    frames.map((f, i) => `#${i + 1}=${f.t.toFixed(1)}s`).join(", ");
+    frames
+      .map((f, i) => {
+        const span =
+          f.t1 !== undefined ? ` (static span ${f.t.toFixed(1)}-${f.t1.toFixed(1)}s)` : "";
+        return `#${i + 1}=${f.t.toFixed(1)}s${span}`;
+      })
+      .join(", ");
   const content: ContentPart[] = [
     { type: "text", text: header },
     ...frames.map(
@@ -106,7 +114,7 @@ export interface CloudVisionRun {
 }
 
 export async function describeFramesCloud(
-  frames: DenseFrame[],
+  frames: CloudFrame[],
   onProgress?: (done: number, total: number) => void,
   signal?: AbortSignal,
   model: string = DIRECTOR_MODEL,
@@ -123,7 +131,7 @@ export async function describeFramesCloud(
     completionTokens += b.completionTokens;
   };
 
-  const batches: DenseFrame[][] = [];
+  const batches: CloudFrame[][] = [];
   for (let i = 0; i < frames.length; i += BATCH_SIZE) {
     batches.push(frames.slice(i, i + BATCH_SIZE));
   }

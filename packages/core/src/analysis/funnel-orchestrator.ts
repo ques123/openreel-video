@@ -52,7 +52,7 @@ interface ClipRun {
   clipId: string;
   file: File;
   shots: Shot[];
-  denseFrames: Array<{ t: number; dataUrl: string }>;
+  denseFrames: Array<{ t: number; dataUrl: string; sharpness?: number }>;
   transcript: TranscriptSegment[];
   meta: { durationS: number; width: number; height: number } | null;
   startMs: number;
@@ -286,7 +286,11 @@ export class FunnelOrchestrator {
             break;
 
           case "dense-frame":
-            run.denseFrames.push({ t: msg.t, dataUrl: jpegToDataUrl(msg.jpeg) });
+            run.denseFrames.push({
+              t: msg.t,
+              dataUrl: jpegToDataUrl(msg.jpeg),
+              sharpness: msg.sharpness,
+            });
             break;
 
           case "ingest-progress":

@@ -51,7 +51,7 @@ export function makeDossier(
     durationS?: number;
     analyzedThroughS?: number | null;
     shots?: Shot[];
-    denseFrames?: { t: number; dataUrl: string }[];
+    denseFrames?: { t: number; dataUrl: string; sharpness?: number }[];
     denseCaptions?: { t: number; text: string }[];
     cloudDenseCaptions?: { t: number; text: string }[];
     cloudShotCaptions?: { t: number; text: string }[];

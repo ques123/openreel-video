@@ -35,7 +35,7 @@ export interface TimelineSegment {
 }
 
 /** Word-set Jaccard similarity — driving footage repeats with tiny variations. */
-function similar(a: string, b: string): boolean {
+export function similarCaptions(a: string, b: string): boolean {
   if (a === b) return true;
   const wa = new Set(a.toLowerCase().split(/\W+/).filter(Boolean));
   const wb = new Set(b.toLowerCase().split(/\W+/).filter(Boolean));
@@ -54,7 +54,7 @@ export function mergeDenseCaptions(captions: DenseCaption[]): TimelineSegment[] 
   const segments: TimelineSegment[] = [];
   for (const c of sorted) {
     const last = segments[segments.length - 1];
-    if (last && similar(last.text, c.text)) {
+    if (last && similarCaptions(last.text, c.text)) {
       last.t1 = c.t;
     } else {
       segments.push({ t0: c.t, t1: c.t, text: c.text });

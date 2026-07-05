@@ -288,7 +288,17 @@ async function analyze(req: Extract<FunnelRequest, { type: "analyze" }>) {
             { t: wrapped.timestamp, rgba: img.data, width: img.width, height: img.height },
             FUNNEL_DEFAULTS.denseFrameQuality,
           );
-          post({ type: "dense-frame", requestId, clipId, t: wrapped.timestamp, jpeg }, [jpeg]);
+          post(
+            {
+              type: "dense-frame",
+              requestId,
+              clipId,
+              t: wrapped.timestamp,
+              jpeg,
+              sharpness: samples[i].sharpness,
+            },
+            [jpeg],
+          );
         }
       }
 

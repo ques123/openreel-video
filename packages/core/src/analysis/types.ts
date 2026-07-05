@@ -63,6 +63,12 @@ export interface DenseFrame {
   /** Media time, seconds. */
   t: number;
   dataUrl: string;
+  /**
+   * Laplacian variance of the frame at scan resolution (higher = sharper).
+   * Optional: frames captured before this field existed lack it, and no
+   * DOSSIER_VERSION bump is warranted for a cost optimization.
+   */
+  sharpness?: number;
 }
 
 /** Provenance of an opt-in cloud vision enhance run. */
