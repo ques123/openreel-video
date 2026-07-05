@@ -440,39 +440,59 @@ export async function exportDebugVideo(context: DebugExportContext): Promise<Blo
   recorder.start(250);
   musicBedSource?.start();
 
+  // Render clock. rAF stops entirely and main-thread timers clamp to 1Hz in
+  // a backgrounded tab — which turned a tab switch mid-export into seconds
+  // of frozen (or 1fps heartbeat) video under live audio. A Worker's timer
+  // is exempt from that clamp, so ticks keep arriving at frame rate and the
+  // export survives losing tab focus.
+  const TICK_MS = Math.round(1000 / FPS);
+  const tickerWorker = new Worker(
+    URL.createObjectURL(
+      new Blob([`setInterval(() => postMessage(0), ${TICK_MS});`], {
+        type: "text/javascript",
+      }),
+    ),
+  );
   let lastPaintMs = 0;
   const markPaint = () => {
     lastPaintMs = performance.now();
   };
-  // Heartbeat: captureStream only emits on canvas activity, so any awaited
-  // gap (video metadata/seek between segments — seconds on 4K HEVC) starves
-  // the video track. With a continuous music bed filling the audio timeline,
-  // players render that starvation as a frozen decoder stall; re-emitting the
-  // current pixels turns it into a clean, intentional hold instead. Bed-less
-  // renders keep the old (documented-fine) behavior where the muxer simply
-  // compresses the silent gaps away — hence the gate.
-  const HEARTBEAT_MS = Math.round(1000 / FPS);
-  const heartbeat = musicBedSource
-    ? window.setInterval(() => {
-        if (performance.now() - lastPaintMs > HEARTBEAT_MS * 1.5) {
-          ctx.drawImage(canvas, 0, 0); // self-draw: same pixels, fresh frame
-          markPaint();
+  let onTick: (() => void) | null = null;
+  tickerWorker.onmessage = () => {
+    onTick?.();
+    // Heartbeat: captureStream only emits on canvas activity, so any awaited
+    // gap (video metadata/seek between segments — seconds on 4K HEVC)
+    // starves the video track. With a continuous music bed filling the audio
+    // timeline, players render that starvation as a frozen decoder stall;
+    // re-emitting the current pixels turns it into a clean, intentional hold
+    // instead. Bed-less renders keep the old (documented-fine) behavior
+    // where the muxer simply compresses the silent gaps away — hence the
+    // musicBedSource gate.
+    if (musicBedSource && performance.now() - lastPaintMs > TICK_MS * 1.5) {
+      ctx.drawImage(canvas, 0, 0); // self-draw: same pixels, fresh frame
+      markPaint();
+    }
+  };
+  /** Run `fn` every frame tick until it returns true (then resolve). */
+  const tickUntil = (fn: () => boolean) =>
+    new Promise<void>((resolve) => {
+      onTick = () => {
+        if (fn()) {
+          onTick = null;
+          resolve();
         }
-      }, HEARTBEAT_MS)
-    : null;
+      };
+    });
 
   /** Repaint every frame for `seconds` (captureStream needs canvas activity). */
-  const holdFrame = (draw: () => void, seconds: number) =>
-    new Promise<void>((resolve) => {
-      const until = performance.now() + seconds * 1000;
-      const tick = () => {
-        draw();
-        markPaint();
-        if (performance.now() < until) requestAnimationFrame(tick);
-        else resolve();
-      };
-      requestAnimationFrame(tick);
+  const holdFrame = (draw: () => void, seconds: number) => {
+    const until = performance.now() + seconds * 1000;
+    return tickUntil(() => {
+      draw();
+      markPaint();
+      return performance.now() >= until;
     });
+  };
 
   try {
     const cardMeta = musicWarning
@@ -515,33 +535,31 @@ export async function exportDebugVideo(context: DebugExportContext): Promise<Blo
         await video.play();
 
         const queries = queriesByShot.get(`${item.clipId}#${item.shotIndex ?? -1}`) ?? [];
-        await new Promise<void>((resolve, reject) => {
-          const tick = () => {
-            if (video.error) {
-              reject(new Error(video.error.message ?? "playback error"));
-              return;
-            }
-            ctx.drawImage(video, 0, 0, WIDTH, HEIGHT);
-            drawExperimentBanner(ctx, banner, badge);
-            drawOverlay(
-              ctx,
-              item,
-              i,
-              storyboard.items.length,
-              fileName,
-              video.currentTime,
-              queries,
-            );
-            markPaint();
-            if (video.currentTime >= item.outS || video.ended) {
-              video.pause();
-              resolve();
-            } else {
-              requestAnimationFrame(tick);
-            }
-          };
-          requestAnimationFrame(tick);
+        let playbackError: string | null = null;
+        await tickUntil(() => {
+          if (video.error) {
+            playbackError = video.error.message ?? "playback error";
+            return true;
+          }
+          ctx.drawImage(video, 0, 0, WIDTH, HEIGHT);
+          drawExperimentBanner(ctx, banner, badge);
+          drawOverlay(
+            ctx,
+            item,
+            i,
+            storyboard.items.length,
+            fileName,
+            video.currentTime,
+            queries,
+          );
+          markPaint();
+          if (video.currentTime >= item.outS || video.ended) {
+            video.pause();
+            return true;
+          }
+          return false;
         });
+        if (playbackError) throw new Error(playbackError);
       } finally {
         source?.disconnect();
         video.pause();
@@ -551,7 +569,8 @@ export async function exportDebugVideo(context: DebugExportContext): Promise<Blo
       }
     }
   } finally {
-    if (heartbeat !== null) clearInterval(heartbeat);
+    onTick = null;
+    tickerWorker.terminate();
     try {
       musicBedSource?.stop();
     } catch {
