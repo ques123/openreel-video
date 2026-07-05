@@ -91,10 +91,15 @@ export function PerceptionLabPage() {
   const [experimentsRefresh, setExperimentsRefresh] = useState(0);
   /** Live progress line while a debug export renders; null = idle. */
   const [exportProgress, setExportProgress] = useState<string | null>(null);
-  /** Replay of a stored experiment's cut (storyboard + remapped files). */
+  /**
+   * Replay of a stored experiment's cut (storyboard + remapped files). Carries
+   * the experiment so its generated music tracks stay A/B-able and committable
+   * after a refresh, when the live director/music session is gone.
+   */
   const [replay, setReplay] = useState<{
     storyboard: Storyboard;
     getFile: (clipId: string) => File | null;
+    exp: DirectorExperiment | null;
   } | null>(null);
   // Cloud vision opt-in: session-only (deliberately NOT persisted — each
   // session re-consents) + per-run scope dial.
@@ -286,6 +291,21 @@ export function PerceptionLabPage() {
     music.state.taskId,
     director,
   ]);
+
+  /** Commit a track from a stored-experiment replay (persists to the record). */
+  const commitReplayTrack = useCallback((trackId: string) => {
+    setReplay((r) => {
+      if (!r?.exp?.music) return r;
+      const exp = {
+        ...r.exp,
+        updatedAt: Date.now(),
+        music: { ...r.exp.music, committedTrackId: trackId },
+      };
+      void saveExperiment(exp).catch(() => undefined);
+      setExperimentsRefresh((n) => n + 1);
+      return { ...r, exp };
+    });
+  }, []);
 
   /** Find a clip's File in THIS session by its stable cross-session identity. */
   const fileByCacheKey = useCallback(
@@ -588,12 +608,13 @@ export function PerceptionLabPage() {
           exportProgress={exportProgress}
           onWatch={(exp) => {
             if (exp.storyboard) {
-              setReplay({ storyboard: exp.storyboard, getFile: experimentGetFile(exp) });
+              setReplay({ storyboard: exp.storyboard, getFile: experimentGetFile(exp), exp });
             }
           }}
           onExportDebug={(exp) => {
             if (exp.storyboard) void runDebugExport(exp, exp.storyboard);
           }}
+          onChanged={() => setExperimentsRefresh((n) => n + 1)}
           onDeleted={() => {
             setExperimentOpen(null);
             setExperimentsRefresh((n) => n + 1);
@@ -614,6 +635,15 @@ export function PerceptionLabPage() {
           getFile={replay.getFile}
           initialIndex={0}
           onClose={() => setReplay(null)}
+          music={
+            replay.exp?.music && replay.exp.music.tracks.length > 0
+              ? {
+                  tracks: replay.exp.music.tracks,
+                  committedTrackId: replay.exp.music.committedTrackId,
+                  onCommit: commitReplayTrack,
+                }
+              : undefined
+          }
         />
       )}
       {storyboardStart !== null && director.state.storyboard && (
