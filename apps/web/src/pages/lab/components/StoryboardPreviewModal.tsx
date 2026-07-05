@@ -85,24 +85,6 @@ export function StoryboardPreviewModal({
     if (audio) audio.muted = muted;
   }, [muted]);
 
-  // Mirror the bed's transport to the video's — it's a loop, not synced to
-  // segment boundaries, so play/pause/ended is all it needs.
-  useEffect(() => {
-    const video = videoRef.current;
-    const audio = audioRef.current;
-    if (!video || !audio) return;
-    const play = () => audio.play().catch(() => {});
-    const pause = () => audio.pause();
-    video.addEventListener("play", play);
-    video.addEventListener("pause", pause);
-    video.addEventListener("ended", pause);
-    return () => {
-      video.removeEventListener("play", play);
-      video.removeEventListener("pause", pause);
-      video.removeEventListener("ended", pause);
-    };
-  }, [hasMusicBar]);
-
   const item = items[index];
   const file = item ? getFile(item.clipId) : null;
 
@@ -123,6 +105,31 @@ export function StoryboardPreviewModal({
       setUrl(null);
     };
   }, [file]);
+
+  // Mirror the bed's transport to the video's — it's a loop, not synced to
+  // segment boundaries, so play/pause/ended is all it needs. MUST re-run per
+  // `url`: the <video> mounts only after the object URL resolves and is
+  // replaced on cross-file segment swaps, so listeners wired earlier (or to
+  // a null ref) die with the old element (same gotcha as the matrix modal).
+  useEffect(() => {
+    const video = videoRef.current;
+    const audio = audioRef.current;
+    if (!video || !audio) return;
+    const play = () => audio.play().catch(() => {});
+    const pause = () => audio.pause();
+    video.addEventListener("play", play);
+    video.addEventListener("pause", pause);
+    video.addEventListener("ended", pause);
+    // The new segment's video may already be playing (autoPlay fired before
+    // this effect) — catch the bed up instead of waiting for the next event.
+    if (!video.paused) play();
+    else pause();
+    return () => {
+      video.removeEventListener("play", play);
+      video.removeEventListener("pause", pause);
+      video.removeEventListener("ended", pause);
+    };
+  }, [hasMusicBar, url]);
 
   // Seek to the segment start whenever the segment (or source) changes. When
   // the src just swapped, metadata isn't loaded yet — onLoadedMetadata below
