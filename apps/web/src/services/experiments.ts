@@ -28,6 +28,21 @@ export interface ExperimentClipRef {
   fileName: string;
 }
 
+/**
+ * Aggregate captioning cost/time across the run's clips, over only the
+ * caption sources actually enabled in promptSources (mirrors the
+ * captionModels resolution in use-director's start()). Optional everywhere —
+ * legacy experiments predate this field.
+ */
+export interface ExperimentCaptionStats {
+  cloudFrames: number;
+  cloudPromptTokens: number;
+  cloudCompletionTokens: number;
+  cloudMs: number;
+  localFrames: number;
+  localMs: number;
+}
+
 export interface DirectorExperiment {
   id: string;
   /** Run start / last update, epoch ms. */
@@ -48,6 +63,8 @@ export interface DirectorExperiment {
   usage: { promptTokens: number; completionTokens: number; calls: number };
   /** Total LLM wall-clock across the conversation so far. */
   durationMs: number;
+  /** Captioning cost/time behind the run's active sources; absent = never computed (legacy). */
+  captionStats?: ExperimentCaptionStats;
 }
 
 export interface ExperimentSummary {
@@ -63,6 +80,28 @@ export interface ExperimentSummary {
   targetDurationS?: number | null;
   /** Set when a rendered debug video is stored for this experiment. */
   videoAt?: number;
+  /** Director LLM token totals, for the at-a-glance menu row. */
+  promptTokens?: number;
+  completionTokens?: number;
+  /** Total LLM wall-clock across the conversation so far. */
+  durationMs?: number;
+  /** Captioning cost/time behind the run's active sources. */
+  captionStats?: ExperimentCaptionStats;
+}
+
+/** 4500 -> "4.5k", 331000 -> "331k", 900 -> "900". */
+export function fmtTokens(n: number): string {
+  if (n < 1000) return String(Math.round(n));
+  const k = n / 1000;
+  return `${k % 1 === 0 ? k.toFixed(0) : k.toFixed(1)}k`;
+}
+
+/** 595000 -> "9m55s", 45000 -> "45s". */
+export function fmtDurationMs(ms: number): string {
+  const totalS = Math.round(ms / 1000);
+  const m = Math.floor(totalS / 60);
+  const s = totalS % 60;
+  return m > 0 ? `${m}m${String(s).padStart(2, "0")}s` : `${s}s`;
 }
 
 const storage = new StorageEngine();
@@ -92,6 +131,10 @@ function summarize(exp: DirectorExperiment, prev?: ExperimentSummary): Experimen
     promptSources: exp.promptSources,
     targetDurationS: exp.targetDurationS,
     videoAt: prev?.videoAt,
+    promptTokens: exp.usage.promptTokens,
+    completionTokens: exp.usage.completionTokens,
+    durationMs: exp.durationMs,
+    captionStats: exp.captionStats,
   };
 }
 

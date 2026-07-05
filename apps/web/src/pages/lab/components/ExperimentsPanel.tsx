@@ -1,5 +1,10 @@
 import { useEffect, useState } from "react";
-import { listExperiments, type ExperimentSummary } from "../../../services/experiments";
+import {
+  fmtDurationMs,
+  fmtTokens,
+  listExperiments,
+  type ExperimentSummary,
+} from "../../../services/experiments";
 
 interface ExperimentsPanelProps {
   /** Change this value to make the panel re-read the index (new run saved). */
@@ -19,6 +24,23 @@ function srcBadge(s: ExperimentSummary): string {
   if (s.promptSources.cloudTimeline) parts.push("c·timeline");
   if (s.promptSources.transcript) parts.push("script");
   return parts.join("+") || "no sources";
+}
+
+/** Compact "director model · tokens · caption models · caption cost/time" line; omits missing pieces (legacy records). */
+function costLine(s: ExperimentSummary): string | null {
+  const parts: string[] = [];
+  if (s.model) parts.push(s.model);
+  const directorTok = (s.promptTokens ?? 0) + (s.completionTokens ?? 0);
+  if (directorTok > 0) parts.push(`${fmtTokens(directorTok)} tok`);
+  if (s.captionModels) parts.push(s.captionModels);
+  const stats = s.captionStats;
+  if (stats) {
+    const capTok = stats.cloudPromptTokens + stats.cloudCompletionTokens;
+    if (capTok > 0) parts.push(`cap ${fmtTokens(capTok)} tok`);
+    const capMs = stats.cloudMs + stats.localMs;
+    if (capMs > 0) parts.push(fmtDurationMs(capMs));
+  }
+  return parts.length > 0 ? parts.join(" · ") : null;
 }
 
 /**
@@ -62,20 +84,26 @@ export function ExperimentsPanel({ refreshToken, onOpen, onCompareGrid }: Experi
         </button>
       </h3>
       <ul className="space-y-1 max-h-60 overflow-y-auto">
-        {experiments.map((e) => (
-          <li
-            key={e.id}
-            className="text-xs rounded px-1.5 py-1 hover:bg-background cursor-pointer"
-            onClick={() => onOpen(e.id)}
-          >
-            <p className="text-text-primary truncate">
-              {e.title ?? e.brief.slice(0, 60) ?? "(untitled)"}
-            </p>
-            <p className="text-text-secondary font-mono text-[10px]">
-              {fmtWhen(e.updatedAt)} · {e.itemCount} segs · {srcBadge(e)}
-            </p>
-          </li>
-        ))}
+        {experiments.map((e) => {
+          const cost = costLine(e);
+          return (
+            <li
+              key={e.id}
+              className="text-xs rounded px-1.5 py-1 hover:bg-background cursor-pointer"
+              onClick={() => onOpen(e.id)}
+            >
+              <p className="text-text-primary truncate">
+                {e.title ?? e.brief.slice(0, 60) ?? "(untitled)"}
+              </p>
+              <p className="text-text-secondary font-mono text-[10px]">
+                {fmtWhen(e.updatedAt)} · {e.itemCount} segs · {srcBadge(e)}
+              </p>
+              {cost && (
+                <p className="text-text-secondary/70 font-mono text-[10px] truncate">{cost}</p>
+              )}
+            </li>
+          );
+        })}
       </ul>
     </div>
   );

@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import {
   deleteExperiment,
+  fmtDurationMs,
+  fmtTokens,
   loadExperiment,
   type DirectorExperiment,
 } from "../../../services/experiments";
@@ -58,7 +60,10 @@ export function ExperimentDetailModal({
   if (!exp) return null;
   const missing = missingFiles(exp);
   const src = exp.promptSources;
-  const totalTokens = exp.usage.promptTokens + exp.usage.completionTokens;
+  const stats = exp.captionStats;
+  const capTokens = stats ? stats.cloudPromptTokens + stats.cloudCompletionTokens : 0;
+  const capMs = stats ? stats.cloudMs + stats.localMs : 0;
+  const capFrames = stats ? stats.cloudFrames + stats.localFrames : 0;
 
   return (
     <div
@@ -77,9 +82,21 @@ export function ExperimentDetailModal({
             <p className="text-xs text-text-secondary font-mono">
               {new Date(exp.at).toISOString().replace("T", " ").slice(0, 16)} UTC ·{" "}
               {exp.model} · {exp.usage.calls} LLM calls
-              {totalTokens > 0 ? ` · ${(totalTokens / 1000).toFixed(1)}k tokens` : ""}
-              {exp.durationMs > 0 ? ` · ${(exp.durationMs / 1000).toFixed(0)}s thinking` : ""}
+              {exp.usage.promptTokens + exp.usage.completionTokens > 0
+                ? ` · ${fmtTokens(exp.usage.promptTokens)} in / ${fmtTokens(exp.usage.completionTokens)} out tok`
+                : ""}
+              {exp.durationMs > 0 ? ` · ${fmtDurationMs(exp.durationMs)} thinking` : ""}
             </p>
+            {(exp.captionModels || stats) && (
+              <p className="text-xs text-text-secondary font-mono">
+                captions: {exp.captionModels || "local-only"}
+                {stats && capFrames > 0 ? ` · ${capFrames} frames` : ""}
+                {stats && capTokens > 0
+                  ? ` · ${fmtTokens(stats.cloudPromptTokens)} in / ${fmtTokens(stats.cloudCompletionTokens)} out tok`
+                  : ""}
+                {stats && capMs > 0 ? ` · ${fmtDurationMs(capMs)}` : ""}
+              </p>
+            )}
           </div>
           <button
             className="text-text-secondary hover:text-text-primary text-xl px-2"

@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { Storyboard } from "@openreel/core";
 import {
+  fmtDurationMs,
+  fmtTokens,
   listExperiments,
   loadExperiment,
   type DirectorExperiment,
@@ -201,6 +203,32 @@ function chipsFor(exp: ExperimentSummary, all: ExperimentSummary[]): SettingChip
 }
 
 /**
+ * Compact spend row for one cell — director tokens then caption cost/time.
+ * Kept OUT of chipsFor: chips highlight setting DIFFERENCES, but raw spend
+ * numbers almost always differ and would just light up amber everywhere.
+ */
+function statsLine(exp: ExperimentSummary): string | null {
+  const parts: string[] = [];
+  const directorTok = (exp.promptTokens ?? 0) + (exp.completionTokens ?? 0);
+  if (directorTok > 0) {
+    parts.push(
+      `${exp.model} ${fmtTokens(exp.promptTokens ?? 0)}/${fmtTokens(exp.completionTokens ?? 0)} tok`,
+    );
+  }
+  const stats = exp.captionStats;
+  if (stats) {
+    const capTok = stats.cloudPromptTokens + stats.cloudCompletionTokens;
+    const capMs = stats.cloudMs + stats.localMs;
+    const bits: string[] = [];
+    if (exp.captionModels) bits.push(exp.captionModels);
+    if (capTok > 0) bits.push(`${fmtTokens(capTok)} tok`);
+    if (capMs > 0) bits.push(fmtDurationMs(capMs));
+    if (bits.length > 0) parts.push(`cap ${bits.join(" ")}`);
+  }
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
+/**
  * Cross-experiment comparison matrix: hand-pick experiments and watch their
  * cuts side by side, played LIVE from the original files (no debug render
  * needed). Settings + brief show under each cell with DIFFERENCES
@@ -384,6 +412,11 @@ export function ExperimentMatrixModal({
                           {e.itemCount} segs
                         </span>
                       </div>
+                      {statsLine(e) && (
+                        <p className="text-[10px] font-mono text-text-secondary/60 leading-snug">
+                          {statsLine(e)}
+                        </p>
+                      )}
                     </div>
                   );
                 })}
