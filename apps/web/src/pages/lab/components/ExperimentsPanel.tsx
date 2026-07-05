@@ -74,14 +74,14 @@ export function ExperimentsPanel({ refreshToken, onOpen, onCompareGrid }: Experi
               className="text-xs rounded px-1.5 py-1 hover:bg-background cursor-pointer"
               onClick={() => onOpen(e.id)}
             >
-              <p className="text-text-primary truncate">
-                {e.title ?? e.brief.slice(0, 60) ?? "(untitled)"}
+              <p className="text-text-primary break-words">
+                {e.title ?? e.brief.slice(0, 120) ?? "(untitled)"}
               </p>
               <p className="text-text-secondary font-mono text-[10px]">
                 {fmtWhen(e.updatedAt)} · {e.itemCount} segs · {srcBadge(e)}
               </p>
               {cost && (
-                <p className="text-text-secondary/70 font-mono text-[10px] truncate">{cost}</p>
+                <p className="text-text-secondary/70 font-mono text-[10px] break-words">{cost}</p>
               )}
             </li>
           );

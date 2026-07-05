@@ -147,11 +147,19 @@ export function experimentCaptionCostUSD(s: {
   return null;
 }
 
-/** Compact "director model · tokens ≈$ · caption models · caption tokens ≈$ · time" line; omits missing/unpriceable pieces (legacy records). */
+/**
+ * Compact "director model · tokens ≈$ · gen time · caption models · caption
+ * tokens ≈$ · cap time" line; omits missing/unpriceable pieces (legacy
+ * records — durationMs in particular predates some runs, so it's dropped
+ * silently rather than showing "gen 0s"). Both durations are labeled ("gen"
+ * for the director's LLM wall-clock, "cap" for captioning) since the line
+ * carries two independent timings once both are present.
+ */
 export function experimentCostLine(s: {
   model: string;
   promptTokens?: number;
   completionTokens?: number;
+  durationMs?: number;
   captionModels?: string;
   captionStats?: ExperimentCaptionStats;
 }): string | null {
@@ -162,6 +170,7 @@ export function experimentCostLine(s: {
     const dirCost = estimateCostUSD(s.model, s.promptTokens ?? 0, s.completionTokens ?? 0);
     parts.push(`${fmtTokens(directorTok)} tok${dirCost !== null ? ` ≈${fmtUSD(dirCost)}` : ""}`);
   }
+  if (s.durationMs) parts.push(`gen ${fmtDurationMs(s.durationMs)}`);
   if (s.captionModels) parts.push(s.captionModels);
   const stats = s.captionStats;
   if (stats) {
@@ -171,7 +180,7 @@ export function experimentCostLine(s: {
       parts.push(`cap ${fmtTokens(capTok)} tok${capCost !== null ? ` ≈${fmtUSD(capCost)}` : ""}`);
     }
     const capMs = stats.cloudMs + stats.localMs;
-    if (capMs > 0) parts.push(fmtDurationMs(capMs));
+    if (capMs > 0) parts.push(`cap ${fmtDurationMs(capMs)}`);
   }
   return parts.length > 0 ? parts.join(" · ") : null;
 }
