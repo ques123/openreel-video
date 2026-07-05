@@ -95,6 +95,46 @@ describe("dossierToPromptText", () => {
     expect(cloudOnly).toContain("withheld for this run");
   });
 
+  it("model pins select the archived run instead of the latest", () => {
+    const meta = (model: string) => ({
+      model, enhancedAt: 1, framesSent: 1, framesFailed: 0, ms: 1, promptTokens: 1, completionTokens: 1,
+    });
+    const dossier = makeDossier({
+      shots: [makeShot(0, 0, 10, { cloudCaption: "latest shots text" })],
+      cloudDenseCaptions: [{ t: 0, text: "latest timeline text" }],
+      cloudRuns: { shots: meta("gpt-5.2"), timeline: meta("gpt-5.2") },
+    });
+    dossier.cloudRunArchive = [
+      { scope: "timeline", model: "gpt-5.2", captions: [{ t: 0, text: "latest timeline text" }], meta: meta("gpt-5.2") },
+      { scope: "timeline", model: "gpt-5.4-mini", captions: [{ t: 0, text: "mini timeline text" }], meta: meta("gpt-5.4-mini") },
+      { scope: "shots", model: "gpt-5.4-mini", captions: [{ t: 5, text: "mini shots text" }], meta: meta("gpt-5.4-mini") },
+    ];
+
+    const pinned = dossierToPromptText(dossier, {
+      sources: {
+        localCaptions: false, cloudShots: true, cloudTimeline: true, transcript: false,
+        cloudTimelineModel: "gpt-5.4-mini", cloudShotsModel: "gpt-5.4-mini",
+      },
+    });
+    expect(pinned).toContain("mini timeline text");
+    expect(pinned).not.toContain("latest timeline text");
+    expect(pinned).toContain("CLOUD-ENHANCED by gpt-5.4-mini");
+    expect(pinned).toContain("mini shots text");
+
+    // Unpinned keeps the latest run; a pin to a missing model falls back.
+    const unpinned = dossierToPromptText(dossier, {
+      sources: { localCaptions: false, cloudShots: true, cloudTimeline: true, transcript: false },
+    });
+    expect(unpinned).toContain("latest timeline text");
+    const missingPin = dossierToPromptText(dossier, {
+      sources: {
+        localCaptions: false, cloudShots: true, cloudTimeline: true, transcript: false,
+        cloudTimelineModel: "gpt-9-nonexistent",
+      },
+    });
+    expect(missingPin).toContain("latest timeline text");
+  });
+
   it("prefers cloud captions and the cloud timeline when present", () => {
     const text = dossierToPromptText(
       makeDossier({

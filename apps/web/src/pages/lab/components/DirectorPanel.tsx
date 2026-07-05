@@ -9,6 +9,8 @@ interface DirectorPanelProps {
   ready: boolean;
   clipsDone: number;
   clipsTotal: number;
+  /** Archived caption models available across loaded clips, per scope. */
+  captionModelOptions: { shots: string[]; timeline: string[] };
 }
 
 function activityLine(a: DirectorActivity): string {
@@ -24,7 +26,7 @@ function activityLine(a: DirectorActivity): string {
   }
 }
 
-export function DirectorPanel({ director, ready, clipsDone, clipsTotal }: DirectorPanelProps) {
+export function DirectorPanel({ director, ready, clipsDone, clipsTotal, captionModelOptions }: DirectorPanelProps) {
   const { state, start, refine, cancel, reset } = director;
   const [brief, setBrief] = useState("");
   const [target, setTarget] = useState("60");
@@ -80,22 +82,50 @@ export function DirectorPanel({ director, ready, clipsDone, clipsTotal }: Direct
           </span>
           {(
             [
-              ["localCaptions", "local captions"],
-              ["cloudShots", "cloud shots"],
-              ["cloudTimeline", "cloud timeline"],
-              ["transcript", "transcript"],
-            ] as [keyof PromptSources, string][]
-          ).map(([key, label]) => (
-            <label key={key} className="flex items-center gap-1 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={sources[key]}
-                disabled={!ready || running}
-                onChange={(e) => setSources((s) => ({ ...s, [key]: e.target.checked }))}
-              />
-              {label}
-            </label>
-          ))}
+              ["localCaptions", "local captions", null],
+              ["cloudShots", "cloud shots", "cloudShotsModel"],
+              ["cloudTimeline", "cloud timeline", "cloudTimelineModel"],
+              ["transcript", "transcript", null],
+            ] as [keyof PromptSources & string, string, "cloudShotsModel" | "cloudTimelineModel" | null][]
+          ).map(([key, label, pinKey]) => {
+            const options =
+              pinKey === "cloudShotsModel"
+                ? captionModelOptions.shots
+                : pinKey === "cloudTimelineModel"
+                  ? captionModelOptions.timeline
+                  : [];
+            return (
+              <span key={key} className="flex items-center gap-1">
+                <label className="flex items-center gap-1 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={sources[key] as boolean}
+                    disabled={!ready || running}
+                    onChange={(e) => setSources((s) => ({ ...s, [key]: e.target.checked }))}
+                  />
+                  {label}
+                </label>
+                {pinKey && sources[key] && options.length > 1 && (
+                  <select
+                    className="bg-background border border-border rounded px-1 py-0 text-[10px] text-text-primary"
+                    value={sources[pinKey] ?? ""}
+                    disabled={!ready || running}
+                    onChange={(e) =>
+                      setSources((s) => ({ ...s, [pinKey]: e.target.value || undefined }))
+                    }
+                    title="Which archived caption run the director reads (latest = most recent enhance per clip)"
+                  >
+                    <option value="">latest</option>
+                    {options.map((m) => (
+                      <option key={m} value={m}>
+                        {m.replace("gpt-", "")}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </span>
+            );
+          })}
         </div>
         <div className="flex items-center gap-2">
           <label className="text-xs text-text-secondary flex items-center gap-1.5">

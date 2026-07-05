@@ -9,7 +9,7 @@
 
 import { mergeDenseCaptions } from "./caption-text";
 import type { SearchResult } from "./retrieval";
-import type { ClipDossier } from "./types";
+import type { ClipDossier, DenseCaption } from "./types";
 import { storyboardDurationS, type Storyboard } from "./director-types";
 
 /** Per-clip transcript budget; talky clips get truncated, not dropped. */
@@ -33,6 +33,13 @@ export interface PromptSources {
   cloudShots: boolean;
   cloudTimeline: boolean;
   transcript: boolean;
+  /**
+   * Pin a scope to a specific archived caption model (e.g. "gpt-5.4-mini").
+   * Unset = the clip's latest run for that scope. Clips lacking the pinned
+   * run fall back to their latest, per clip.
+   */
+  cloudShotsModel?: string;
+  cloudTimelineModel?: string;
 }
 
 export const DEFAULT_PROMPT_SOURCES: PromptSources = {
@@ -64,12 +71,28 @@ export function dossierToPromptText(
   lines.push(
     "  SHOTS (index  start-end  len  motion(0-255, <40 typical)  peak@  sharpness(~200+ = sharp)  scene description):",
   );
+  const pinnedShots = sources.cloudShotsModel
+    ? dossier.cloudRunArchive.find(
+        (e) => e.scope === "shots" && e.model === sources.cloudShotsModel,
+      )
+    : undefined;
+  const pinnedShotCaption = (shot: { tStart: number; tEnd: number; repFrameTime: number }) => {
+    if (!pinnedShots) return null;
+    let best: DenseCaption | null = null;
+    for (const c of pinnedShots.captions) {
+      if (c.t < shot.tStart - 1 || c.t > shot.tEnd + 1) continue;
+      if (!best || Math.abs(c.t - shot.repFrameTime) < Math.abs(best.t - shot.repFrameTime)) {
+        best = c;
+      }
+    }
+    return best?.text ?? null;
+  };
   for (const shot of dossier.shots) {
     const len = shot.tEnd - shot.tStart;
     // Cloud descriptions (opt-in enhance, large model) trump local ones —
-    // subject to the source mixer.
+    // subject to the source mixer (and its model pin, when set).
     const text =
-      (sources.cloudShots ? shot.cloudCaption : null) ??
+      (sources.cloudShots ? (pinnedShotCaption(shot) ?? shot.cloudCaption) : null) ??
       (sources.localCaptions ? shot.caption : null);
     const maxLen = 240;
     const caption = text
@@ -82,9 +105,17 @@ export function dossierToPromptText(
     );
   }
 
-  const useCloudTimeline = sources.cloudTimeline && dossier.cloudDenseCaptions.length > 0;
+  const pinnedTimeline = sources.cloudTimelineModel
+    ? dossier.cloudRunArchive.find(
+        (e) => e.scope === "timeline" && e.model === sources.cloudTimelineModel,
+      )
+    : undefined;
+  const cloudTimelineCaptions = pinnedTimeline?.captions ?? dossier.cloudDenseCaptions;
+  const cloudTimelineModel =
+    pinnedTimeline?.model ?? dossier.cloudRuns.timeline?.model ?? "cloud";
+  const useCloudTimeline = sources.cloudTimeline && cloudTimelineCaptions.length > 0;
   const timeline = useCloudTimeline
-    ? dossier.cloudDenseCaptions
+    ? cloudTimelineCaptions
     : sources.localCaptions
       ? dossier.denseCaptions
       : [];
@@ -92,7 +123,7 @@ export function dossierToPromptText(
     const segments = mergeDenseCaptions(timeline);
     lines.push(
       useCloudTimeline
-        ? `  SCENE TIMELINE (CLOUD-ENHANCED — large vision model, considerably more reliable; sampled on visual change, similar neighbors merged):`
+        ? `  SCENE TIMELINE (CLOUD-ENHANCED by ${cloudTimelineModel} — large vision model, considerably more reliable; sampled on visual change, similar neighbors merged):`
         : `  SCENE TIMELINE (machine descriptions sampled on visual change, similar neighbors merged):`,
     );
     let used = 0;
