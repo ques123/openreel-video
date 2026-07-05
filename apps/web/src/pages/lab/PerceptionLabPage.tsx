@@ -285,6 +285,18 @@ export function PerceptionLabPage() {
     state.models.embed.state === "ready" &&
     state.clips.some((c) => c.status === "done");
 
+  /** Archived caption models across loaded clips, per scope (for mixer pins). */
+  const captionModelOptions = useMemo(() => {
+    const shots = new Set<string>();
+    const timeline = new Set<string>();
+    for (const c of state.clips) {
+      for (const e of c.dossier?.cloudRunArchive ?? []) {
+        (e.scope === "shots" ? shots : timeline).add(e.model);
+      }
+    }
+    return { shots: [...shots].sort(), timeline: [...timeline].sort() };
+  }, [state.clips]);
+
   return (
     <div className="h-full overflow-y-auto bg-background">
       <div className="max-w-6xl mx-auto p-6">
@@ -408,6 +420,7 @@ export function PerceptionLabPage() {
                 ready={searchReady}
                 clipsDone={state.clips.filter((c) => c.status === "done").length}
                 clipsTotal={state.clips.length}
+                captionModelOptions={captionModelOptions}
               />
               {director.state.storyboard && (
                 <StoryboardList

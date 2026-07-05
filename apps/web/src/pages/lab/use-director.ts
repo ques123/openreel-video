@@ -266,11 +266,18 @@ export function useDirector(deps: UseDirectorDeps) {
       const captionModels =
         [
           ...new Set(
-            dossiers
-              .flatMap((d) => [d.cloudRuns.timeline?.model, d.cloudRuns.shots?.model])
-              .filter((m): m is string => !!m),
+            dossiers.flatMap((d) => [
+              promptSources.cloudTimeline
+                ? (promptSources.cloudTimelineModel ?? d.cloudRuns.timeline?.model)
+                : null,
+              promptSources.cloudShots
+                ? (promptSources.cloudShotsModel ?? d.cloudRuns.shots?.model)
+                : null,
+            ]),
           ),
-        ].join("+") || "local-only";
+        ]
+          .filter((m): m is string => !!m)
+          .join("+") || "local-only";
       experimentRef.current = {
         id: `exp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
         at: Date.now(),
