@@ -410,8 +410,52 @@ export async function exportDebugVideo(context: DebugExportContext): Promise<Blo
   const done = new Promise<void>((resolve) => {
     recorder.onstop = () => resolve();
   });
-  recorder.start(250);
+
+  // Fetch/decode the committed music bed BEFORE the recorder starts: the
+  // download+decode can take seconds and must not become a dead zone at the
+  // head of the recording. Loops for the whole render (it's a bed, not
+  // synced to segments) into the same audioDest the segment audio uses; a
+  // failure is surfaced as a title-card warning rather than dropping the run.
   let musicBedSource: AudioBufferSourceNode | null = null;
+  let musicWarning: string | null = null;
+  if (meta.music?.audioUrl) {
+    onProgress?.("loading music bed…");
+    try {
+      const res = await fetch(meta.music.audioUrl);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const buf = await res.arrayBuffer();
+      const audioBuffer = await audioCtx.decodeAudioData(buf);
+      const gain = audioCtx.createGain();
+      gain.gain.value = 0.35;
+      musicBedSource = audioCtx.createBufferSource();
+      musicBedSource.buffer = audioBuffer;
+      musicBedSource.loop = true;
+      musicBedSource.connect(gain).connect(audioDest);
+    } catch (err) {
+      musicWarning = "music audio failed to load — render has no bed";
+      console.error("[debug-export] music bed failed to load", err);
+    }
+  }
+
+  recorder.start(250);
+  musicBedSource?.start();
+
+  let lastPaintMs = 0;
+  const markPaint = () => {
+    lastPaintMs = performance.now();
+  };
+  // Heartbeat: captureStream only emits on canvas activity, so any awaited
+  // gap (video metadata/seek between segments — seconds on 4K HEVC) starves
+  // the video track. With a continuous music bed filling the audio timeline,
+  // players render that starvation as a frozen decoder stall; re-emitting the
+  // current pixels turns it into a clean, intentional hold instead.
+  const HEARTBEAT_MS = Math.round(1000 / FPS);
+  const heartbeat = window.setInterval(() => {
+    if (performance.now() - lastPaintMs > HEARTBEAT_MS * 1.5) {
+      ctx.drawImage(canvas, 0, 0); // self-draw: same pixels, fresh frame
+      markPaint();
+    }
+  }, HEARTBEAT_MS);
 
   /** Repaint every frame for `seconds` (captureStream needs canvas activity). */
   const holdFrame = (draw: () => void, seconds: number) =>
@@ -419,6 +463,7 @@ export async function exportDebugVideo(context: DebugExportContext): Promise<Blo
       const until = performance.now() + seconds * 1000;
       const tick = () => {
         draw();
+        markPaint();
         if (performance.now() < until) requestAnimationFrame(tick);
         else resolve();
       };
@@ -426,29 +471,6 @@ export async function exportDebugVideo(context: DebugExportContext): Promise<Blo
     });
 
   try {
-    // Fetch/decode the committed music bed BEFORE the title card renders, so
-    // a failure can still be reflected as a warning on that card rather than
-    // silently dropping the bed. Loops for the whole render (it's a bed, not
-    // synced to segments) into the same audioDest the segment audio uses.
-    let musicWarning: string | null = null;
-    if (meta.music?.audioUrl) {
-      try {
-        const res = await fetch(meta.music.audioUrl);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const buf = await res.arrayBuffer();
-        const audioBuffer = await audioCtx.decodeAudioData(buf);
-        const gain = audioCtx.createGain();
-        gain.gain.value = 0.35;
-        musicBedSource = audioCtx.createBufferSource();
-        musicBedSource.buffer = audioBuffer;
-        musicBedSource.loop = true;
-        musicBedSource.connect(gain).connect(audioDest);
-        musicBedSource.start();
-      } catch (err) {
-        musicWarning = "music audio failed to load — render has no bed";
-        console.error("[debug-export] music bed failed to load", err);
-      }
-    }
     const cardMeta = musicWarning
       ? { ...meta, warnings: [...(meta.warnings ?? []), musicWarning] }
       : meta;
@@ -506,6 +528,7 @@ export async function exportDebugVideo(context: DebugExportContext): Promise<Blo
               video.currentTime,
               queries,
             );
+            markPaint();
             if (video.currentTime >= item.outS || video.ended) {
               video.pause();
               resolve();
@@ -524,6 +547,7 @@ export async function exportDebugVideo(context: DebugExportContext): Promise<Blo
       }
     }
   } finally {
+    clearInterval(heartbeat);
     try {
       musicBedSource?.stop();
     } catch {
