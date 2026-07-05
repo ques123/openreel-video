@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { Storyboard } from "@openreel/core";
 import {
+  fmtDurationMs,
+  fmtTokens,
   listExperiments,
   loadExperiment,
   type DirectorExperiment,
@@ -16,6 +18,12 @@ interface ExperimentMatrixModalProps {
 
 function fmtWhen(ms: number): string {
   return new Date(ms).toISOString().replace("T", " ").slice(5, 16);
+}
+
+function fmtTime(s: number): string {
+  const m = Math.floor(s / 60);
+  const sec = s - m * 60;
+  return `${m}:${sec.toFixed(1).padStart(4, "0")}`;
 }
 
 /**
@@ -38,6 +46,7 @@ function StoryboardCellPlayer({
 }) {
   const items = storyboard.items;
   const videoRef = useRef<HTMLVideoElement>(null);
+  const thumbRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const [index, setIndex] = useState(0);
   const [done, setDone] = useState(false);
   const advancedFromRef = useRef(-1);
@@ -113,6 +122,26 @@ function StoryboardCellPlayer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [index, items, url]);
 
+  useEffect(() => {
+    thumbRefs.current[index]?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [index]);
+
+  // Scene-strip click: jump to segment i, going through the same setIndex
+  // path as onTimeUpdate's advance (same effects, same src-swap gotcha).
+  const jumpTo = (i: number) => {
+    const v = videoRef.current;
+    const target = items[i];
+    if (!v || !target) return;
+    advancedFromRef.current = -1;
+    setDone(false);
+    if (i === index) {
+      if (v.readyState >= 1) seekIntoSegment(v);
+    } else {
+      systemPauseRef.current = true; // src swap may emit a pause
+      setIndex(i);
+    }
+  };
+
   if (!item) return null;
 
   return (
@@ -123,6 +152,7 @@ function StoryboardCellPlayer({
           src={url}
           controls
           playsInline
+          preload="auto"
           data-matrix-video
           className="w-full aspect-video bg-black rounded object-contain"
           onLoadedMetadata={(e) => seekIntoSegment(e.currentTarget)}
@@ -166,6 +196,40 @@ function StoryboardCellPlayer({
         {index + 1}/{items.length} · {item.role}
         {done && " · done"}
       </span>
+      <div className="flex gap-1 overflow-x-auto pt-1 pb-0.5 scrollbar-thin">
+        {items.map((it, i) => (
+          <button
+            key={`${it.clipId}-${i}`}
+            ref={(el) => {
+              thumbRefs.current[i] = el;
+            }}
+            type="button"
+            onClick={() => jumpTo(i)}
+            title={`#${i + 1} ${it.role} · ${it.fileName} · ${fmtTime(it.inS)}–${fmtTime(it.outS)} · ${it.why}`}
+            className={`relative shrink-0 h-10 aspect-video rounded overflow-hidden border transition-opacity ${
+              i === index
+                ? "border-amber-500 ring-1 ring-amber-500"
+                : "border-border/60 opacity-60 hover:opacity-100"
+            }`}
+          >
+            {it.thumbnailDataUrl ? (
+              <img
+                src={it.thumbnailDataUrl}
+                alt=""
+                className="w-full h-full object-cover bg-black"
+                draggable={false}
+              />
+            ) : (
+              <div className="w-full h-full bg-black/40 flex items-center justify-center text-[9px] text-text-secondary">
+                {i + 1}
+              </div>
+            )}
+            <span className="absolute bottom-0 inset-x-0 px-0.5 bg-black/70 text-[8px] font-mono text-sky-300 truncate leading-tight">
+              {i + 1} {it.role}
+            </span>
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -198,6 +262,32 @@ function chipsFor(exp: ExperimentSummary, all: ExperimentSummary[]): SettingChip
       common: uniform((e) => e.captionModels ?? "?"),
     },
   ];
+}
+
+/**
+ * Compact spend row for one cell — director tokens then caption cost/time.
+ * Kept OUT of chipsFor: chips highlight setting DIFFERENCES, but raw spend
+ * numbers almost always differ and would just light up amber everywhere.
+ */
+function statsLine(exp: ExperimentSummary): string | null {
+  const parts: string[] = [];
+  const directorTok = (exp.promptTokens ?? 0) + (exp.completionTokens ?? 0);
+  if (directorTok > 0) {
+    parts.push(
+      `${exp.model} ${fmtTokens(exp.promptTokens ?? 0)}/${fmtTokens(exp.completionTokens ?? 0)} tok`,
+    );
+  }
+  const stats = exp.captionStats;
+  if (stats) {
+    const capTok = stats.cloudPromptTokens + stats.cloudCompletionTokens;
+    const capMs = stats.cloudMs + stats.localMs;
+    const bits: string[] = [];
+    if (exp.captionModels) bits.push(exp.captionModels);
+    if (capTok > 0) bits.push(`${fmtTokens(capTok)} tok`);
+    if (capMs > 0) bits.push(fmtDurationMs(capMs));
+    if (bits.length > 0) parts.push(`cap ${bits.join(" ")}`);
+  }
+  return parts.length > 0 ? parts.join(" · ") : null;
 }
 
 /**
@@ -384,6 +474,11 @@ export function ExperimentMatrixModal({
                           {e.itemCount} segs
                         </span>
                       </div>
+                      {statsLine(e) && (
+                        <p className="text-[10px] font-mono text-text-secondary/60 leading-snug">
+                          {statsLine(e)}
+                        </p>
+                      )}
                     </div>
                   );
                 })}

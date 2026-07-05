@@ -10,11 +10,16 @@ import {
   searchShots,
   type ChatMessage,
   type ClipDossier,
+  type CloudRunMeta,
   type DirectorActivity,
   type PromptSources,
   type Storyboard,
 } from "@openreel/core";
-import { saveExperiment, type DirectorExperiment } from "../../services/experiments";
+import {
+  saveExperiment,
+  type DirectorExperiment,
+  type ExperimentCaptionStats,
+} from "../../services/experiments";
 import { DIRECTOR_MODEL, chatComplete } from "../../services/openai-proxy";
 
 export type DirectorPhase = "idle" | "running" | "awaiting-refine" | "error";
@@ -121,6 +126,28 @@ function reducer(state: DirectorState, action: Action): DirectorState {
     default:
       return state;
   }
+}
+
+/**
+ * Resolve the CloudRunMeta a scope actually contributed to the prompt: a
+ * pinned model looks up its archived (scope, model) run, falling back to the
+ * clip's current run for that scope when this clip never ran the pin (same
+ * fallback director-prompt.ts uses for the caption text itself, per the
+ * PromptSources doc: "Clips lacking the pinned run fall back to their
+ * latest, per clip.").
+ */
+function resolveCloudRun(
+  dossier: ClipDossier,
+  scope: "shots" | "timeline",
+  pinnedModel: string | undefined,
+): CloudRunMeta | null {
+  if (pinnedModel) {
+    return (
+      dossier.cloudRunArchive.find((e) => e.scope === scope && e.model === pinnedModel)?.meta ??
+      dossier.cloudRuns[scope]
+    );
+  }
+  return dossier.cloudRuns[scope];
 }
 
 function friendlyError(err: unknown): string {
@@ -268,16 +295,45 @@ export function useDirector(deps: UseDirectorDeps) {
           ...new Set(
             dossiers.flatMap((d) => [
               promptSources.cloudTimeline
-                ? (promptSources.cloudTimelineModel ?? d.cloudRuns.timeline?.model)
+                ? resolveCloudRun(d, "timeline", promptSources.cloudTimelineModel)?.model
                 : null,
               promptSources.cloudShots
-                ? (promptSources.cloudShotsModel ?? d.cloudRuns.shots?.model)
+                ? resolveCloudRun(d, "shots", promptSources.cloudShotsModel)?.model
                 : null,
             ]),
           ),
         ]
           .filter((m): m is string => !!m)
           .join("+") || "local-only";
+      // Aggregate cost/time over the SAME resolved runs that fed the prompt
+      // (pin -> archive -> current-run fallback), so the number matches what
+      // the director actually read, not just whatever ran most recently.
+      const captionStats: ExperimentCaptionStats = {
+        cloudFrames: 0,
+        cloudPromptTokens: 0,
+        cloudCompletionTokens: 0,
+        cloudMs: 0,
+        localFrames: 0,
+        localMs: 0,
+      };
+      for (const d of dossiers) {
+        for (const [scope, enabled, pin] of [
+          ["shots", promptSources.cloudShots, promptSources.cloudShotsModel],
+          ["timeline", promptSources.cloudTimeline, promptSources.cloudTimelineModel],
+        ] as const) {
+          if (!enabled) continue;
+          const meta = resolveCloudRun(d, scope, pin);
+          if (!meta) continue;
+          captionStats.cloudFrames += meta.framesSent;
+          captionStats.cloudPromptTokens += meta.promptTokens;
+          captionStats.cloudCompletionTokens += meta.completionTokens;
+          captionStats.cloudMs += meta.ms;
+        }
+        if (promptSources.localCaptions && d.localCaptionPerf) {
+          captionStats.localFrames += d.localCaptionPerf.frames;
+          captionStats.localMs += d.localCaptionPerf.totalMs;
+        }
+      }
       experimentRef.current = {
         id: `exp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
         at: Date.now(),
@@ -298,6 +354,7 @@ export function useDirector(deps: UseDirectorDeps) {
         warnings: [],
         usage: { promptTokens: 0, completionTokens: 0, calls: 0 },
         durationMs: 0,
+        captionStats,
       };
       void runLoop(seed, targetDurationS);
     },
