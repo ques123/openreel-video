@@ -448,14 +448,18 @@ export async function exportDebugVideo(context: DebugExportContext): Promise<Blo
   // gap (video metadata/seek between segments — seconds on 4K HEVC) starves
   // the video track. With a continuous music bed filling the audio timeline,
   // players render that starvation as a frozen decoder stall; re-emitting the
-  // current pixels turns it into a clean, intentional hold instead.
+  // current pixels turns it into a clean, intentional hold instead. Bed-less
+  // renders keep the old (documented-fine) behavior where the muxer simply
+  // compresses the silent gaps away — hence the gate.
   const HEARTBEAT_MS = Math.round(1000 / FPS);
-  const heartbeat = window.setInterval(() => {
-    if (performance.now() - lastPaintMs > HEARTBEAT_MS * 1.5) {
-      ctx.drawImage(canvas, 0, 0); // self-draw: same pixels, fresh frame
-      markPaint();
-    }
-  }, HEARTBEAT_MS);
+  const heartbeat = musicBedSource
+    ? window.setInterval(() => {
+        if (performance.now() - lastPaintMs > HEARTBEAT_MS * 1.5) {
+          ctx.drawImage(canvas, 0, 0); // self-draw: same pixels, fresh frame
+          markPaint();
+        }
+      }, HEARTBEAT_MS)
+    : null;
 
   /** Repaint every frame for `seconds` (captureStream needs canvas activity). */
   const holdFrame = (draw: () => void, seconds: number) =>
@@ -547,7 +551,7 @@ export async function exportDebugVideo(context: DebugExportContext): Promise<Blo
       }
     }
   } finally {
-    clearInterval(heartbeat);
+    if (heartbeat !== null) clearInterval(heartbeat);
     try {
       musicBedSource?.stop();
     } catch {
