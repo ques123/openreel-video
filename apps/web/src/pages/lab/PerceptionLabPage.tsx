@@ -312,6 +312,9 @@ export function PerceptionLabPage() {
     return { shots: [...shots].sort(), timeline: [...timeline].sort() };
   }, [state.clips]);
 
+  const loadedS = state.clips.reduce((sum, c) => sum + (c.analyzedThroughS ?? c.durationS), 0);
+  const fullS = state.clips.reduce((sum, c) => sum + c.durationS, 0);
+
   return (
     <div className="h-full overflow-y-auto bg-background">
       <div className="max-w-6xl mx-auto p-6">
@@ -326,17 +329,8 @@ export function PerceptionLabPage() {
             {state.clips.length > 0 && (
               <p className="text-sm text-text-secondary mt-2">
                 {state.clips.length} clip{state.clips.length === 1 ? "" : "s"} ·{" "}
-                {formatDurationCompact(
-                  state.clips.reduce((sum, c) => sum + (c.analyzedThroughS ?? c.durationS), 0),
-                )}{" "}
-                loaded
-                {(() => {
-                  const analyzed = state.clips.reduce((sum, c) => sum + (c.analyzedThroughS ?? c.durationS), 0);
-                  const full = state.clips.reduce((sum, c) => sum + c.durationS, 0);
-                  const diff = full - analyzed;
-                  if (diff > 60) return ` (of ${formatDurationCompact(full)})`;
-                  return "";
-                })()}
+                {formatDurationCompact(loadedS)} loaded
+                {fullS - loadedS > 60 ? ` (of ${formatDurationCompact(fullS)})` : ""}
               </p>
             )}
           </div>
