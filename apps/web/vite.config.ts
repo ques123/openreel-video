@@ -52,9 +52,11 @@ export default defineConfig({
       "Cross-Origin-Embedder-Policy": "require-corp",
     },
     proxy: {
-      // Director LLM calls: forward to the deployed nginx (tailnet), which
-      // injects the OpenAI key server-side — no key on this machine.
-      "/api/proxy/openai": {
+      // Director LLM + Suno music calls: forward to the deployed nginx
+      // (tailnet), which injects the OpenAI/Suno keys server-side — no key
+      // on this machine. One entry covers every /api/proxy/* sub-path
+      // (openai, suno, ...) so new proxied services need no vite.config change.
+      "/api/proxy": {
         target: "https://openreel.pbrain.dev",
         changeOrigin: true,
       },

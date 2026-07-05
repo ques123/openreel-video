@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   CloudScope,
   DenseCaption,
@@ -8,8 +8,13 @@ import type {
   TranscriptSegment,
 } from "@openreel/core";
 import { CAPTION_MODELS, type CaptionModel } from "../../services/cloud-vision";
-import { downloadBlob, exportDebugVideo } from "../../services/debug-export";
-import { saveExperimentVideo, type DirectorExperiment } from "../../services/experiments";
+import { downloadBlob, exportDebugVideo, type DebugExportMeta } from "../../services/debug-export";
+import {
+  saveExperiment,
+  saveExperimentVideo,
+  type DirectorExperiment,
+} from "../../services/experiments";
+import { proxiedMusicUrl } from "../../services/suno";
 import { useRouter } from "../../hooks/use-router";
 import { cloudShotCaptionsOf, cloudTimelineCaptionsOf, localCaptionsOf } from "./caption-views";
 import { CaptionCompareModal } from "./components/CaptionCompareModal";
@@ -27,7 +32,28 @@ import { StoryboardList } from "./components/StoryboardList";
 import { StoryboardPreviewModal } from "./components/StoryboardPreviewModal";
 import { TranscriptPanel } from "./components/TranscriptPanel";
 import { useDirector } from "./use-director";
+import { useMusic } from "./use-music";
 import { usePerceptionLab, type LabClip } from "./use-perception-lab";
+
+/**
+ * Debug-export music meta from the experiment's COMMITTED track only — an
+ * A/B'd-but-unpicked session (or no music at all) omits `music` entirely
+ * rather than guessing which take to bake in.
+ */
+function committedMusicMeta(exp: DirectorExperiment): DebugExportMeta["music"] {
+  const m = exp.music;
+  if (!m?.committedTrackId) return undefined;
+  const track = m.tracks.find((t) => t.id === m.committedTrackId);
+  if (!track) return undefined;
+  return {
+    title: track.title,
+    modelName: track.modelName,
+    durationS: track.durationS,
+    trackIndex: m.tracks.findIndex((t) => t.id === track.id) + 1,
+    trackCount: m.tracks.length,
+    audioUrl: proxiedMusicUrl(track.audioUrl || track.streamAudioUrl) || null,
+  };
+}
 
 /** Format seconds as "Xh YYm" (≥1h), "YYm", or "<1m". */
 function formatDurationCompact(seconds: number): string {
@@ -45,6 +71,15 @@ export function PerceptionLabPage() {
   const { state, addFiles, runSearch, getFile, getDossiers, embedQuery, enhanceClip } =
     usePerceptionLab(forceDevice);
   const director = useDirector({ getDossiers, embedQuery });
+  const music = useMusic();
+  // Contextual background-music toggle; lives here (not in DirectorPanel) so
+  // it survives across Direct/refine cycles like cloudEnabled does below.
+  const [musicEnabled, setMusicEnabled] = useState(false);
+  // Which experiment a music generation has already been kicked off for —
+  // refine() reuses the SAME experimentId, so this guards against
+  // regenerating on every refine round (only a genuinely new Direct run
+  // gets a new id).
+  const musicGeneratedForRef = useRef<string | null>(null);
   const [preview, setPreview] = useState<ShotPreview | null>(null);
   /** Segment index to start storyboard playback from; null = closed. */
   const [storyboardStart, setStoryboardStart] = useState<number | null>(null);
@@ -204,6 +239,54 @@ export function PerceptionLabPage() {
     }
   }, [director.state.phase, director.state.messages]);
 
+  /** (Re)kick off a background-music generation for the current storyboard. */
+  const runMusicGenerate = useCallback(() => {
+    const storyboard = director.state.storyboard;
+    if (!storyboard) return;
+    const exp = director.getExperiment();
+    const sceneHints = storyboard.items
+      .slice(0, 5)
+      .map((i) => i.why)
+      .filter((w): w is string => Boolean(w));
+    music.generate(exp?.brief ?? "", storyboard, director.state.targetDurationS, sceneHints);
+  }, [director, music]);
+
+  // Auto-generate the music bed once per director conversation (not per
+  // refine round — refine reuses the same experimentId, see
+  // musicGeneratedForRef) when the toggle is on and a storyboard lands.
+  useEffect(() => {
+    if (!musicEnabled) return;
+    if (director.state.phase !== "awaiting-refine" || !director.state.storyboard) return;
+    const expId = director.state.experimentId;
+    if (!expId || musicGeneratedForRef.current === expId) return;
+    musicGeneratedForRef.current = expId;
+    runMusicGenerate();
+  }, [musicEnabled, director.state.phase, director.state.experimentId, runMusicGenerate]);
+
+  // Persist the music session onto the SAME experiment object the director
+  // hook holds (get/save, mirroring use-director's own persistExperiment) so
+  // both a current-run debug export and the stored record see it.
+  useEffect(() => {
+    if (music.state.tracks.length === 0 && music.state.committedTrackId === null) return;
+    if (!music.state.brief || !music.state.taskId) return;
+    const exp = director.getExperiment();
+    if (!exp) return;
+    exp.music = {
+      brief: music.state.brief,
+      taskId: music.state.taskId,
+      tracks: music.state.tracks,
+      committedTrackId: music.state.committedTrackId,
+    };
+    exp.updatedAt = Date.now();
+    void saveExperiment(exp).catch(() => undefined);
+  }, [
+    music.state.tracks,
+    music.state.committedTrackId,
+    music.state.brief,
+    music.state.taskId,
+    director,
+  ]);
+
   /** Find a clip's File in THIS session by its stable cross-session identity. */
   const fileByCacheKey = useCallback(
     (cacheKey: string) => {
@@ -248,6 +331,7 @@ export function PerceptionLabPage() {
             captionModels: exp.captionModels,
             captionStats: exp.captionStats,
             warnings: exp.warnings,
+            music: committedMusicMeta(exp),
           },
           activity: exp.activity,
           getFile: experimentGetFile(exp),
@@ -446,6 +530,10 @@ export function PerceptionLabPage() {
                 clipsDone={state.clips.filter((c) => c.status === "done").length}
                 clipsTotal={state.clips.length}
                 captionModelOptions={captionModelOptions}
+                musicEnabled={musicEnabled}
+                onMusicEnabledChange={setMusicEnabled}
+                musicState={music.state}
+                onMusicRetry={runMusicGenerate}
               />
               {director.state.storyboard && (
                 <StoryboardList
@@ -534,6 +622,15 @@ export function PerceptionLabPage() {
           getFile={getFile}
           initialIndex={storyboardStart}
           onClose={() => setStoryboardStart(null)}
+          music={
+            music.state.phase !== "off"
+              ? {
+                  tracks: music.state.tracks,
+                  committedTrackId: music.state.committedTrackId,
+                  onCommit: music.commit,
+                }
+              : undefined
+          }
         />
       )}
     </div>

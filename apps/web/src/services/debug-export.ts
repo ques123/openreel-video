@@ -41,6 +41,21 @@ export interface DebugExportMeta {
   captionStats?: ExperimentCaptionStats;
   /** Non-fatal issues surfaced during the run; absent/empty renders nothing. */
   warnings?: string[];
+  /**
+   * The committed background-music track, if any — absent entirely when
+   * nothing was committed (no music toggle, or generated-but-unpicked).
+   * audioUrl is already proxied (proxiedMusicUrl); null = info-only title
+   * card line with no actual bed mixed into the render.
+   */
+  music?: {
+    title: string;
+    modelName: string;
+    durationS: number;
+    /** 1-based index of the committed track among the A/B'd takes. */
+    trackIndex: number;
+    trackCount: number;
+    audioUrl: string | null;
+  };
 }
 
 export interface DebugExportContext {
@@ -264,6 +279,18 @@ function captionBreakdownLines(meta: DebugExportMeta): string[] {
   });
 }
 
+/**
+ * "music: Golden Hour (score) · chirp-v5 · 42.0s · take 2/2" — wrapped (not
+ * truncated) since track titles are free text and can run long. Absent when
+ * nothing was committed.
+ */
+function musicLines(ctx: CanvasRenderingContext2D, meta: DebugExportMeta, maxWidth: number): string[] {
+  const m = meta.music;
+  if (!m) return [];
+  const line = `music: ${m.title} · ${m.modelName} · ${m.durationS.toFixed(1)}s · take ${m.trackIndex}/${m.trackCount}`;
+  return wrapText(ctx, line, maxWidth, 2);
+}
+
 function drawTitleCard(ctx: CanvasRenderingContext2D, meta: DebugExportMeta, sb: Storyboard): void {
   ctx.fillStyle = "#0a0a0a";
   ctx.fillRect(0, 0, WIDTH, HEIGHT);
@@ -287,6 +314,7 @@ function drawTitleCard(ctx: CanvasRenderingContext2D, meta: DebugExportMeta, sb:
     directorLine(meta),
     captionsLine(meta),
     ...captionBreakdownLines(meta),
+    ...musicLines(ctx, meta, WIDTH - pad * 2),
   ].filter((line): line is string => Boolean(line));
   // Warnings render in the existing "missing file" red rather than the
   // secondary gray, since the card's other overlay already uses that accent.
@@ -383,6 +411,7 @@ export async function exportDebugVideo(context: DebugExportContext): Promise<Blo
     recorder.onstop = () => resolve();
   });
   recorder.start(250);
+  let musicBedSource: AudioBufferSourceNode | null = null;
 
   /** Repaint every frame for `seconds` (captureStream needs canvas activity). */
   const holdFrame = (draw: () => void, seconds: number) =>
@@ -397,8 +426,35 @@ export async function exportDebugVideo(context: DebugExportContext): Promise<Blo
     });
 
   try {
+    // Fetch/decode the committed music bed BEFORE the title card renders, so
+    // a failure can still be reflected as a warning on that card rather than
+    // silently dropping the bed. Loops for the whole render (it's a bed, not
+    // synced to segments) into the same audioDest the segment audio uses.
+    let musicWarning: string | null = null;
+    if (meta.music?.audioUrl) {
+      try {
+        const res = await fetch(meta.music.audioUrl);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const buf = await res.arrayBuffer();
+        const audioBuffer = await audioCtx.decodeAudioData(buf);
+        const gain = audioCtx.createGain();
+        gain.gain.value = 0.35;
+        musicBedSource = audioCtx.createBufferSource();
+        musicBedSource.buffer = audioBuffer;
+        musicBedSource.loop = true;
+        musicBedSource.connect(gain).connect(audioDest);
+        musicBedSource.start();
+      } catch (err) {
+        musicWarning = "music audio failed to load — render has no bed";
+        console.error("[debug-export] music bed failed to load", err);
+      }
+    }
+    const cardMeta = musicWarning
+      ? { ...meta, warnings: [...(meta.warnings ?? []), musicWarning] }
+      : meta;
+
     onProgress?.("rendering title card…");
-    await holdFrame(() => drawTitleCard(ctx, meta, storyboard), TITLE_CARD_S);
+    await holdFrame(() => drawTitleCard(ctx, cardMeta, storyboard), TITLE_CARD_S);
 
     for (let i = 0; i < storyboard.items.length; i += 1) {
       const item = storyboard.items[i];
@@ -468,6 +524,11 @@ export async function exportDebugVideo(context: DebugExportContext): Promise<Blo
       }
     }
   } finally {
+    try {
+      musicBedSource?.stop();
+    } catch {
+      // already stopped or never started — nothing to clean up
+    }
     recorder.stop();
     await done;
     await audioCtx.close().catch(() => undefined);

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { DEFAULT_PROMPT_SOURCES, type DirectorActivity, type PromptSources } from "@openreel/core";
 import type { UseDirectorReturn } from "../use-director";
+import type { MusicState } from "../use-music";
 import { PromptInspectorModal } from "./PromptInspectorModal";
 
 interface DirectorPanelProps {
@@ -11,6 +12,32 @@ interface DirectorPanelProps {
   clipsTotal: number;
   /** Archived caption models available across loaded clips, per scope. */
   captionModelOptions: { shots: string[]; timeline: string[] };
+  /** Contextual background-music toggle — owned by the page so it survives Direct/refine cycles. */
+  musicEnabled: boolean;
+  onMusicEnabledChange: (checked: boolean) => void;
+  musicState: MusicState;
+  onMusicRetry: () => void;
+}
+
+/** "Xs" elapsed since a music generation started, ticking once a second while it's in flight. */
+function useElapsedS(startedAtMs: number | null, live: boolean): number {
+  const [, tick] = useState(0);
+  useEffect(() => {
+    if (!live) return;
+    const id = setInterval(() => tick((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, [live]);
+  return startedAtMs ? Math.round((Date.now() - startedAtMs) / 1000) : 0;
+}
+
+function musicStatusLine(music: MusicState, elapsedS: number): string {
+  if (music.phase === "ready") {
+    return `♪ ${music.tracks.length} track${music.tracks.length === 1 ? "" : "s"} ready`;
+  }
+  if (music.tracks.length > 0) {
+    return `♪ ${music.tracks.length} track${music.tracks.length === 1 ? "" : "s"} ready, more incoming…(${elapsedS}s)`;
+  }
+  return `♪ generating…(${elapsedS}s)`;
 }
 
 function activityLine(a: DirectorActivity): string {
@@ -26,7 +53,17 @@ function activityLine(a: DirectorActivity): string {
   }
 }
 
-export function DirectorPanel({ director, ready, clipsDone, clipsTotal, captionModelOptions }: DirectorPanelProps) {
+export function DirectorPanel({
+  director,
+  ready,
+  clipsDone,
+  clipsTotal,
+  captionModelOptions,
+  musicEnabled,
+  onMusicEnabledChange,
+  musicState,
+  onMusicRetry,
+}: DirectorPanelProps) {
   const { state, start, refine, cancel, reset } = director;
   const [brief, setBrief] = useState("");
   const [target, setTarget] = useState("60");
@@ -41,6 +78,10 @@ export function DirectorPanel({ director, ready, clipsDone, clipsTotal, captionM
 
   const running = state.phase === "running";
   const targetS = target.trim() === "" ? null : Math.max(5, Number(target) || 60);
+  const musicElapsedS = useElapsedS(
+    musicState.startedAtMs,
+    musicState.phase === "generating" || musicState.phase === "partial",
+  );
 
   return (
     <div className="bg-background-secondary border border-border rounded-lg p-3">
@@ -127,6 +168,20 @@ export function DirectorPanel({ director, ready, clipsDone, clipsTotal, captionM
             );
           })}
         </div>
+        <div className="flex items-center gap-1 text-[11px] text-text-secondary">
+          <label
+            className="flex items-center gap-1 cursor-pointer select-none"
+            title="Generate an instrumental background bed for this cut (via Suno) once the storyboard is ready"
+          >
+            <input
+              type="checkbox"
+              checked={musicEnabled}
+              disabled={!ready || running}
+              onChange={(e) => onMusicEnabledChange(e.target.checked)}
+            />
+            music
+          </label>
+        </div>
         <div className="flex items-center gap-2">
           <label className="text-xs text-text-secondary flex items-center gap-1.5">
             target
@@ -165,6 +220,24 @@ export function DirectorPanel({ director, ready, clipsDone, clipsTotal, captionM
         <p className="text-[10px] text-text-secondary mt-1">
           using {state.clipCount} of {clipsTotal} clips ({clipsTotal - clipsDone} still analyzing)
         </p>
+      )}
+
+      {musicState.phase !== "off" && (
+        <div className="mt-2 flex items-center gap-2 text-[11px]">
+          {musicState.phase === "error" ? (
+            <>
+              <p className="flex-1 text-red-400">♪ {musicState.error}</p>
+              <button
+                onClick={onMusicRetry}
+                className="underline text-text-secondary hover:text-text-primary shrink-0"
+              >
+                retry
+              </button>
+            </>
+          ) : (
+            <p className="text-text-secondary">{musicStatusLine(musicState, musicElapsedS)}</p>
+          )}
+        </div>
       )}
 
       {state.activity.length > 0 && (
