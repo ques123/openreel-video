@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { Storyboard } from "@openreel/core";
+import { stylePresetById, type Storyboard } from "@openreel/core";
 import {
   experimentCaptionCostUSD,
   experimentCostLine,
@@ -257,6 +257,11 @@ function chipsFor(exp: ExperimentSummary, all: ExperimentSummary[]): SettingChip
       label: "target",
       value: exp.targetDurationS ? `${exp.targetDurationS}s` : "—",
       common: uniform((e) => e.targetDurationS ?? null),
+    },
+    {
+      label: "style",
+      value: exp.styleId ? (stylePresetById(exp.styleId)?.label ?? exp.styleId) : "—",
+      common: uniform((e) => e.styleId ?? null),
     },
     { label: "model", value: exp.model, common: uniform((e) => e.model) },
     {

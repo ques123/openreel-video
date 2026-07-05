@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { stylePresetById } from "@openreel/core";
 import {
   deleteExperiment,
   experimentCaptionCostUSD,
@@ -88,6 +89,7 @@ export function ExperimentDetailModal({
   const capFrames = stats ? stats.cloudFrames + stats.localFrames : 0;
   const dirCost = estimateCostUSD(exp.model, exp.usage.promptTokens, exp.usage.completionTokens);
   const capCost = experimentCaptionCostUSD(exp);
+  const stylePreset = stylePresetById(exp.styleId);
 
   return (
     <div
@@ -144,6 +146,11 @@ export function ExperimentDetailModal({
                   {exp.briefAngle}
                 </span>
               )}
+              {exp.styleId && (
+                <span className="ml-1.5 px-1.5 py-0.5 text-[10px] rounded border border-border text-text-secondary font-normal">
+                  {stylePresetById(exp.styleId)?.label ?? exp.styleId}
+                </span>
+              )}
             </p>
             <p className="text-text-secondary whitespace-pre-wrap">{exp.brief}</p>
           </div>
@@ -156,6 +163,7 @@ export function ExperimentDetailModal({
             <span>
               clips: {exp.clips.map((c) => c.fileName).join(", ")}
             </span>
+            {stylePreset && <span>style: {stylePreset.label}</span>}
           </div>
 
           {exp.storyboard && (

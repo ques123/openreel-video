@@ -161,6 +161,7 @@ export async function generateMusicBrief(
   storyboard: Storyboard | null,
   targetS: number | null,
   sceneHints: string[],
+  styleHint?: string | null,
 ): Promise<MusicBrief> {
   try {
     const lines = [
@@ -172,6 +173,7 @@ export async function generateMusicBrief(
         : null,
       targetS != null ? `Target track length: ~${Math.round(targetS)} seconds` : null,
       sceneHints.length > 0 ? `Scene descriptions: ${sceneHints.join("; ")}` : null,
+      styleHint ? `Video style: ${styleHint}` : null,
     ].filter((l): l is string => Boolean(l));
 
     const res = await fetch(`${OPENAI_BASE}/chat/completions`, {
@@ -203,7 +205,13 @@ export async function generateMusicBrief(
     }
     return clampMusicBrief({ style: parsed.style, title: parsed.title, prompt: parsed.prompt });
   } catch {
-    return clampMusicBrief(buildMusicBriefFallback(userBrief, storyboard, targetS));
+    const fallback = buildMusicBriefFallback(userBrief, storyboard, targetS);
+    // buildMusicBriefFallback doesn't take a style hint (core, frozen) — fold
+    // it into the style field ourselves, clamping again since prepending can
+    // push it back over MUSIC_LIMITS.style.
+    return styleHint
+      ? clampMusicBrief({ ...fallback, style: `${styleHint}, ${fallback.style}` })
+      : fallback;
   }
 }
 

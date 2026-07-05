@@ -7,7 +7,7 @@ import type {
   Storyboard,
   TranscriptSegment,
 } from "@openreel/core";
-import { buildFootageDigest } from "@openreel/core";
+import { buildFootageDigest, stylePresetById } from "@openreel/core";
 import { suggestBriefs, type BriefSuggestion } from "../../services/brief-suggestions";
 import { CAPTION_MODELS, type CaptionModel } from "../../services/cloud-vision";
 import { downloadBlob, exportDebugVideo, type DebugExportMeta } from "../../services/debug-export";
@@ -77,6 +77,9 @@ export function PerceptionLabPage() {
   // Contextual background-music toggle; lives here (not in DirectorPanel) so
   // it survives across Direct/refine cycles like cloudEnabled does below.
   const [musicEnabled, setMusicEnabled] = useState(false);
+  // Locked style preset (or null = unlocked) — lifted here so the director
+  // brief, the ✨ suggestions, and the music brief all share one selection.
+  const [styleId, setStyleId] = useState<string | null>(null);
   // Which experiment a music generation has already been kicked off for —
   // refine() reuses the SAME experimentId, so this guards against
   // regenerating on every refine round (only a genuinely new Direct run
@@ -255,8 +258,14 @@ export function PerceptionLabPage() {
       .slice(0, 5)
       .map((i) => i.why)
       .filter((w): w is string => Boolean(w));
-    music.generate(exp?.brief ?? "", storyboard, director.state.targetDurationS, sceneHints);
-  }, [director, music]);
+    music.generate(
+      exp?.brief ?? "",
+      storyboard,
+      director.state.targetDurationS,
+      sceneHints,
+      stylePresetById(exp?.styleId ?? styleId)?.musicHint ?? null,
+    );
+  }, [director, music, styleId]);
 
   // Auto-generate the music bed once per director conversation (not per
   // refine round — refine reuses the same experimentId, see
@@ -410,9 +419,9 @@ export function PerceptionLabPage() {
         throw new Error("No analyzed clips yet — drop footage first.");
       }
       const digest = buildFootageDigest(dossiers);
-      return suggestBriefs(digest, targetS);
+      return suggestBriefs(digest, targetS, stylePresetById(styleId));
     },
-    [getDossiers],
+    [getDossiers, styleId],
   );
 
   const searchReady =
@@ -570,6 +579,8 @@ export function PerceptionLabPage() {
                 musicState={music.state}
                 onMusicRetry={runMusicGenerate}
                 requestBriefSuggestions={requestBriefSuggestions}
+                styleId={styleId}
+                onStyleIdChange={setStyleId}
               />
               {director.state.storyboard && (
                 <StoryboardList

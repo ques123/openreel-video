@@ -62,6 +62,8 @@ export interface DirectorExperiment {
   brief: string;
   /** Label of the suggested angle the brief was seeded from, if any (see brief-suggestions.ts). */
   briefAngle?: string;
+  /** Curated style preset id chosen for this run, if any (see style-presets.ts). */
+  styleId?: string;
   targetDurationS: number | null;
   promptSources: PromptSources;
   model: string;
@@ -98,6 +100,7 @@ export interface ExperimentSummary {
   updatedAt: number;
   brief: string;
   briefAngle?: string;
+  styleId?: string;
   title: string | null;
   itemCount: number;
   model: string;
@@ -223,6 +226,7 @@ function summarize(exp: DirectorExperiment, prev?: ExperimentSummary): Experimen
     updatedAt: exp.updatedAt,
     brief: exp.brief,
     briefAngle: exp.briefAngle,
+    styleId: exp.styleId,
     title: exp.storyboard?.title ?? null,
     itemCount: exp.storyboard?.items.length ?? 0,
     model: exp.model,

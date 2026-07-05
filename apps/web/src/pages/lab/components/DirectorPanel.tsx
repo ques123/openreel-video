@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { DEFAULT_PROMPT_SOURCES, type DirectorActivity, type PromptSources } from "@openreel/core";
+import {
+  DEFAULT_PROMPT_SOURCES,
+  STYLE_PRESETS,
+  stylePresetById,
+  type DirectorActivity,
+  type PromptSources,
+} from "@openreel/core";
 import type { BriefSuggestion } from "../../../services/brief-suggestions";
 import type { UseDirectorReturn } from "../use-director";
 import type { MusicState } from "../use-music";
@@ -20,6 +26,9 @@ interface DirectorPanelProps {
   onMusicRetry: () => void;
   /** Digest-grounded editorial angle cards for the brief textarea; takes the parsed target so the page can mention it. */
   requestBriefSuggestions: (targetS: number | null) => Promise<BriefSuggestion[]>;
+  /** Locked style preset id (or null = unlocked) — lifted to the page so director + music can share it. */
+  styleId: string | null;
+  onStyleIdChange: (id: string | null) => void;
 }
 
 /** "Xs" elapsed since a music generation started, ticking once a second while it's in flight. */
@@ -67,6 +76,8 @@ export function DirectorPanel({
   musicState,
   onMusicRetry,
   requestBriefSuggestions,
+  styleId,
+  onStyleIdChange,
 }: DirectorPanelProps) {
   const { state, start, refine, cancel, reset } = director;
   const [brief, setBrief] = useState("");
@@ -146,7 +157,8 @@ export function DirectorPanel({
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          if (brief.trim() && !running) start(brief.trim(), targetS, sources, appliedLabel ?? undefined);
+          if (brief.trim() && !running)
+            start(brief.trim(), targetS, sources, appliedLabel ?? undefined, styleId ?? undefined);
         }}
         className="space-y-2"
       >
@@ -165,6 +177,31 @@ export function DirectorPanel({
           rows={2}
           className="w-full bg-background border border-border rounded-md px-3 py-1.5 text-sm text-text-primary placeholder:text-text-secondary/60 outline-none focus:border-primary resize-none"
         />
+
+        <div className="flex flex-wrap items-center gap-1">
+          <span className="text-[11px] text-text-secondary">style:</span>
+          <div className="flex flex-wrap gap-1">
+            {STYLE_PRESETS.map((preset) => {
+              const selected = styleId === preset.id;
+              return (
+                <button
+                  key={preset.id}
+                  type="button"
+                  title={preset.tagline}
+                  disabled={running}
+                  onClick={() => onStyleIdChange(selected ? null : preset.id)}
+                  className={`px-1.5 py-0.5 text-[11px] rounded-md border disabled:opacity-40 ${
+                    selected
+                      ? "border-primary bg-primary/10 text-text-primary"
+                      : "border-border text-text-secondary hover:text-text-primary"
+                  }`}
+                >
+                  {preset.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
 
         <div className="flex items-center gap-2">
           <button
@@ -191,6 +228,7 @@ export function DirectorPanel({
           <div className="grid grid-cols-2 gap-1.5">
             {suggestions.map((s, i) => {
               const applied = appliedLabel === s.label;
+              const stylePreset = s.styleId ? stylePresetById(s.styleId) : null;
               return (
                 <button
                   key={i}
@@ -198,6 +236,7 @@ export function DirectorPanel({
                   onClick={() => {
                     setBrief(s.brief);
                     setAppliedLabel(s.label);
+                    if (s.styleId) onStyleIdChange(s.styleId);
                   }}
                   title={s.brief}
                   className={`text-left bg-background border rounded-md px-2 py-1.5 hover:border-primary/60 transition-colors ${
@@ -205,6 +244,9 @@ export function DirectorPanel({
                   }`}
                 >
                   <p className="text-[11px] font-medium text-text-primary">{s.label}</p>
+                  {stylePreset && stylePreset.id !== styleId && (
+                    <p className="text-[10px] text-text-secondary/80">{stylePreset.label}</p>
+                  )}
                   <p className="text-[11px] text-text-secondary line-clamp-3">{s.brief}</p>
                 </button>
               );
