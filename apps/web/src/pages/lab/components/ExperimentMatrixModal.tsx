@@ -282,6 +282,7 @@ function statsLine(exp: ExperimentSummary): string | null {
         (dirCost !== null ? ` ≈${fmtUSD(dirCost)}` : ""),
     );
   }
+  if (exp.durationMs) parts.push(`gen ${fmtDurationMs(exp.durationMs)}`);
   const stats = exp.captionStats;
   if (stats) {
     const capTok = stats.cloudPromptTokens + stats.cloudCompletionTokens;
@@ -410,14 +411,14 @@ export function ExperimentMatrixModal({
                     }
                   />
                   <span className="min-w-0">
-                    <span className="block text-text-primary truncate">
-                      {e.title ?? e.brief.slice(0, 40)}
+                    <span className="block text-text-primary break-words">
+                      {e.title ?? e.brief.slice(0, 120)}
                     </span>
                     <span className="block text-text-secondary font-mono text-[10px]">
                       {fmtWhen(e.updatedAt)} · {e.itemCount} segs
                     </span>
                     {cost && (
-                      <span className="block text-text-secondary/70 font-mono text-[10px] truncate">
+                      <span className="block text-text-secondary/70 font-mono text-[10px] break-words">
                         {cost}
                       </span>
                     )}
@@ -457,7 +458,7 @@ export function ExperimentMatrixModal({
                           getFile={resolveGetFile(exp)}
                         />
                       )}
-                      <p className="text-xs font-medium text-text-primary truncate">
+                      <p className="text-xs font-medium text-text-primary break-words">
                         {e.title ?? "(untitled)"}
                       </p>
                       <p
