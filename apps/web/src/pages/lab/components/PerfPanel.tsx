@@ -36,6 +36,14 @@ export function PerfPanel({ clips, models }: PerfPanelProps) {
   >();
   let localMs = 0;
   let localFrames = 0;
+  // Measured-only totals, used to derive per-frame token rates below — for
+  // archive entries recorded before per-run usage tracking shipped,
+  // promptTokens/completionTokens/ms are 0 even though framesSent is real.
+  // We never persist a backfilled value into those records; we just estimate
+  // at display time so the totals don't read as free/instant.
+  let measuredFrames = 0;
+  let measuredIn = 0;
+  let measuredOut = 0;
   for (const c of clips) {
     if (c.dossier?.localCaptionPerf) {
       localMs += c.dossier.localCaptionPerf.totalMs;
@@ -57,11 +65,19 @@ export function PerfPanel({ clips, models }: PerfPanelProps) {
       row.outTok += e.meta.completionTokens;
       row.ms += e.meta.ms;
       usage.set(key, row);
+      if (e.meta.promptTokens + e.meta.completionTokens > 0) {
+        measuredFrames += e.meta.framesSent;
+        measuredIn += e.meta.promptTokens;
+        measuredOut += e.meta.completionTokens;
+      }
     }
   }
+  const inPerFrame = measuredFrames > 0 ? measuredIn / measuredFrames : null;
+  const outPerFrame = measuredFrames > 0 ? measuredOut / measuredFrames : null;
   const fmtTok = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
   const fmtDur = (ms: number) =>
     ms >= 60_000 ? `${(ms / 60_000).toFixed(1)}min` : `${(ms / 1000).toFixed(1)}s`;
+  const estimateTitle = "estimated from frame count — tokens were not recorded for early runs";
 
   return (
     <div className="bg-background-secondary border border-border rounded-lg p-3">
@@ -108,16 +124,57 @@ export function PerfPanel({ clips, models }: PerfPanelProps) {
               {[...usage.entries()]
                 .sort(([a], [b]) => a.localeCompare(b))
                 .map(([key, row]) => {
-                  const cost = estimateCostUSD(row.model, row.inTok, row.outTok);
+                  const preTracking = row.frames > 0 && row.inTok + row.outTok === 0;
+                  const timeCell = row.ms === 0 ? "—" : fmtDur(row.ms);
+
+                  if (!preTracking) {
+                    const cost = estimateCostUSD(row.model, row.inTok, row.outTok);
+                    return (
+                      <tr key={key}>
+                        <td className="pr-2">{key.replace("gpt-", "")}</td>
+                        <td className="pr-2 text-right">{row.clips}</td>
+                        <td className="pr-2 text-right">{row.frames}</td>
+                        <td className="pr-2 text-right">{fmtTok(row.inTok)}</td>
+                        <td className="pr-2 text-right">{fmtTok(row.outTok)}</td>
+                        <td className="pr-2 text-right">{cost !== null ? fmtUSD(cost) : "—"}</td>
+                        <td className="text-right">{timeCell}</td>
+                      </tr>
+                    );
+                  }
+
+                  if (inPerFrame === null || outPerFrame === null) {
+                    // No measured runs anywhere to derive a rate from.
+                    return (
+                      <tr key={key}>
+                        <td className="pr-2">{key.replace("gpt-", "")}</td>
+                        <td className="pr-2 text-right">{row.clips}</td>
+                        <td className="pr-2 text-right">{row.frames}</td>
+                        <td className="pr-2 text-right">—</td>
+                        <td className="pr-2 text-right">—</td>
+                        <td className="pr-2 text-right">—</td>
+                        <td className="text-right">{timeCell}</td>
+                      </tr>
+                    );
+                  }
+
+                  const estIn = Math.round(row.frames * inPerFrame);
+                  const estOut = Math.round(row.frames * outPerFrame);
+                  const estCost = estimateCostUSD(row.model, estIn, estOut);
                   return (
                     <tr key={key}>
                       <td className="pr-2">{key.replace("gpt-", "")}</td>
                       <td className="pr-2 text-right">{row.clips}</td>
                       <td className="pr-2 text-right">{row.frames}</td>
-                      <td className="pr-2 text-right">{fmtTok(row.inTok)}</td>
-                      <td className="pr-2 text-right">{fmtTok(row.outTok)}</td>
-                      <td className="pr-2 text-right">{cost !== null ? fmtUSD(cost) : "—"}</td>
-                      <td className="text-right">{fmtDur(row.ms)}</td>
+                      <td className="pr-2 text-right opacity-60" title={estimateTitle}>
+                        ~{fmtTok(estIn)}
+                      </td>
+                      <td className="pr-2 text-right opacity-60" title={estimateTitle}>
+                        ~{fmtTok(estOut)}
+                      </td>
+                      <td className="pr-2 text-right opacity-60" title={estimateTitle}>
+                        {estCost !== null ? `~${fmtUSD(estCost)}` : "—"}
+                      </td>
+                      <td className="text-right">{timeCell}</td>
                     </tr>
                   );
                 })}
