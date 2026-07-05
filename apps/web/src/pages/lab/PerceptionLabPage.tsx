@@ -29,6 +29,16 @@ import { TranscriptPanel } from "./components/TranscriptPanel";
 import { useDirector } from "./use-director";
 import { usePerceptionLab, type LabClip } from "./use-perception-lab";
 
+/** Format seconds as "Xh YYm" (≥1h), "YYm", or "<1m". */
+function formatDurationCompact(seconds: number): string {
+  if (seconds < 1) return "<1m";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+  return `${hours}h ${mins}m`;
+}
+
 export function PerceptionLabPage() {
   const { params } = useRouter();
   const forceDevice = params.device === "wasm" ? "wasm" : "auto";
@@ -302,6 +312,9 @@ export function PerceptionLabPage() {
     return { shots: [...shots].sort(), timeline: [...timeline].sort() };
   }, [state.clips]);
 
+  const loadedS = state.clips.reduce((sum, c) => sum + (c.analyzedThroughS ?? c.durationS), 0);
+  const fullS = state.clips.reduce((sum, c) => sum + c.durationS, 0);
+
   return (
     <div className="h-full overflow-y-auto bg-background">
       <div className="max-w-6xl mx-auto p-6">
@@ -313,6 +326,13 @@ export function PerceptionLabPage() {
               shots, motion, SigLIP2 embeddings, FastVLM captions & Whisper run
               in your browser.
             </p>
+            {state.clips.length > 0 && (
+              <p className="text-sm text-text-secondary mt-2">
+                {state.clips.length} clip{state.clips.length === 1 ? "" : "s"} ·{" "}
+                {formatDurationCompact(loadedS)} loaded
+                {fullS - loadedS > 60 ? ` (of ${formatDurationCompact(fullS)})` : ""}
+              </p>
+            )}
           </div>
           <div className="flex items-center gap-2 text-xs">
             <label className="flex items-center gap-1.5 cursor-pointer select-none text-text-secondary">
