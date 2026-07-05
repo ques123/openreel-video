@@ -36,6 +36,17 @@ export const STYLE_PRESETS: readonly StylePreset[] = [
     musicHint: "upbeat, driving beat, feel-good, energetic indie electronic",
   },
   {
+    // Names the creator on purpose: the director LLM knows famous editors'
+    // styles from training data, and naming one unlocks far more than any
+    // paragraph of adjectives could.
+    id: "neistat-vlog",
+    label: "Neistat style",
+    tagline: "Casey Neistat school — relentless momentum, jump cuts, abrupt ends",
+    directorNote:
+      "Cut this like a Casey Neistat vlog. Cold-open on the most kinetic moment we have, then keep relentless forward momentum: jump cuts that skip the boring middle of everything, time-lapse energy to eat the transitions, and quick asides on small human details that make it personal. Story beats polish — and the second the story is told, end. Abruptly.",
+    musicHint: "cool driving NYC-vlog energy, indie rock or electronic, momentum, confident",
+  },
+  {
     id: "cinematic",
     label: "Cinematic",
     tagline: "Sweeping and composed, like a travel film",

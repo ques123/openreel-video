@@ -4,8 +4,8 @@ import { STYLE_PRESETS, stylePresetById } from "../style-presets";
 const KEBAB_CASE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 
 describe("STYLE_PRESETS", () => {
-  it("has exactly 10 presets", () => {
-    expect(STYLE_PRESETS).toHaveLength(10);
+  it("has exactly 11 presets", () => {
+    expect(STYLE_PRESETS).toHaveLength(11);
   });
 
   it("has unique, kebab-case ids", () => {
