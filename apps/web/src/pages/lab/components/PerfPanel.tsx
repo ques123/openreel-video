@@ -1,3 +1,4 @@
+import { estimateCostUSD, fmtUSD } from "../../../services/model-pricing";
 import type { LabClip, ModelStatus } from "../use-perception-lab";
 
 interface PerfPanelProps {
@@ -31,7 +32,7 @@ export function PerfPanel({ clips, models }: PerfPanelProps) {
   // the local caption pass — the "what has captioning cost me" ledger.
   const usage = new Map<
     string,
-    { clips: number; frames: number; inTok: number; outTok: number; ms: number }
+    { model: string; clips: number; frames: number; inTok: number; outTok: number; ms: number }
   >();
   let localMs = 0;
   let localFrames = 0;
@@ -42,7 +43,14 @@ export function PerfPanel({ clips, models }: PerfPanelProps) {
     }
     for (const e of c.dossier?.cloudRunArchive ?? []) {
       const key = `${e.model} · ${e.scope}`;
-      const row = usage.get(key) ?? { clips: 0, frames: 0, inTok: 0, outTok: 0, ms: 0 };
+      const row = usage.get(key) ?? {
+        model: e.model,
+        clips: 0,
+        frames: 0,
+        inTok: 0,
+        outTok: 0,
+        ms: 0,
+      };
       row.clips += 1;
       row.frames += e.meta.framesSent;
       row.inTok += e.meta.promptTokens;
@@ -81,6 +89,7 @@ export function PerfPanel({ clips, models }: PerfPanelProps) {
                 <th className="font-normal pr-2 text-right">frames</th>
                 <th className="font-normal pr-2 text-right">in</th>
                 <th className="font-normal pr-2 text-right">out</th>
+                <th className="font-normal pr-2 text-right">≈$</th>
                 <th className="font-normal text-right">time</th>
               </tr>
             </thead>
@@ -92,21 +101,26 @@ export function PerfPanel({ clips, models }: PerfPanelProps) {
                   <td className="pr-2 text-right">{localFrames}</td>
                   <td className="pr-2 text-right">—</td>
                   <td className="pr-2 text-right">—</td>
+                  <td className="pr-2 text-right">$0.00</td>
                   <td className="text-right">{fmtDur(localMs)}</td>
                 </tr>
               )}
               {[...usage.entries()]
                 .sort(([a], [b]) => a.localeCompare(b))
-                .map(([key, row]) => (
-                  <tr key={key}>
-                    <td className="pr-2">{key.replace("gpt-", "")}</td>
-                    <td className="pr-2 text-right">{row.clips}</td>
-                    <td className="pr-2 text-right">{row.frames}</td>
-                    <td className="pr-2 text-right">{fmtTok(row.inTok)}</td>
-                    <td className="pr-2 text-right">{fmtTok(row.outTok)}</td>
-                    <td className="text-right">{fmtDur(row.ms)}</td>
-                  </tr>
-                ))}
+                .map(([key, row]) => {
+                  const cost = estimateCostUSD(row.model, row.inTok, row.outTok);
+                  return (
+                    <tr key={key}>
+                      <td className="pr-2">{key.replace("gpt-", "")}</td>
+                      <td className="pr-2 text-right">{row.clips}</td>
+                      <td className="pr-2 text-right">{row.frames}</td>
+                      <td className="pr-2 text-right">{fmtTok(row.inTok)}</td>
+                      <td className="pr-2 text-right">{fmtTok(row.outTok)}</td>
+                      <td className="pr-2 text-right">{cost !== null ? fmtUSD(cost) : "—"}</td>
+                      <td className="text-right">{fmtDur(row.ms)}</td>
+                    </tr>
+                  );
+                })}
             </tbody>
           </table>
         </div>

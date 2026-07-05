@@ -13,6 +13,7 @@ import {
   type PromptSources,
   type Storyboard,
 } from "@openreel/core";
+import { estimateCostUSD, fmtUSD } from "./model-pricing";
 
 const EXP_PREFIX = "director-exp:";
 const VIDEO_PREFIX = "director-exp-video:";
@@ -41,6 +42,14 @@ export interface ExperimentCaptionStats {
   cloudMs: number;
   localFrames: number;
   localMs: number;
+  /**
+   * Per-model token split (key = resolved CloudRunMeta.model), needed because
+   * captionModels can name TWO differently-priced models (e.g.
+   * "gpt-5.2+gpt-5.4-mini") whose cost can't be recovered from the aggregate
+   * totals above. Absent on legacy/backfilled records — see
+   * experimentCaptionCostUSD for the single-model fallback used then.
+   */
+  byModel?: Record<string, { promptTokens: number; completionTokens: number }>;
 }
 
 export interface DirectorExperiment {
@@ -102,6 +111,69 @@ export function fmtDurationMs(ms: number): string {
   const m = Math.floor(totalS / 60);
   const s = totalS % 60;
   return m > 0 ? `${m}m${String(s).padStart(2, "0")}s` : `${s}s`;
+}
+
+/**
+ * Approximate USD cost of a run's captioning, or null when it can't be
+ * priced. Preferred path: sum estimateCostUSD per byModel entry (handles two
+ * differently-priced models in one run). Legacy/backfilled records lack
+ * byModel — those only get priced when captionModels names exactly ONE
+ * known cloud model, since the aggregate cloud token totals can't be safely
+ * split across two different prices. Shared here so every UI spot (menu,
+ * detail, matrix, compare-grid picker) agrees on the same number.
+ */
+export function experimentCaptionCostUSD(s: {
+  captionModels?: string;
+  captionStats?: ExperimentCaptionStats;
+}): number | null {
+  const stats = s.captionStats;
+  if (!stats) return null;
+  if (stats.byModel && Object.keys(stats.byModel).length > 0) {
+    let total = 0;
+    let any = false;
+    for (const [model, tok] of Object.entries(stats.byModel)) {
+      const cost = estimateCostUSD(model, tok.promptTokens, tok.completionTokens);
+      if (cost !== null) {
+        total += cost;
+        any = true;
+      }
+    }
+    return any ? total : null;
+  }
+  const models = (s.captionModels ?? "").split("+").filter(Boolean);
+  if (models.length === 1 && models[0] !== "local-only") {
+    return estimateCostUSD(models[0], stats.cloudPromptTokens, stats.cloudCompletionTokens);
+  }
+  return null;
+}
+
+/** Compact "director model · tokens ≈$ · caption models · caption tokens ≈$ · time" line; omits missing/unpriceable pieces (legacy records). */
+export function experimentCostLine(s: {
+  model: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  captionModels?: string;
+  captionStats?: ExperimentCaptionStats;
+}): string | null {
+  const parts: string[] = [];
+  if (s.model) parts.push(s.model);
+  const directorTok = (s.promptTokens ?? 0) + (s.completionTokens ?? 0);
+  if (directorTok > 0) {
+    const dirCost = estimateCostUSD(s.model, s.promptTokens ?? 0, s.completionTokens ?? 0);
+    parts.push(`${fmtTokens(directorTok)} tok${dirCost !== null ? ` ≈${fmtUSD(dirCost)}` : ""}`);
+  }
+  if (s.captionModels) parts.push(s.captionModels);
+  const stats = s.captionStats;
+  if (stats) {
+    const capTok = stats.cloudPromptTokens + stats.cloudCompletionTokens;
+    if (capTok > 0) {
+      const capCost = experimentCaptionCostUSD(s);
+      parts.push(`cap ${fmtTokens(capTok)} tok${capCost !== null ? ` ≈${fmtUSD(capCost)}` : ""}`);
+    }
+    const capMs = stats.cloudMs + stats.localMs;
+    if (capMs > 0) parts.push(fmtDurationMs(capMs));
+  }
+  return parts.length > 0 ? parts.join(" · ") : null;
 }
 
 const storage = new StorageEngine();

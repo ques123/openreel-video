@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import {
   deleteExperiment,
+  experimentCaptionCostUSD,
   fmtDurationMs,
   fmtTokens,
   loadExperiment,
   type DirectorExperiment,
 } from "../../../services/experiments";
+import { estimateCostUSD, fmtUSD } from "../../../services/model-pricing";
 import { PromptInspectorModal } from "./PromptInspectorModal";
 
 interface ExperimentDetailModalProps {
@@ -64,6 +66,8 @@ export function ExperimentDetailModal({
   const capTokens = stats ? stats.cloudPromptTokens + stats.cloudCompletionTokens : 0;
   const capMs = stats ? stats.cloudMs + stats.localMs : 0;
   const capFrames = stats ? stats.cloudFrames + stats.localFrames : 0;
+  const dirCost = estimateCostUSD(exp.model, exp.usage.promptTokens, exp.usage.completionTokens);
+  const capCost = experimentCaptionCostUSD(exp);
 
   return (
     <div
@@ -85,6 +89,9 @@ export function ExperimentDetailModal({
               {exp.usage.promptTokens + exp.usage.completionTokens > 0
                 ? ` · ${fmtTokens(exp.usage.promptTokens)} in / ${fmtTokens(exp.usage.completionTokens)} out tok`
                 : ""}
+              {exp.usage.promptTokens + exp.usage.completionTokens > 0 && dirCost !== null
+                ? ` ≈${fmtUSD(dirCost)}`
+                : ""}
               {exp.durationMs > 0 ? ` · ${fmtDurationMs(exp.durationMs)} thinking` : ""}
             </p>
             {(exp.captionModels || stats) && (
@@ -94,6 +101,7 @@ export function ExperimentDetailModal({
                 {stats && capTokens > 0
                   ? ` · ${fmtTokens(stats.cloudPromptTokens)} in / ${fmtTokens(stats.cloudCompletionTokens)} out tok`
                   : ""}
+                {stats && capTokens > 0 && capCost !== null ? ` ≈${fmtUSD(capCost)}` : ""}
                 {stats && capMs > 0 ? ` · ${fmtDurationMs(capMs)}` : ""}
               </p>
             )}

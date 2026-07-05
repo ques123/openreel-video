@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import type { CloudRunMeta } from "@openreel/core";
 import { captionNear, localCaptionsOf } from "../caption-views";
+import { estimateCostUSD, fmtUSD } from "../../../services/model-pricing";
 import type { LabClip } from "../use-perception-lab";
 
 interface CaptionCompareModalProps {
@@ -22,6 +23,8 @@ function fmtRun(run: CloudRunMeta | null): string {
   if (run.ms > 0) parts.push(`${(run.ms / 1000).toFixed(1)}s`);
   if (run.promptTokens > 0) {
     parts.push(`${((run.promptTokens + run.completionTokens) / 1000).toFixed(1)}k tokens`);
+    const cost = estimateCostUSD(run.model, run.promptTokens, run.completionTokens);
+    if (cost !== null) parts.push(`≈${fmtUSD(cost)}`);
   }
   if (run.framesFailed > 0) parts.push(`${run.framesFailed} failed`);
   return parts.join(" · ");
