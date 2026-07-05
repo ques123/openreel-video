@@ -41,6 +41,21 @@ export interface DebugExportMeta {
   captionStats?: ExperimentCaptionStats;
   /** Non-fatal issues surfaced during the run; absent/empty renders nothing. */
   warnings?: string[];
+  /**
+   * The committed background-music track, if any — absent entirely when
+   * nothing was committed (no music toggle, or generated-but-unpicked).
+   * audioUrl is already proxied (proxiedMusicUrl); null = info-only title
+   * card line with no actual bed mixed into the render.
+   */
+  music?: {
+    title: string;
+    modelName: string;
+    durationS: number;
+    /** 1-based index of the committed track among the A/B'd takes. */
+    trackIndex: number;
+    trackCount: number;
+    audioUrl: string | null;
+  };
 }
 
 export interface DebugExportContext {
@@ -264,6 +279,18 @@ function captionBreakdownLines(meta: DebugExportMeta): string[] {
   });
 }
 
+/**
+ * "music: Golden Hour (score) · chirp-v5 · 42.0s · take 2/2" — wrapped (not
+ * truncated) since track titles are free text and can run long. Absent when
+ * nothing was committed.
+ */
+function musicLines(ctx: CanvasRenderingContext2D, meta: DebugExportMeta, maxWidth: number): string[] {
+  const m = meta.music;
+  if (!m) return [];
+  const line = `music: ${m.title} · ${m.modelName} · ${m.durationS.toFixed(1)}s · take ${m.trackIndex}/${m.trackCount}`;
+  return wrapText(ctx, line, maxWidth, 2);
+}
+
 function drawTitleCard(ctx: CanvasRenderingContext2D, meta: DebugExportMeta, sb: Storyboard): void {
   ctx.fillStyle = "#0a0a0a";
   ctx.fillRect(0, 0, WIDTH, HEIGHT);
@@ -287,6 +314,7 @@ function drawTitleCard(ctx: CanvasRenderingContext2D, meta: DebugExportMeta, sb:
     directorLine(meta),
     captionsLine(meta),
     ...captionBreakdownLines(meta),
+    ...musicLines(ctx, meta, WIDTH - pad * 2),
   ].filter((line): line is string => Boolean(line));
   // Warnings render in the existing "missing file" red rather than the
   // secondary gray, since the card's other overlay already uses that accent.
@@ -382,23 +410,97 @@ export async function exportDebugVideo(context: DebugExportContext): Promise<Blo
   const done = new Promise<void>((resolve) => {
     recorder.onstop = () => resolve();
   });
-  recorder.start(250);
 
-  /** Repaint every frame for `seconds` (captureStream needs canvas activity). */
-  const holdFrame = (draw: () => void, seconds: number) =>
+  // Fetch/decode the committed music bed BEFORE the recorder starts: the
+  // download+decode can take seconds and must not become a dead zone at the
+  // head of the recording. Loops for the whole render (it's a bed, not
+  // synced to segments) into the same audioDest the segment audio uses; a
+  // failure is surfaced as a title-card warning rather than dropping the run.
+  let musicBedSource: AudioBufferSourceNode | null = null;
+  let musicWarning: string | null = null;
+  if (meta.music?.audioUrl) {
+    onProgress?.("loading music bed…");
+    try {
+      const res = await fetch(meta.music.audioUrl);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const buf = await res.arrayBuffer();
+      const audioBuffer = await audioCtx.decodeAudioData(buf);
+      const gain = audioCtx.createGain();
+      gain.gain.value = 0.35;
+      musicBedSource = audioCtx.createBufferSource();
+      musicBedSource.buffer = audioBuffer;
+      musicBedSource.loop = true;
+      musicBedSource.connect(gain).connect(audioDest);
+    } catch (err) {
+      musicWarning = "music audio failed to load — render has no bed";
+      console.error("[debug-export] music bed failed to load", err);
+    }
+  }
+
+  recorder.start(250);
+  musicBedSource?.start();
+
+  // Render clock. rAF stops entirely and main-thread timers clamp to 1Hz in
+  // a backgrounded tab — which turned a tab switch mid-export into seconds
+  // of frozen (or 1fps heartbeat) video under live audio. A Worker's timer
+  // is exempt from that clamp, so ticks keep arriving at frame rate and the
+  // export survives losing tab focus.
+  const TICK_MS = Math.round(1000 / FPS);
+  const tickerWorker = new Worker(
+    URL.createObjectURL(
+      new Blob([`setInterval(() => postMessage(0), ${TICK_MS});`], {
+        type: "text/javascript",
+      }),
+    ),
+  );
+  let lastPaintMs = 0;
+  const markPaint = () => {
+    lastPaintMs = performance.now();
+  };
+  let onTick: (() => void) | null = null;
+  tickerWorker.onmessage = () => {
+    onTick?.();
+    // Heartbeat: captureStream only emits on canvas activity, so any awaited
+    // gap (video metadata/seek between segments — seconds on 4K HEVC)
+    // starves the video track. With a continuous music bed filling the audio
+    // timeline, players render that starvation as a frozen decoder stall;
+    // re-emitting the current pixels turns it into a clean, intentional hold
+    // instead. Bed-less renders keep the old (documented-fine) behavior
+    // where the muxer simply compresses the silent gaps away — hence the
+    // musicBedSource gate.
+    if (musicBedSource && performance.now() - lastPaintMs > TICK_MS * 1.5) {
+      ctx.drawImage(canvas, 0, 0); // self-draw: same pixels, fresh frame
+      markPaint();
+    }
+  };
+  /** Run `fn` every frame tick until it returns true (then resolve). */
+  const tickUntil = (fn: () => boolean) =>
     new Promise<void>((resolve) => {
-      const until = performance.now() + seconds * 1000;
-      const tick = () => {
-        draw();
-        if (performance.now() < until) requestAnimationFrame(tick);
-        else resolve();
+      onTick = () => {
+        if (fn()) {
+          onTick = null;
+          resolve();
+        }
       };
-      requestAnimationFrame(tick);
     });
 
+  /** Repaint every frame for `seconds` (captureStream needs canvas activity). */
+  const holdFrame = (draw: () => void, seconds: number) => {
+    const until = performance.now() + seconds * 1000;
+    return tickUntil(() => {
+      draw();
+      markPaint();
+      return performance.now() >= until;
+    });
+  };
+
   try {
+    const cardMeta = musicWarning
+      ? { ...meta, warnings: [...(meta.warnings ?? []), musicWarning] }
+      : meta;
+
     onProgress?.("rendering title card…");
-    await holdFrame(() => drawTitleCard(ctx, meta, storyboard), TITLE_CARD_S);
+    await holdFrame(() => drawTitleCard(ctx, cardMeta, storyboard), TITLE_CARD_S);
 
     for (let i = 0; i < storyboard.items.length; i += 1) {
       const item = storyboard.items[i];
@@ -433,32 +535,31 @@ export async function exportDebugVideo(context: DebugExportContext): Promise<Blo
         await video.play();
 
         const queries = queriesByShot.get(`${item.clipId}#${item.shotIndex ?? -1}`) ?? [];
-        await new Promise<void>((resolve, reject) => {
-          const tick = () => {
-            if (video.error) {
-              reject(new Error(video.error.message ?? "playback error"));
-              return;
-            }
-            ctx.drawImage(video, 0, 0, WIDTH, HEIGHT);
-            drawExperimentBanner(ctx, banner, badge);
-            drawOverlay(
-              ctx,
-              item,
-              i,
-              storyboard.items.length,
-              fileName,
-              video.currentTime,
-              queries,
-            );
-            if (video.currentTime >= item.outS || video.ended) {
-              video.pause();
-              resolve();
-            } else {
-              requestAnimationFrame(tick);
-            }
-          };
-          requestAnimationFrame(tick);
+        let playbackError: string | null = null;
+        await tickUntil(() => {
+          if (video.error) {
+            playbackError = video.error.message ?? "playback error";
+            return true;
+          }
+          ctx.drawImage(video, 0, 0, WIDTH, HEIGHT);
+          drawExperimentBanner(ctx, banner, badge);
+          drawOverlay(
+            ctx,
+            item,
+            i,
+            storyboard.items.length,
+            fileName,
+            video.currentTime,
+            queries,
+          );
+          markPaint();
+          if (video.currentTime >= item.outS || video.ended) {
+            video.pause();
+            return true;
+          }
+          return false;
         });
+        if (playbackError) throw new Error(playbackError);
       } finally {
         source?.disconnect();
         video.pause();
@@ -468,6 +569,13 @@ export async function exportDebugVideo(context: DebugExportContext): Promise<Blo
       }
     }
   } finally {
+    onTick = null;
+    tickerWorker.terminate();
+    try {
+      musicBedSource?.stop();
+    } catch {
+      // already stopped or never started — nothing to clean up
+    }
     recorder.stop();
     await done;
     await audioCtx.close().catch(() => undefined);

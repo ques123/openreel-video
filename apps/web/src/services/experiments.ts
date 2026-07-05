@@ -10,10 +10,12 @@ import {
   StorageEngine,
   type ChatMessage,
   type DirectorActivity,
+  type MusicBrief,
   type PromptSources,
   type Storyboard,
 } from "@openreel/core";
 import { estimateCostUSD, fmtUSD } from "./model-pricing";
+import type { SunoTrack } from "./suno";
 
 const EXP_PREFIX = "director-exp:";
 const VIDEO_PREFIX = "director-exp-video:";
@@ -74,6 +76,18 @@ export interface DirectorExperiment {
   durationMs: number;
   /** Captioning cost/time behind the run's active sources; absent = never computed (legacy). */
   captionStats?: ExperimentCaptionStats;
+  /**
+   * Contextual background-music session for this run's storyboard — absent
+   * when the music toggle was off (or hasn't produced anything yet).
+   * committedTrackId names which of the (usually two) A/B'd tracks the user
+   * picked to bake into the debug render; null = generated but not chosen.
+   */
+  music?: {
+    brief: MusicBrief;
+    taskId: string;
+    tracks: SunoTrack[];
+    committedTrackId: string | null;
+  };
 }
 
 export interface ExperimentSummary {

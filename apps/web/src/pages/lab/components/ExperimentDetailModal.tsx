@@ -5,9 +5,11 @@ import {
   fmtDurationMs,
   fmtTokens,
   loadExperiment,
+  saveExperiment,
   type DirectorExperiment,
 } from "../../../services/experiments";
 import { estimateCostUSD, fmtUSD } from "../../../services/model-pricing";
+import { proxiedMusicUrl } from "../../../services/suno";
 import { PromptInspectorModal } from "./PromptInspectorModal";
 
 interface ExperimentDetailModalProps {
@@ -18,6 +20,8 @@ interface ExperimentDetailModalProps {
   onExportDebug: (exp: DirectorExperiment) => void;
   exportProgress: string | null;
   onDeleted: () => void;
+  /** A field on the stored record changed (e.g. committed music track). */
+  onChanged?: () => void;
   onClose: () => void;
 }
 
@@ -33,10 +37,26 @@ export function ExperimentDetailModal({
   onExportDebug,
   exportProgress,
   onDeleted,
+  onChanged,
   onClose,
 }: ExperimentDetailModalProps) {
   const [exp, setExp] = useState<DirectorExperiment | null>(null);
   const [conversationOpen, setConversationOpen] = useState(false);
+
+  /** Persist a committed track onto the stored record (survives refresh). */
+  const commitTrack = (trackId: string) => {
+    setExp((prev) => {
+      if (!prev?.music) return prev;
+      const next = {
+        ...prev,
+        updatedAt: Date.now(),
+        music: { ...prev.music, committedTrackId: trackId },
+      };
+      void saveExperiment(next).catch(() => undefined);
+      onChanged?.();
+      return next;
+    });
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -149,6 +169,50 @@ export function ExperimentDetailModal({
                   </li>
                 ))}
               </ol>
+            </div>
+          )}
+
+          {exp.music && exp.music.tracks.length > 0 && (
+            <div>
+              <p className="font-semibold text-text-primary mb-1">
+                Music — {exp.music.tracks.length} generated takes
+                {exp.music.committedTrackId === null && (
+                  <span className="text-amber-500 font-normal">
+                    {" "}
+                    (none committed — debug render will have no bed)
+                  </span>
+                )}
+              </p>
+              <div className="space-y-1.5">
+                {exp.music.tracks.map((t, i) => {
+                  const committed = exp.music!.committedTrackId === t.id;
+                  return (
+                    <div key={t.id} className="flex items-center gap-2">
+                      <span className="font-mono text-text-primary whitespace-nowrap">
+                        take {i + 1}/{exp.music!.tracks.length}
+                      </span>
+                      <audio
+                        controls
+                        preload="none"
+                        crossOrigin="anonymous"
+                        src={proxiedMusicUrl(t.audioUrl || t.streamAudioUrl)}
+                        className="h-7 flex-1 min-w-0"
+                      />
+                      <button
+                        className={`px-2 py-1 text-xs rounded-md border whitespace-nowrap ${
+                          committed
+                            ? "border-primary text-primary"
+                            : "border-border text-text-secondary hover:text-text-primary"
+                        }`}
+                        onClick={() => commitTrack(t.id)}
+                        title="Bake this take into the debug render"
+                      >
+                        {committed ? "✓ in render" : "use in render"}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
 
