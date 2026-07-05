@@ -315,6 +315,7 @@ export function useDirector(deps: UseDirectorDeps) {
         cloudMs: 0,
         localFrames: 0,
         localMs: 0,
+        byModel: {},
       };
       for (const d of dossiers) {
         for (const [scope, enabled, pin] of [
@@ -328,6 +329,13 @@ export function useDirector(deps: UseDirectorDeps) {
           captionStats.cloudPromptTokens += meta.promptTokens;
           captionStats.cloudCompletionTokens += meta.completionTokens;
           captionStats.cloudMs += meta.ms;
+          const perModel = captionStats.byModel![meta.model] ?? {
+            promptTokens: 0,
+            completionTokens: 0,
+          };
+          perModel.promptTokens += meta.promptTokens;
+          perModel.completionTokens += meta.completionTokens;
+          captionStats.byModel![meta.model] = perModel;
         }
         if (promptSources.localCaptions && d.localCaptionPerf) {
           captionStats.localFrames += d.localCaptionPerf.frames;

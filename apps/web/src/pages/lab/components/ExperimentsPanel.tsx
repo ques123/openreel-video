@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import {
-  fmtDurationMs,
-  fmtTokens,
+  experimentCostLine,
   listExperiments,
   type ExperimentSummary,
 } from "../../../services/experiments";
@@ -24,23 +23,6 @@ function srcBadge(s: ExperimentSummary): string {
   if (s.promptSources.cloudTimeline) parts.push("c·timeline");
   if (s.promptSources.transcript) parts.push("script");
   return parts.join("+") || "no sources";
-}
-
-/** Compact "director model · tokens · caption models · caption cost/time" line; omits missing pieces (legacy records). */
-function costLine(s: ExperimentSummary): string | null {
-  const parts: string[] = [];
-  if (s.model) parts.push(s.model);
-  const directorTok = (s.promptTokens ?? 0) + (s.completionTokens ?? 0);
-  if (directorTok > 0) parts.push(`${fmtTokens(directorTok)} tok`);
-  if (s.captionModels) parts.push(s.captionModels);
-  const stats = s.captionStats;
-  if (stats) {
-    const capTok = stats.cloudPromptTokens + stats.cloudCompletionTokens;
-    if (capTok > 0) parts.push(`cap ${fmtTokens(capTok)} tok`);
-    const capMs = stats.cloudMs + stats.localMs;
-    if (capMs > 0) parts.push(fmtDurationMs(capMs));
-  }
-  return parts.length > 0 ? parts.join(" · ") : null;
 }
 
 /**
@@ -85,7 +67,7 @@ export function ExperimentsPanel({ refreshToken, onOpen, onCompareGrid }: Experi
       </h3>
       <ul className="space-y-1 max-h-60 overflow-y-auto">
         {experiments.map((e) => {
-          const cost = costLine(e);
+          const cost = experimentCostLine(e);
           return (
             <li
               key={e.id}

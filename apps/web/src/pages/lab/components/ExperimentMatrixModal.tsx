@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { Storyboard } from "@openreel/core";
 import {
+  experimentCaptionCostUSD,
+  experimentCostLine,
   fmtDurationMs,
   fmtTokens,
   listExperiments,
@@ -8,6 +10,7 @@ import {
   type DirectorExperiment,
   type ExperimentSummary,
 } from "../../../services/experiments";
+import { estimateCostUSD, fmtUSD } from "../../../services/model-pricing";
 
 interface ExperimentMatrixModalProps {
   /** clipId -> File resolver for an experiment (cacheKey remap done upstream). */
@@ -273,17 +276,20 @@ function statsLine(exp: ExperimentSummary): string | null {
   const parts: string[] = [];
   const directorTok = (exp.promptTokens ?? 0) + (exp.completionTokens ?? 0);
   if (directorTok > 0) {
+    const dirCost = estimateCostUSD(exp.model, exp.promptTokens ?? 0, exp.completionTokens ?? 0);
     parts.push(
-      `${exp.model} ${fmtTokens(exp.promptTokens ?? 0)}/${fmtTokens(exp.completionTokens ?? 0)} tok`,
+      `${exp.model} ${fmtTokens(exp.promptTokens ?? 0)}/${fmtTokens(exp.completionTokens ?? 0)} tok` +
+        (dirCost !== null ? ` ≈${fmtUSD(dirCost)}` : ""),
     );
   }
   const stats = exp.captionStats;
   if (stats) {
     const capTok = stats.cloudPromptTokens + stats.cloudCompletionTokens;
     const capMs = stats.cloudMs + stats.localMs;
+    const capCost = experimentCaptionCostUSD(exp);
     const bits: string[] = [];
     if (exp.captionModels) bits.push(exp.captionModels);
-    if (capTok > 0) bits.push(`${fmtTokens(capTok)} tok`);
+    if (capTok > 0) bits.push(`${fmtTokens(capTok)} tok${capCost !== null ? ` ≈${fmtUSD(capCost)}` : ""}`);
     if (capMs > 0) bits.push(fmtDurationMs(capMs));
     if (bits.length > 0) parts.push(`cap ${bits.join(" ")}`);
   }
@@ -386,31 +392,39 @@ export function ExperimentMatrixModal({
             {experiments.length === 0 && (
               <p className="text-xs text-text-secondary p-2">No experiments yet.</p>
             )}
-            {experiments.map((e) => (
-              <label
-                key={e.id}
-                className="flex items-start gap-1.5 text-xs rounded px-1.5 py-1 hover:bg-background cursor-pointer select-none"
-              >
-                <input
-                  type="checkbox"
-                  className="mt-0.5"
-                  checked={included.includes(e.id)}
-                  onChange={(ev) =>
-                    setIncluded((list) =>
-                      ev.target.checked ? [...list, e.id] : list.filter((id) => id !== e.id),
-                    )
-                  }
-                />
-                <span className="min-w-0">
-                  <span className="block text-text-primary truncate">
-                    {e.title ?? e.brief.slice(0, 40)}
+            {experiments.map((e) => {
+              const cost = experimentCostLine(e);
+              return (
+                <label
+                  key={e.id}
+                  className="flex items-start gap-1.5 text-xs rounded px-1.5 py-1 hover:bg-background cursor-pointer select-none"
+                >
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={included.includes(e.id)}
+                    onChange={(ev) =>
+                      setIncluded((list) =>
+                        ev.target.checked ? [...list, e.id] : list.filter((id) => id !== e.id),
+                      )
+                    }
+                  />
+                  <span className="min-w-0">
+                    <span className="block text-text-primary truncate">
+                      {e.title ?? e.brief.slice(0, 40)}
+                    </span>
+                    <span className="block text-text-secondary font-mono text-[10px]">
+                      {fmtWhen(e.updatedAt)} · {e.itemCount} segs
+                    </span>
+                    {cost && (
+                      <span className="block text-text-secondary/70 font-mono text-[10px] truncate">
+                        {cost}
+                      </span>
+                    )}
                   </span>
-                  <span className="block text-text-secondary font-mono text-[10px]">
-                    {fmtWhen(e.updatedAt)} · {e.itemCount} segs
-                  </span>
-                </span>
-              </label>
-            ))}
+                </label>
+              );
+            })}
           </div>
 
           <div ref={gridRef} className="flex-1 overflow-y-auto p-3">
