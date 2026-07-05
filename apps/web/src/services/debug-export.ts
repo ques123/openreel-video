@@ -11,6 +11,13 @@
  */
 
 import type { DirectorActivity, PromptSources, Storyboard, StoryboardItem } from "@openreel/core";
+import { estimateCostUSD, fmtUSD } from "./model-pricing";
+import {
+  experimentCaptionCostUSD,
+  fmtDurationMs,
+  fmtTokens,
+  type ExperimentCaptionStats,
+} from "./experiments";
 
 const WIDTH = 1280;
 const HEIGHT = 720;
@@ -24,6 +31,16 @@ export interface DebugExportMeta {
   model: string;
   at: number;
   usage?: { promptTokens: number; completionTokens: number; calls: number };
+  /** Total LLM wall-clock for the director run; absent on legacy experiments. */
+  durationMs?: number;
+  /** Number of source clips referenced by the experiment (distinct from segment count). */
+  clipCount?: number;
+  /** Cloud caption model(s) behind the run's timelines ("" = local only); absent = never tracked. */
+  captionModels?: string;
+  /** Captioning cost/time aggregates; absent on legacy experiments. */
+  captionStats?: ExperimentCaptionStats;
+  /** Non-fatal issues surfaced during the run; absent/empty renders nothing. */
+  warnings?: string[];
 }
 
 export interface DebugExportContext {
@@ -99,24 +116,39 @@ export function sourcesBadge(src: PromptSources): string {
 
 /**
  * Persistent top banner: the experiment this render belongs to + its caption
- * settings — so side-by-side comparisons stay identifiable frame one.
+ * settings — so side-by-side comparisons stay identifiable frame one. Titles
+ * wrap (rather than hard-truncate) over up to 2 lines; the box grows to fit.
  */
 function drawExperimentBanner(
   ctx: CanvasRenderingContext2D,
   title: string,
   badge: string,
 ): void {
-  const h = 34;
+  const pad = 14;
+  const lineH = 22;
+  ctx.font = "15px ui-monospace, monospace";
+  const badgeText = "· " + badge;
+  const badgeWidth = ctx.measureText(badgeText).width;
+  ctx.font = "600 17px ui-monospace, monospace";
+  // Reserve room for the badge alongside the last title line so it never
+  // runs off-canvas once titles are allowed to use the full width.
+  const lines = wrapText(ctx, title, WIDTH - pad * 2 - badgeWidth - 10, 2);
+  const h = 34 + (lines.length - 1) * lineH;
   ctx.fillStyle = "rgba(0,0,0,0.62)";
   ctx.fillRect(0, 0, WIDTH, h);
-  ctx.font = "600 17px ui-monospace, monospace";
+
   ctx.fillStyle = "#7dd3fc";
-  const titleText = title.length > 70 ? title.slice(0, 67) + "…" : title;
-  ctx.fillText(titleText, 14, 23);
-  const tw = ctx.measureText(titleText).width;
+  ctx.font = "600 17px ui-monospace, monospace";
+  let y = 23;
+  for (const line of lines) {
+    ctx.fillText(line, pad, y);
+    y += lineH;
+  }
+  const lastLine = lines[lines.length - 1] ?? "";
+  const tw = ctx.measureText(lastLine).width;
   ctx.fillStyle = "#a3a3a3";
   ctx.font = "15px ui-monospace, monospace";
-  ctx.fillText("· " + badge, 14 + tw + 10, 23);
+  ctx.fillText(badgeText, pad + tw + 10, 23 + (lines.length - 1) * lineH);
 }
 
 function drawOverlay(
@@ -170,6 +202,68 @@ function drawOverlay(
   ctx.fillText(foundLines[0] ?? "", pad, y);
 }
 
+/** "director: gpt-5.2 · 14 calls · 9.1k in / 2.3k out ≈$1.23 · gen 2m15s" */
+function directorLine(meta: DebugExportMeta): string | null {
+  if (!meta.usage) return null;
+  const { promptTokens, completionTokens, calls } = meta.usage;
+  const cost = estimateCostUSD(meta.model, promptTokens, completionTokens);
+  const parts = [
+    meta.model,
+    `${calls} calls`,
+    `${fmtTokens(promptTokens)} in / ${fmtTokens(completionTokens)} out${cost !== null ? ` ≈${fmtUSD(cost)}` : ""}`,
+  ];
+  if (meta.durationMs) parts.push(`gen ${fmtDurationMs(meta.durationMs)}`);
+  return `director: ${parts.join(" · ")}`;
+}
+
+/**
+ * "captions: gpt-5.2 · 340 frames · 9.1k in / 2.3k out ≈$1.23 · cap 1m02s"
+ * or, when nothing was sent to the cloud, "captions: local-only · 340
+ * frames · cap 4s". Omits pieces the run has no data for; returns null when
+ * there's nothing to say at all (legacy experiments predating captionStats).
+ */
+function captionsLine(meta: DebugExportMeta): string | null {
+  const stats = meta.captionStats;
+  const models = meta.captionModels;
+  if (!stats && !models) return null;
+  const cloudFrames = stats?.cloudFrames ?? 0;
+  const localFrames = stats?.localFrames ?? 0;
+  const capMs = (stats?.cloudMs ?? 0) + (stats?.localMs ?? 0);
+  const cloudOnly = !models || models === "local-only";
+
+  if (cloudFrames === 0 && cloudOnly) {
+    const parts: string[] = ["local-only"];
+    if (localFrames > 0) parts.push(`${localFrames} frames`);
+    if (capMs > 0) parts.push(`cap ${fmtDurationMs(capMs)}`);
+    return parts.length > 1 || capMs > 0 ? `captions: ${parts.join(" · ")}` : null;
+  }
+
+  const parts: string[] = [];
+  if (models) parts.push(models);
+  if (cloudFrames > 0) parts.push(`${cloudFrames} frames`);
+  const inTok = stats?.cloudPromptTokens ?? 0;
+  const outTok = stats?.cloudCompletionTokens ?? 0;
+  if (inTok > 0 || outTok > 0) {
+    const cost = experimentCaptionCostUSD({ captionModels: models, captionStats: stats });
+    parts.push(`${fmtTokens(inTok)} in / ${fmtTokens(outTok)} out${cost !== null ? ` ≈${fmtUSD(cost)}` : ""}`);
+  }
+  if (capMs > 0) parts.push(`cap ${fmtDurationMs(capMs)}`);
+  return parts.length > 0 ? `captions: ${parts.join(" · ")}` : null;
+}
+
+/**
+ * One line per model when captionStats.byModel names 2+ differently-priced
+ * models (a single model is already fully covered by captionsLine above).
+ */
+function captionBreakdownLines(meta: DebugExportMeta): string[] {
+  const byModel = meta.captionStats?.byModel;
+  if (!byModel || Object.keys(byModel).length < 2) return [];
+  return Object.entries(byModel).map(([model, tok]) => {
+    const cost = estimateCostUSD(model, tok.promptTokens, tok.completionTokens);
+    return `  ${model}: ${fmtTokens(tok.promptTokens)} in / ${fmtTokens(tok.completionTokens)} out${cost !== null ? ` ≈${fmtUSD(cost)}` : ""}`;
+  });
+}
+
 function drawTitleCard(ctx: CanvasRenderingContext2D, meta: DebugExportMeta, sb: Storyboard): void {
   ctx.fillStyle = "#0a0a0a";
   ctx.fillRect(0, 0, WIDTH, HEIGHT);
@@ -182,17 +276,33 @@ function drawTitleCard(ctx: CanvasRenderingContext2D, meta: DebugExportMeta, sb:
   ctx.font = "17px ui-monospace, monospace";
   ctx.fillStyle = "#a3a3a3";
   const src = meta.promptSources;
+  const segmentsAndClips =
+    `model ${meta.model}  ·  target ${meta.targetDurationS ? fmtS(meta.targetDurationS) : "none"}  ·  ${sb.items.length} segments` +
+    (meta.clipCount ? `  ·  ${meta.clipCount} clips` : "");
+  const warnings = meta.warnings ?? [];
   const lines = [
     new Date(meta.at).toISOString().replace("T", " ").slice(0, 19) + " UTC",
-    `model ${meta.model}  ·  target ${meta.targetDurationS ? fmtS(meta.targetDurationS) : "none"}  ·  ${sb.items.length} segments`,
+    segmentsAndClips,
     `sources: local=${src.localCaptions} cloudShots=${src.cloudShots} cloudTimeline=${src.cloudTimeline} transcript=${src.transcript}`,
-    meta.usage
-      ? `llm usage: ${meta.usage.calls} calls, ${((meta.usage.promptTokens + meta.usage.completionTokens) / 1000).toFixed(1)}k tokens`
-      : "",
-  ].filter(Boolean);
+    directorLine(meta),
+    captionsLine(meta),
+    ...captionBreakdownLines(meta),
+  ].filter((line): line is string => Boolean(line));
+  // Warnings render in the existing "missing file" red rather than the
+  // secondary gray, since the card's other overlay already uses that accent.
+  const warningLines =
+    warnings.length > 0 ? wrapText(ctx, `warnings: ${warnings.join("; ")}`, WIDTH - pad * 2, 2) : [];
   for (const line of lines) {
+    ctx.fillStyle = "#a3a3a3";
     ctx.fillText(line, pad, y);
     y += 30;
+  }
+  if (warningLines.length > 0) {
+    ctx.fillStyle = "#f87171";
+    for (const line of warningLines) {
+      ctx.fillText(line, pad, y);
+      y += 30;
+    }
   }
   y += 12;
   ctx.fillStyle = "#e5e5e5";
