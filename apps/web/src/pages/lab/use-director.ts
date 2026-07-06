@@ -17,6 +17,7 @@ import {
   type CloudRunMeta,
   type DirectorActivity,
   type PromptSources,
+  type SelectorConfig,
   type Storyboard,
 } from "@openreel/core";
 import {
@@ -55,6 +56,14 @@ export interface DirectorState {
 export interface UseDirectorDeps {
   getDossiers: () => ClipDossier[];
   embedQuery: (query: string) => Promise<Float32Array>;
+  /**
+   * The effective SelectorConfig right now (tuned settings + any active
+   * style-preset adjustment — see selector-settings.ts effectiveSelectorConfig).
+   * Read at start() time so a "candidates" promptMode run picks with the same
+   * config the Signals panel/filmstrip are showing, and recorded on the
+   * experiment (DirectorExperiment.selectorConfig) so runs stay comparable.
+   */
+  getSelectorConfig: () => SelectorConfig;
 }
 
 const initialState: DirectorState = {
@@ -199,7 +208,7 @@ export function useDirector(deps: UseDirectorDeps) {
    * change (a fresh Direct run) never bleeds into an in-flight refine.
    */
   const modelRef = useRef<string>(DIRECTOR_MODEL);
-  const { getDossiers, embedQuery } = deps;
+  const { getDossiers, embedQuery, getSelectorConfig } = deps;
 
   const persistExperiment = useCallback(
     (patch: Partial<DirectorExperiment>) => {
@@ -324,6 +333,11 @@ export function useDirector(deps: UseDirectorDeps) {
       // leaving modelRef untouched (see the ref's doc comment above).
       const directorModel = model ?? DIRECTOR_MODEL;
       modelRef.current = directorModel;
+      // Snapshot the effective selector config for this run: it's what a
+      // "candidates" promptMode run below actually selects with, AND (mode
+      // aside) gets recorded on the experiment unconditionally so any run
+      // using candidates-only enhance stays comparable to others later.
+      const selectorConfig = getSelectorConfig();
 
       // Candidates mode: the footage message is the selector's scored
       // top-picks per chapter (plus gist of everything else) instead of every
@@ -331,7 +345,7 @@ export function useDirector(deps: UseDirectorDeps) {
       let footageMessage: string;
       let candidatesNote: DirectorActivity | undefined;
       if (promptSources.promptMode === "candidates") {
-        const selection = selectCandidates(dossiers);
+        const selection = selectCandidates(dossiers, selectorConfig);
         footageMessage = buildCandidatesMessage(dossiers, selection, promptSources);
         candidatesNote = {
           kind: "note",
@@ -427,6 +441,7 @@ export function useDirector(deps: UseDirectorDeps) {
         promptSources,
         captionModels,
         model: directorModel,
+        selectorConfig,
         clips: dossiers.map((d) => ({
           clipId: d.clipId,
           cacheKey: d.cacheKey,
@@ -442,7 +457,7 @@ export function useDirector(deps: UseDirectorDeps) {
       };
       void runLoop(seed, targetDurationS, candidatesNote);
     },
-    [getDossiers, runLoop],
+    [getDossiers, runLoop, getSelectorConfig],
   );
 
   const refine = useCallback(

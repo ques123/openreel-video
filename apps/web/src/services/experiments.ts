@@ -13,6 +13,7 @@ import {
   type DurationViolation,
   type MusicBrief,
   type PromptSources,
+  type SelectorConfig,
   type Storyboard,
   type StoryboardMetrics,
 } from "@openreel/core";
@@ -113,6 +114,15 @@ export interface DirectorExperiment {
   model: string;
   /** Cloud caption model(s) behind the timelines the director consumed ("" = local only). */
   captionModels: string;
+  /**
+   * Effective signal-stack selector config for this run (tuned settings +
+   * any active style-preset adjustment — see signal-score.ts
+   * selectorConfigForPreset): what selectCandidates ran with for a
+   * "candidates" promptMode run, recorded regardless of promptMode so any
+   * run that also used candidates-only enhance stays comparable. Absent on
+   * records saved before the selector tuning UI shipped.
+   */
+  selectorConfig?: SelectorConfig;
   clips: ExperimentClipRef[];
   /** Verbatim conversation (system prompt, dossiers, tool traffic, replies). */
   messages: ChatMessage[];
@@ -165,6 +175,8 @@ export interface ExperimentSummary {
   captionModels?: string;
   promptSources: PromptSources;
   targetDurationS?: number | null;
+  /** Effective selector config for this run — see DirectorExperiment.selectorConfig. */
+  selectorConfig?: SelectorConfig;
   /** Set when a rendered debug video is stored for this experiment. */
   videoAt?: number;
   /** Director LLM token totals, for the at-a-glance menu row. */
@@ -341,6 +353,7 @@ function summarize(exp: DirectorExperiment, prev?: ExperimentSummary): Experimen
     captionModels: exp.captionModels,
     promptSources: exp.promptSources,
     targetDurationS: exp.targetDurationS,
+    selectorConfig: exp.selectorConfig,
     videoAt: prev?.videoAt,
     promptTokens: exp.usage.promptTokens,
     completionTokens: exp.usage.completionTokens,

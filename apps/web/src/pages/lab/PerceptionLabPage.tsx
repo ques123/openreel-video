@@ -7,7 +7,13 @@ import type {
   Storyboard,
   TranscriptSegment,
 } from "@openreel/core";
-import { buildFootageDigest, planCloudFrames, stylePresetById } from "@openreel/core";
+import {
+  buildFootageDigest,
+  DEFAULT_SELECTOR_CONFIG,
+  planCloudFrames,
+  stylePresetById,
+  type SelectorConfig,
+} from "@openreel/core";
 import { suggestBriefs, type BriefSuggestion } from "../../services/brief-suggestions";
 import { compileStoryboardToProject } from "../../services/compile-storyboard";
 import { shortModelLabel, type ModelChatUsage } from "../../services/openai-proxy";
@@ -42,11 +48,13 @@ import {
   type ClipFramePlan,
 } from "./enhance-cost";
 import {
+  cloneSelectorConfig,
   loadLabSettings,
   saveLabSettings,
   type CloudEnhanceSettings,
   type LabSettings,
 } from "./lab-settings";
+import { effectiveSelectorConfig } from "./selector-settings";
 import { CaptionCompareModal } from "./components/CaptionCompareModal";
 import { ClipDropZone } from "./components/ClipDropZone";
 import { ClipRowBar } from "./components/ClipRowBar";
@@ -110,6 +118,34 @@ function formatDurationCompact(seconds: number): string {
 export function PerceptionLabPage() {
   const { params, navigate } = useRouter();
   const forceDevice = params.device === "wasm" ? "wasm" : "auto";
+  // Locked style preset (or null = unlocked) — lifted here so the director
+  // brief, the ✨ suggestions, and the music brief all share one selection.
+  // Declared (along with labSettings) before usePerceptionLab/useDirector
+  // below because both need the preset-adjusted effective selector config
+  // threaded IN, not read back out.
+  const [styleId, setStyleId] = useState<string | null>(null);
+  // Cloud vision opt-in: session-only (deliberately NOT persisted — each
+  // session re-consents). The run dials (scope / caption model / candidates-
+  // only / selector tuning) live in ONE persisted, versioned settings object
+  // (lab-settings.ts), edited via the settings drawer / Signals panel.
+  const [labSettings, setLabSettings] = useState<LabSettings>(loadLabSettings);
+  const activeStylePreset = useMemo(() => stylePresetById(styleId), [styleId]);
+  /**
+   * What selectCandidates actually runs with: the user's tuned config
+   * (labSettings.selector) adjusted for the active style preset's
+   * allowSoftFocus (selectorConfigForPreset) — feeds BOTH the lab's own
+   * selection (filmstrip stars, Signals panel, candidates-only enhance
+   * scoping, below) and the director's candidates-mode picks (useDirector's
+   * getSelectorConfig dep), so every consumer agrees on one selection.
+   */
+  const effectiveSelector = useMemo(
+    () => effectiveSelectorConfig(labSettings.selector, activeStylePreset),
+    [labSettings.selector, activeStylePreset],
+  );
+  const presetOverrideNote =
+    effectiveSelector.presetOverrodeSharpness && activeStylePreset
+      ? `preset "${activeStylePreset.label}" favors soft shots — blur gate converted to penalty`
+      : null;
   const {
     state,
     addFiles,
@@ -122,15 +158,13 @@ export function PerceptionLabPage() {
     removeClip,
     selection,
     storage,
-  } = usePerceptionLab(forceDevice);
-  const director = useDirector({ getDossiers, embedQuery });
+  } = usePerceptionLab(forceDevice, effectiveSelector.config);
+  const getSelectorConfig = useCallback(() => effectiveSelector.config, [effectiveSelector]);
+  const director = useDirector({ getDossiers, embedQuery, getSelectorConfig });
   const music = useMusic();
   // Contextual background-music toggle; lives here (not in DirectorPanel) so
   // it survives across Direct/refine cycles like cloudEnabled does below.
   const [musicEnabled, setMusicEnabled] = useState(false);
-  // Locked style preset (or null = unlocked) — lifted here so the director
-  // brief, the ✨ suggestions, and the music brief all share one selection.
-  const [styleId, setStyleId] = useState<string | null>(null);
   // Which experiment a music generation has already been kicked off for —
   // refine() reuses the SAME experimentId, so this guards against
   // regenerating on every refine round (only a genuinely new Direct run
@@ -165,16 +199,27 @@ export function PerceptionLabPage() {
     getFile: (clipId: string) => File | null;
     exp: DirectorExperiment | null;
   } | null>(null);
-  // Cloud vision opt-in: session-only (deliberately NOT persisted — each
-  // session re-consents). The run dials (scope / caption model / candidates-
-  // only) live in ONE persisted, versioned settings object (lab-settings.ts),
-  // edited via the settings drawer.
   const [cloudEnabled, setCloudEnabled] = useState(false);
-  const [labSettings, setLabSettings] = useState<LabSettings>(loadLabSettings);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const updateCloudSettings = useCallback((patch: Partial<CloudEnhanceSettings>) => {
     setLabSettings((prev) => {
       const next = { ...prev, cloud: { ...prev.cloud, ...patch } };
+      saveLabSettings(next);
+      return next;
+    });
+  }, []);
+  /** Patch the persisted selector tuning config (SignalsPanel's tuning panel). */
+  const updateSelectorSettings = useCallback((patch: Partial<SelectorConfig>) => {
+    setLabSettings((prev) => {
+      const next = { ...prev, selector: { ...prev.selector, ...patch } };
+      saveLabSettings(next);
+      return next;
+    });
+  }, []);
+  /** Reset ONLY the selector tuning back to the shipped defaults. */
+  const resetSelectorSettings = useCallback(() => {
+    setLabSettings((prev) => {
+      const next = { ...prev, selector: cloneSelectorConfig(DEFAULT_SELECTOR_CONFIG) };
       saveLabSettings(next);
       return next;
     });
@@ -1200,6 +1245,10 @@ export function PerceptionLabPage() {
                 clips={state.clips}
                 selection={selection}
                 onShotClick={(clip, shot) => openPreview(clip.clipId, clip.fileName, shot)}
+                selectorConfig={labSettings.selector}
+                onSelectorConfigChange={updateSelectorSettings}
+                onResetSelectorConfig={resetSelectorSettings}
+                presetOverrideNote={presetOverrideNote}
               />
               <SceneTimelinePanel
                 clips={state.clips}

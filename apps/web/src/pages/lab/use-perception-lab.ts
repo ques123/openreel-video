@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "r
 import {
   applyCloudResults,
   blurryAnnotations,
+  DEFAULT_SELECTOR_CONFIG,
   expandSpanCaptions,
   FunnelOrchestrator,
   planCloudFrames,
@@ -16,6 +17,7 @@ import {
   type InferenceDevice,
   type SearchHit,
   type SelectionResult,
+  type SelectorConfig,
   type Shot,
   type TranscriptSegment,
 } from "@openreel/core";
@@ -414,7 +416,17 @@ function readDebugIngestBudgetBytes(): number | undefined {
   }
 }
 
-export function usePerceptionLab(forceDevice: "auto" | InferenceDevice = "auto") {
+export function usePerceptionLab(
+  forceDevice: "auto" | InferenceDevice = "auto",
+  /**
+   * Effective SelectorConfig (tuned settings + any active style-preset
+   * adjustment — see selector-settings.ts effectiveSelectorConfig) for the
+   * selection memo below. Defaults to DEFAULT_SELECTOR_CONFIG so callers
+   * (and reducer-level tests, which never touch this hook) don't have to
+   * pass one.
+   */
+  selectorConfig: SelectorConfig = DEFAULT_SELECTOR_CONFIG,
+) {
   const [state, dispatch] = useReducer(reducer, initialState);
   const orchestratorRef = useRef<FunnelOrchestrator | null>(null);
   const dossiersRef = useRef<Map<string, ClipDossier>>(new Map());
@@ -702,9 +714,11 @@ export function usePerceptionLab(forceDevice: "auto" | InferenceDevice = "auto")
    * candidates-mode, and candidates-only enhance all read from. Recomputed
    * whenever the clips array is replaced (the reducer does this on every
    * event, including in-place mutations like shot-embedded/shot-captioned/
-   * audio-signals that matter to scoring). Swallows core errors so a
-   * mid-flight core implementation can't crash the lab UI — callers treat
-   * null as "not ready yet".
+   * audio-signals that matter to scoring) OR whenever selectorConfig changes
+   * (tuning panel edits, reset-to-defaults, or a style-preset swap) — the
+   * whole point of the tuning UI is that this recomputes live. Swallows
+   * core errors so a mid-flight core implementation can't crash the lab UI —
+   * callers treat null as "not ready yet".
    */
   const selection = useMemo<SelectionResult | null>(() => {
     const dossiers = state.clips
@@ -712,12 +726,12 @@ export function usePerceptionLab(forceDevice: "auto" | InferenceDevice = "auto")
       .map((c) => c.dossier as ClipDossier);
     if (dossiers.length === 0) return null;
     try {
-      return selectCandidates(dossiers);
+      return selectCandidates(dossiers, selectorConfig);
     } catch (err) {
       console.error("[lab] selectCandidates failed:", err);
       return null;
     }
-  }, [state.clips]);
+  }, [state.clips, selectorConfig]);
 
   return {
     state,

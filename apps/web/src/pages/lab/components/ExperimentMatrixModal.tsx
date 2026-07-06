@@ -12,6 +12,7 @@ import {
   type ExperimentSummary,
 } from "../../../services/experiments";
 import { estimateCostUSD, fmtUSD } from "../../../services/model-pricing";
+import { isDefaultSelectorConfig } from "../selector-settings";
 
 interface ExperimentMatrixModalProps {
   /** clipId -> File resolver for an experiment (cacheKey remap done upstream). */
@@ -268,6 +269,19 @@ function chipsFor(exp: ExperimentSummary, all: ExperimentSummary[]): SettingChip
       label: "style",
       value: exp.styleId ? (stylePresetById(exp.styleId)?.label ?? exp.styleId) : "—",
       common: uniform((e) => e.styleId ?? null),
+    },
+    {
+      label: "selector",
+      // "tuned"/"default" for at-a-glance readability; the common/differs
+      // border (below) still compares the FULL config, so two differently-
+      // tuned runs both showing "tuned" still light up amber against each
+      // other — candidates-mode picks came from genuinely different configs.
+      value: exp.selectorConfig
+        ? isDefaultSelectorConfig(exp.selectorConfig)
+          ? "default"
+          : "tuned"
+        : "—",
+      common: uniform((e) => JSON.stringify(e.selectorConfig ?? null)),
     },
     { label: "model", value: exp.model, common: uniform((e) => e.model) },
     {
