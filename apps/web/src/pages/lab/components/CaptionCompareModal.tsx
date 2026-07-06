@@ -6,6 +6,14 @@ import type { LabClip } from "../use-perception-lab";
 
 interface CaptionCompareModalProps {
   clip: LabClip;
+  /**
+   * All lab clips, for paging between comparisons (prev/next buttons and
+   * ←/→ keys) without close-and-reopen per clip. Optional together with
+   * onSelectClip — omit both and the pager is hidden.
+   */
+  clips?: LabClip[];
+  /** Switch the modal to another clip (the pager's setter). */
+  onSelectClip?: (clip: LabClip) => void;
   onClose: () => void;
   /** Open the video preview at this time (the modal closes itself first). */
   onJumpTo: (t: number) => void;
@@ -36,8 +44,22 @@ function fmtRun(run: CloudRunMeta | null): string {
  * run (local, cloud shots, cloud timeline) and per-variant speed/cost stats
  * in the header. This is the "is the cloud pass worth it" view.
  */
-export function CaptionCompareModal({ clip, onClose, onJumpTo }: CaptionCompareModalProps) {
+export function CaptionCompareModal({
+  clip,
+  clips,
+  onSelectClip,
+  onClose,
+  onJumpTo,
+}: CaptionCompareModalProps) {
   const dossier = clip.dossier;
+  // Page only across clips with a dossier — the modal is empty without one.
+  const pageable = clips && onSelectClip ? clips.filter((c) => c.dossier) : null;
+  const pageIndex = pageable ? pageable.findIndex((c) => c.clipId === clip.clipId) : -1;
+  const goTo = (delta: number) => {
+    if (!pageable || !onSelectClip || pageIndex < 0) return;
+    const next = pageable[pageIndex + delta];
+    if (next) onSelectClip(next);
+  };
   const frames = dossier?.denseFrames ?? [];
   const local = localCaptionsOf(dossier);
   // One column per archived (scope, model) run — different models COEXIST
@@ -73,11 +95,21 @@ export function CaptionCompareModal({ clip, onClose, onJumpTo }: CaptionCompareM
       if (e.key === "Escape") {
         e.stopPropagation();
         onClose();
+      } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+        // Never hijack arrows aimed at a text field (capture-phase listener).
+        const t = e.target as HTMLElement | null;
+        if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) {
+          return;
+        }
+        e.stopPropagation();
+        goTo(e.key === "ArrowLeft" ? -1 : 1);
       }
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [onClose]);
+    // goTo is re-created per render (it closes over pageable/pageIndex);
+    // re-attaching this cheap listener each render keeps it current.
+  });
 
   return (
     <div
@@ -98,13 +130,40 @@ export function CaptionCompareModal({ clip, onClose, onJumpTo }: CaptionCompareM
               {dossier?.cloudVision ? ` · cloud model: ${dossier.cloudVision.model}` : ""}
             </p>
           </div>
-          <button
-            className="text-text-secondary hover:text-text-primary text-xl px-2"
-            onClick={onClose}
-            aria-label="Close comparison"
-          >
-            ×
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            {pageable && pageIndex >= 0 && (
+              <div className="flex items-center gap-1 text-xs text-text-secondary">
+                <button
+                  className="px-1.5 py-0.5 rounded border border-border hover:text-text-primary disabled:opacity-30"
+                  disabled={pageIndex <= 0}
+                  onClick={() => goTo(-1)}
+                  title="Previous clip (←)"
+                  aria-label="Previous clip"
+                >
+                  ‹
+                </button>
+                <span className="font-mono">
+                  {pageIndex + 1}/{pageable.length}
+                </span>
+                <button
+                  className="px-1.5 py-0.5 rounded border border-border hover:text-text-primary disabled:opacity-30"
+                  disabled={pageIndex >= pageable.length - 1}
+                  onClick={() => goTo(1)}
+                  title="Next clip (→)"
+                  aria-label="Next clip"
+                >
+                  ›
+                </button>
+              </div>
+            )}
+            <button
+              className="text-text-secondary hover:text-text-primary text-xl px-2"
+              onClick={onClose}
+              aria-label="Close comparison"
+            >
+              ×
+            </button>
+          </div>
         </div>
 
         <div className="overflow-auto">

@@ -1,7 +1,10 @@
 import { useEffect, useState } from "react";
 import { stylePresetById } from "@openreel/core";
 import {
+  buildExperimentsExport,
   deleteExperiment,
+  experimentAuxCostUSD,
+  experimentAuxUsage,
   experimentCaptionCostUSD,
   fmtDurationMs,
   fmtTokens,
@@ -11,6 +14,8 @@ import {
 } from "../../../services/experiments";
 import { estimateCostUSD, fmtUSD } from "../../../services/model-pricing";
 import { proxiedMusicUrl } from "../../../services/suno";
+import { ConfirmButton } from "./ConfirmButton";
+import { downloadJson } from "./download-json";
 import { PromptInspectorModal } from "./PromptInspectorModal";
 
 interface ExperimentDetailModalProps {
@@ -95,9 +100,20 @@ export function ExperimentDetailModal({
   const capTokens = stats ? stats.cloudPromptTokens + stats.cloudCompletionTokens : 0;
   const capMs = stats ? stats.cloudMs + stats.localMs : 0;
   const capFrames = stats ? stats.cloudFrames + stats.localFrames : 0;
-  const dirCost = estimateCostUSD(exp.model, exp.usage.promptTokens, exp.usage.completionTokens);
+  const cachedTokens = exp.usage.cachedTokens ?? 0;
+  const dirCost = estimateCostUSD(
+    exp.model,
+    exp.usage.promptTokens,
+    exp.usage.completionTokens,
+    cachedTokens,
+  );
   const capCost = experimentCaptionCostUSD(exp);
+  const aux = experimentAuxUsage(exp);
+  const auxIn = aux.reduce((sum, u) => sum + u.promptTokens, 0);
+  const auxOut = aux.reduce((sum, u) => sum + u.completionTokens, 0);
+  const auxCost = experimentAuxCostUSD(aux);
   const stylePreset = stylePresetById(exp.styleId);
+  const violation = exp.durationViolation;
 
   return (
     <div
@@ -119,6 +135,7 @@ export function ExperimentDetailModal({
               {exp.usage.promptTokens + exp.usage.completionTokens > 0
                 ? ` · ${fmtTokens(exp.usage.promptTokens)} in / ${fmtTokens(exp.usage.completionTokens)} out tok`
                 : ""}
+              {cachedTokens > 0 ? ` (${fmtTokens(cachedTokens)} cached)` : ""}
               {exp.usage.promptTokens + exp.usage.completionTokens > 0 && dirCost !== null
                 ? ` ≈${fmtUSD(dirCost)}`
                 : ""}
@@ -135,6 +152,13 @@ export function ExperimentDetailModal({
                 {stats && capMs > 0 ? ` · ${fmtDurationMs(capMs)}` : ""}
               </p>
             )}
+            {auxIn + auxOut > 0 && (
+              <p className="text-xs text-text-secondary font-mono">
+                aux (brief/music): {aux.length} call{aux.length === 1 ? "" : "s"} ·{" "}
+                {fmtTokens(auxIn)} in / {fmtTokens(auxOut)} out tok
+                {auxCost !== null ? ` ≈${fmtUSD(auxCost)}` : ""}
+              </p>
+            )}
           </div>
           <button
             className="text-text-secondary hover:text-text-primary text-xl px-2"
@@ -146,6 +170,16 @@ export function ExperimentDetailModal({
         </div>
 
         <div className="overflow-y-auto p-4 space-y-3 text-xs">
+          {violation && (
+            <div className="border border-amber-500/50 bg-amber-500/10 text-amber-500 rounded-md px-2.5 py-1.5">
+              <span className="font-semibold">Duration target missed:</span> asked{" "}
+              {fmtS(violation.targetS)}, model submitted {fmtS(violation.submittedS)} (
+              {violation.direction})
+              {violation.trimmed
+                ? ` — mechanically trimmed to ${fmtS(violation.deliveredS)}.`
+                : ` — delivered as-is at ${fmtS(violation.deliveredS)}.`}
+            </div>
+          )}
           <div>
             <p className="font-semibold text-text-primary mb-0.5">
               Brief
@@ -174,6 +208,22 @@ export function ExperimentDetailModal({
             </span>
             {stylePreset && <span>style: {stylePreset.label}</span>}
           </div>
+          {exp.metrics && (
+            <p className="text-text-secondary font-mono text-[11px]">
+              <span title="cut points landing >150ms inside a spoken word (after boundary snapping) — lower is better">
+                cuts in speech: {(exp.metrics.midSpeechCutFraction * 100).toFixed(0)}% (
+                {exp.metrics.midSpeechCutCount}/{exp.metrics.cutCount})
+              </span>
+              {exp.metrics.adjacentCosineMean !== null && (
+                <span title="cosine similarity between adjacent segments' shot embeddings — near 1 means near-identical back-to-back shots">
+                  {" "}
+                  · adj-sim: {exp.metrics.adjacentCosineMean.toFixed(2)} mean /{" "}
+                  {(exp.metrics.adjacentCosineMax ?? 0).toFixed(2)} max (
+                  {exp.metrics.adjacentPairCount} pairs)
+                </span>
+              )}
+            </p>
+          )}
 
           {exp.storyboard && (
             <div>
@@ -287,15 +337,25 @@ export function ExperimentDetailModal({
           >
             conversation →
           </button>
-          <div className="flex-1" />
           <button
+            className="px-2 py-1 text-xs rounded-md border border-border text-text-secondary hover:text-text-primary"
+            onClick={() => downloadJson(`openreel-experiment-${exp.id}.json`, buildExperimentsExport([exp]))}
+            title="Download this run's full record as JSON (settings, conversation, storyboard, usage — the rendered video is not included)"
+          >
+            ⬇ json
+          </button>
+          <div className="flex-1" />
+          <ConfirmButton
             className="px-2 py-1 text-xs rounded-md border border-red-500/40 text-red-400 hover:bg-red-500/10"
-            onClick={() => {
+            armedClassName="bg-red-500/10"
+            confirmLabel="really delete?"
+            title="Permanently delete this run and its rendered video"
+            onConfirm={() => {
               void deleteExperiment(exp.id).then(onDeleted);
             }}
           >
             delete
-          </button>
+          </ConfirmButton>
         </div>
       </div>
 

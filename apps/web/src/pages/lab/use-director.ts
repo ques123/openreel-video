@@ -7,6 +7,7 @@ import {
   buildDossierMessage,
   buildRefineMessage,
   buildSystemPrompt,
+  computeStoryboardMetrics,
   runDirectorLoop,
   searchShots,
   selectCandidates,
@@ -254,12 +255,7 @@ export function useDirector(deps: UseDirectorDeps) {
                 if (!exp) return;
                 exp.usage.promptTokens += usage.promptTokens;
                 exp.usage.completionTokens += usage.completionTokens;
-                // cachedTokens isn't on DirectorExperiment["usage"] yet (the
-                // experiments.ts type belongs to another review phase) —
-                // recorded via a widening cast so history carries the cache
-                // data from day one; the persisted JSON shape is additive.
-                const u = exp.usage as typeof exp.usage & { cachedTokens?: number };
-                u.cachedTokens = (u.cachedTokens ?? 0) + usage.cachedTokens;
+                exp.usage.cachedTokens = (exp.usage.cachedTokens ?? 0) + usage.cachedTokens;
                 exp.usage.calls += 1;
               },
             ),
@@ -285,6 +281,11 @@ export function useDirector(deps: UseDirectorDeps) {
           activity: [...activityLogRef.current],
           storyboard: result.storyboard,
           warnings: result.warnings,
+          // Structured quality/duration outcomes of the ACCEPTED cut — a
+          // refine replaces them wholesale (they describe the storyboard,
+          // not the conversation), so no merge is needed.
+          metrics: result.metrics,
+          durationViolation: result.durationViolation,
           durationMs: (exp?.durationMs ?? 0) + Math.round(performance.now() - runStart),
         });
       } catch (err) {
@@ -464,10 +465,15 @@ export function useDirector(deps: UseDirectorDeps) {
   );
 
   // Manual storyboard edits (remove/reorder) update the persisted experiment,
-  // so what you re-watch later is what you actually kept.
+  // so what you re-watch later is what you actually kept. Metrics are
+  // recomputed on the edited board (cuts moved/vanished) so the stored
+  // numbers keep describing the storyboard actually persisted.
   useEffect(() => {
     if (state.phase === "awaiting-refine" && state.storyboard && experimentRef.current) {
-      persistExperiment({ storyboard: state.storyboard });
+      persistExperiment({
+        storyboard: state.storyboard,
+        metrics: computeStoryboardMetrics(state.storyboard, dossiersRef.current),
+      });
     }
   }, [state.phase, state.storyboard, persistExperiment]);
 

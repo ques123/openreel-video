@@ -596,7 +596,11 @@ export function usePerceptionLab(forceDevice: "auto" | InferenceDevice = "auto")
       const dossier = dossiersRef.current.get(clipId);
       const file = filesRef.current.get(clipId);
       if (!dossier || !file) return;
-      const { frames, blurrySkipped, outOfCandidateRanges } = planCloudFrames(dossier, scope, opts);
+      const { frames, blurrySkipped, outOfCandidateRanges, preMergeCount } = planCloudFrames(
+        dossier,
+        scope,
+        opts,
+      );
       if (frames.length === 0) {
         dispatch({ type: "cloud-error", clipId, message: "no frames available yet" });
         return;
@@ -628,6 +632,11 @@ export function usePerceptionLab(forceDevice: "auto" | InferenceDevice = "auto")
           ms: run.ms,
           promptTokens: run.promptTokens,
           completionTokens: run.completionTokens,
+          // Cache-discount + merge-lever telemetry: how much of the prompt
+          // the provider served from cache, and how many in-scope frames the
+          // blur gate + similarity merge saved (preMergeCount vs framesSent).
+          cachedTokens: run.cachedTokens,
+          preMergeCount,
         });
         await getOrchestrator().saveDossier(file, dossier);
         dispatch({ type: "cloud-done", clipId });

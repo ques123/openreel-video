@@ -1,18 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   CandidatePick,
-  CloudScope,
   DenseCaption,
   SearchHit,
   Shot,
   Storyboard,
   TranscriptSegment,
 } from "@openreel/core";
-import { buildFootageDigest, stylePresetById } from "@openreel/core";
+import { buildFootageDigest, planCloudFrames, stylePresetById } from "@openreel/core";
 import { suggestBriefs, type BriefSuggestion } from "../../services/brief-suggestions";
 import { compileStoryboardToProject } from "../../services/compile-storyboard";
-import { CAPTION_MODELS, type CaptionModel } from "../../services/cloud-vision";
-import { shortModelLabel } from "../../services/openai-proxy";
+import { shortModelLabel, type ModelChatUsage } from "../../services/openai-proxy";
 import { downloadBlob, exportDebugVideo, type DebugExportMeta } from "../../services/debug-export";
 import {
   saveExperiment,
@@ -22,6 +20,21 @@ import {
 import { proxiedMusicUrl } from "../../services/suno";
 import { useRouter } from "../../hooks/use-router";
 import { cloudShotCaptionsOf, cloudTimelineCaptionsOf, localCaptionsOf } from "./caption-views";
+import {
+  assessReEnhance,
+  buildReEnhanceConfirm,
+  estimateEnhanceCost,
+  formatCostPreview,
+  hasCloudRun,
+  sumAuxSpend,
+  type ClipFramePlan,
+} from "./enhance-cost";
+import {
+  loadLabSettings,
+  saveLabSettings,
+  type CloudEnhanceSettings,
+  type LabSettings,
+} from "./lab-settings";
 import { CaptionCompareModal } from "./components/CaptionCompareModal";
 import { ClipDropZone } from "./components/ClipDropZone";
 import { DirectorPanel } from "./components/DirectorPanel";
@@ -31,6 +44,7 @@ import { ExperimentsPanel } from "./components/ExperimentsPanel";
 import { PerfPanel } from "./components/PerfPanel";
 import { SceneTimelinePanel } from "./components/SceneTimelinePanel";
 import { SearchPanel } from "./components/SearchPanel";
+import { SettingsDrawer } from "./components/SettingsDrawer";
 import { ShotFilmstrip } from "./components/ShotFilmstrip";
 import { SignalsPanel } from "./components/SignalsPanel";
 import { ShotPreviewModal, type ShotPreview } from "./components/ShotPreviewModal";
@@ -135,32 +149,47 @@ export function PerceptionLabPage() {
     exp: DirectorExperiment | null;
   } | null>(null);
   // Cloud vision opt-in: session-only (deliberately NOT persisted — each
-  // session re-consents) + per-run scope dial.
+  // session re-consents). The run dials (scope / caption model / candidates-
+  // only) live in ONE persisted, versioned settings object (lab-settings.ts),
+  // edited via the settings drawer.
   const [cloudEnabled, setCloudEnabled] = useState(false);
-  const [cloudScope, setCloudScope] = useState<CloudScope>("shots");
-  const [cloudModel, setCloudModel] = useState<CaptionModel>("gpt-5.2");
+  const [labSettings, setLabSettings] = useState<LabSettings>(loadLabSettings);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const updateCloudSettings = useCallback((patch: Partial<CloudEnhanceSettings>) => {
+    setLabSettings((prev) => {
+      const next = { ...prev, cloud: { ...prev.cloud, ...patch } };
+      saveLabSettings(next);
+      return next;
+    });
+  }, []);
+  const cloudScope = labSettings.cloud.scope;
+  const cloudModel = labSettings.cloud.model;
   /**
    * Bulk-enhance selection overrides. Default (no entry): a clip is selected
-   * unless it already has a cloud enhance — so "enhance selected" is
-   * enhance-everything-new out of the box, without silently re-billing
-   * already-enhanced clips.
+   * unless it already has a cloud enhance for the CURRENT (scope, model)
+   * combination — so "enhance selected" is enhance-everything-new out of the
+   * box without silently re-billing enhanced clips, while switching model
+   * re-arms clips that were only enhanced with a different one.
    */
   const [selectedOverride, setSelectedOverride] = useState<Record<string, boolean>>({});
   const [bulkRunning, setBulkRunning] = useState(false);
-  /**
-   * Candidates-only cloud enhance: restrict frame plans to the selector's
-   * candidate shots. Default (no override) is checked as soon as candidates
-   * exist — the whole point of the selector is to stop sending everything.
-   */
-  const [candidatesOnlyOverride, setCandidatesOnlyOverride] = useState<boolean | null>(null);
+  /** Session-scope aux LLM usage (brief suggestions, music brief) — drawer footer. */
+  const [auxUsageLog, setAuxUsageLog] = useState<ModelChatUsage[]>([]);
+  const recordAuxUsage = useCallback(
+    (usage: ModelChatUsage) => setAuxUsageLog((log) => [...log, usage]),
+    [],
+  );
+  const auxSpend = useMemo(() => sumAuxSpend(auxUsageLog), [auxUsageLog]);
 
   const isSelected = useCallback(
-    (clip: LabClip) => selectedOverride[clip.clipId] ?? !clip.dossier?.cloudRuns?.[cloudScope],
-    [selectedOverride, cloudScope],
+    (clip: LabClip) =>
+      selectedOverride[clip.clipId] ?? !hasCloudRun(clip.dossier, cloudScope, cloudModel),
+    [selectedOverride, cloudScope, cloudModel],
   );
 
-  const selectedClips = state.clips.filter(
-    (c) => c.status === "done" && !c.cloud?.busy && isSelected(c),
+  const selectedClips = useMemo(
+    () => state.clips.filter((c) => c.status === "done" && !c.cloud?.busy && isSelected(c)),
+    [state.clips, isSelected],
   );
 
   // clipId -> (shotIndex -> pick) for filmstrip badges, the Signals panel,
@@ -192,17 +221,56 @@ export function PerceptionLabPage() {
   );
 
   const hasCandidates = (selectionSummary?.picks ?? 0) > 0;
-  const candidatesOnly = candidatesOnlyOverride ?? hasCandidates;
+  // Persisted tri-state: explicit on/off, or null = auto (on once candidates
+  // exist — the whole point of the selector is to stop sending everything).
+  const candidatesOnly = labSettings.cloud.candidatesOnly ?? hasCandidates;
 
   // Bulk enhance excludes clips with zero candidate shots when scoped to
   // candidates-only — sending nothing costs nothing, so they're dropped
   // before the count/label, not sent with an empty frame plan.
-  const candidateFilteredClips = candidatesOnly
-    ? selectedClips.filter((c) => (picksByClip.get(c.clipId)?.size ?? 0) > 0)
-    : selectedClips;
+  const candidateFilteredClips = useMemo(
+    () =>
+      candidatesOnly
+        ? selectedClips.filter((c) => (picksByClip.get(c.clipId)?.size ?? 0) > 0)
+        : selectedClips,
+    [candidatesOnly, selectedClips, picksByClip],
+  );
   const skippedForNoCandidates = candidatesOnly
     ? selectedClips.length - candidateFilteredClips.length
     : 0;
+
+  /**
+   * Frame plans for the clips a bulk enhance would send — drives the $
+   * preview next to the enhance button and the re-enhance confirm.
+   * planCloudFrames is pure and deterministic, so the run itself re-plans
+   * identically inside enhanceClip; this preview never drifts from reality.
+   */
+  const bulkPlans = useMemo<ClipFramePlan[]>(() => {
+    if (!cloudEnabled) return [];
+    return candidateFilteredClips.flatMap((c) => {
+      if (!c.dossier) return [];
+      const plan = planCloudFrames(
+        c.dossier,
+        cloudScope,
+        candidatesOnly
+          ? { candidateShotIndexes: new Set(picksByClip.get(c.clipId)?.keys() ?? []) }
+          : {},
+      );
+      return [
+        {
+          clipId: c.clipId,
+          fileName: c.fileName,
+          frames: plan.frames.length,
+          preMergeFrames: plan.preMergeCount,
+        },
+      ];
+    });
+  }, [cloudEnabled, candidateFilteredClips, cloudScope, candidatesOnly, picksByClip]);
+
+  const bulkPreview = useMemo(
+    () => estimateEnhanceCost(bulkPlans, cloudModel),
+    [bulkPlans, cloudModel],
+  );
 
   /** Master selection: explicit all/none, from which any subset is a few clicks. */
   const setAllSelected = useCallback(
@@ -367,6 +435,10 @@ export function PerceptionLabPage() {
       taskId: music.state.taskId,
       tracks: music.state.tracks,
       committedTrackId: music.state.committedTrackId,
+      // Real billed usage of the LLM brief-writer call — absent-key (not an
+      // explicit undefined) when the heuristic fallback wrote the brief, so
+      // old records keep their shape.
+      ...(music.state.briefUsage ? { usage: music.state.briefUsage } : {}),
     };
     exp.updatedAt = Date.now();
     void saveExperiment(exp).catch(() => undefined);
@@ -375,8 +447,21 @@ export function PerceptionLabPage() {
     music.state.committedTrackId,
     music.state.brief,
     music.state.taskId,
+    music.state.briefUsage,
     director,
   ]);
+
+  // Fold the music brief-writer's billed usage into the session aux-spend
+  // indicator. use-music REPLACES briefUsage per successful call, so identity
+  // is the dedupe key (the ref guard also absorbs StrictMode's double effect).
+  const lastMusicBriefUsageRef = useRef<ModelChatUsage | null>(null);
+  useEffect(() => {
+    const usage = music.state.briefUsage;
+    if (usage && lastMusicBriefUsageRef.current !== usage) {
+      lastMusicBriefUsageRef.current = usage;
+      recordAuxUsage(usage);
+    }
+  }, [music.state.briefUsage, recordAuxUsage]);
 
   /** Commit a track from a stored-experiment replay (persists to the record). */
   const commitReplayTrack = useCallback((trackId: string) => {
@@ -546,6 +631,23 @@ export function PerceptionLabPage() {
   const enhanceSelected = useCallback(async () => {
     const ids = candidateFilteredClips.map((c) => c.clipId);
     if (ids.length === 0) return;
+    // Spend guardrail: re-running a (scope, model) combination replaces its
+    // archived captions — and a candidates-only re-run can shrink a fuller
+    // archive. One confirm carries both warnings plus the run's $ preview.
+    const planByClip = new Map(bulkPlans.map((p) => [p.clipId, p]));
+    const impact = assessReEnhance(
+      candidateFilteredClips.map((c) => ({
+        clipId: c.clipId,
+        fileName: c.fileName,
+        frames: planByClip.get(c.clipId)?.frames ?? 0,
+        preMergeFrames: planByClip.get(c.clipId)?.preMergeFrames ?? 0,
+        dossier: c.dossier,
+      })),
+      cloudScope,
+      cloudModel,
+    );
+    const confirmMsg = buildReEnhanceConfirm(impact, cloudScope, cloudModel, bulkPreview);
+    if (confirmMsg && !window.confirm(confirmMsg)) return;
     setBulkRunning(true);
     try {
       let next = 0;
@@ -570,7 +672,58 @@ export function PerceptionLabPage() {
     } finally {
       setBulkRunning(false);
     }
-  }, [candidateFilteredClips, enhanceClip, cloudScope, cloudModel, candidatesOnly, picksByClip]);
+  }, [
+    candidateFilteredClips,
+    bulkPlans,
+    bulkPreview,
+    enhanceClip,
+    cloudScope,
+    cloudModel,
+    candidatesOnly,
+    picksByClip,
+  ]);
+
+  /**
+   * Single-clip enhance from a filmstrip row — same guardrail as the bulk
+   * path: re-running the current (scope, model) must be confirmed (with the
+   * $ preview and shrink warning) before it replaces archived captions.
+   * First-time enhances run straight through.
+   */
+  const confirmAndEnhanceClip = useCallback(
+    (clip: LabClip) => {
+      const clipPicks = picksByClip.get(clip.clipId);
+      const candidateShotIndexes =
+        candidatesOnly && clipPicks ? new Set(clipPicks.keys()) : undefined;
+      if (clip.dossier) {
+        const plan = planCloudFrames(
+          clip.dossier,
+          cloudScope,
+          candidateShotIndexes ? { candidateShotIndexes } : {},
+        );
+        const target = {
+          clipId: clip.clipId,
+          fileName: clip.fileName,
+          frames: plan.frames.length,
+          preMergeFrames: plan.preMergeCount,
+          dossier: clip.dossier,
+        };
+        const confirmMsg = buildReEnhanceConfirm(
+          assessReEnhance([target], cloudScope, cloudModel),
+          cloudScope,
+          cloudModel,
+          estimateEnhanceCost([target], cloudModel),
+        );
+        if (confirmMsg && !window.confirm(confirmMsg)) return;
+      }
+      void enhanceClip(
+        clip.clipId,
+        cloudScope,
+        cloudModel,
+        candidateShotIndexes ? { candidateShotIndexes } : undefined,
+      );
+    },
+    [picksByClip, candidatesOnly, cloudScope, cloudModel, enhanceClip],
+  );
 
   /** Digest the analyzed footage and ask for grounded brief-angle suggestions. */
   const requestBriefSuggestions = useCallback(
@@ -580,9 +733,11 @@ export function PerceptionLabPage() {
         throw new Error("No analyzed clips yet — drop footage first.");
       }
       const digest = buildFootageDigest(dossiers);
-      return suggestBriefs(digest, targetS, stylePresetById(styleId));
+      // recordAuxUsage: billed usage lands in the session aux-spend indicator
+      // (settings drawer footer) even when the reply fails to parse.
+      return suggestBriefs(digest, targetS, stylePresetById(styleId), undefined, recordAuxUsage);
     },
-    [getDossiers, styleId],
+    [getDossiers, styleId, recordAuxUsage],
   );
 
   const searchReady =
@@ -637,44 +792,14 @@ export function PerceptionLabPage() {
                 </span>
               </span>
             </label>
-            {cloudEnabled && (
-              <select
-                className="bg-background-secondary border border-border rounded px-1.5 py-0.5 text-text-primary"
-                value={cloudScope}
-                onChange={(e) => setCloudScope(e.target.value as CloudScope)}
-                title="How much to send per enhance: one frame per shot, or the full sampled timeline"
-              >
-                <option value="shots">shots only</option>
-                <option value="timeline">full timeline</option>
-              </select>
-            )}
-            {cloudEnabled && (
-              <select
-                className="bg-background-secondary border border-border rounded px-1.5 py-0.5 text-text-primary"
-                value={cloudModel}
-                onChange={(e) => setCloudModel(e.target.value as CaptionModel)}
-                title="Caption model: 5.2 = flagship; 5.4-mini ~3x cheaper; 5.4-nano ~11x cheaper; qwen3-vl via OpenRouter = open-weights ladder (235b ≈ frontier at ~1/5 of mini's output price). Runs per model coexist for comparison."
-              >
-                {CAPTION_MODELS.map((m) => (
-                  <option key={m} value={m}>
-                    {shortModelLabel(m)}
-                  </option>
-                ))}
-              </select>
-            )}
-            {cloudEnabled && hasCandidates && (
-              <label
-                className="flex items-center gap-1 cursor-pointer select-none text-amber-500"
-                title="Restrict cloud enhance to the signal-stack selector's candidate shots — cheaper, focused on what the director will actually see highlighted"
-              >
-                <input
-                  type="checkbox"
-                  checked={candidatesOnly}
-                  onChange={(e) => setCandidatesOnlyOverride(e.target.checked)}
-                />
-                ★ candidates only
-              </label>
-            )}
+            <button
+              className="px-2 py-0.5 rounded border border-border text-text-secondary hover:text-text-primary"
+              onClick={() => setSettingsOpen(true)}
+              title="Enhance settings — scope, caption model, candidates-only. Persisted on this device."
+            >
+              ⚙ {cloudScope === "shots" ? "shots" : "timeline"} · {shortModelLabel(cloudModel)}
+              {candidatesOnly ? " · ★" : ""}
+            </button>
             {cloudEnabled && state.clips.some((c) => c.status === "done") && (
               <>
                 <span className="inline-flex rounded border border-border overflow-hidden">
@@ -707,6 +832,14 @@ export function PerceptionLabPage() {
                     ? "enhancing…"
                     : `enhance ${candidateFilteredClips.length} selected`}
                 </button>
+                {!bulkRunning && candidateFilteredClips.length > 0 && (
+                  <span
+                    className="text-text-secondary"
+                    title="Estimated before anything is sent: measured per-frame token profile × current model pricing. 340→212 = frames before→after the blur gate + static-span merge."
+                  >
+                    {formatCostPreview(bulkPreview)}
+                  </span>
+                )}
               </>
             )}
           </div>
@@ -737,19 +870,7 @@ export function PerceptionLabPage() {
                     highlights={highlightsByClip.get(clip.clipId) ?? new Map()}
                     picks={clipPicks}
                     onShotClick={(shot) => openPreview(clip.clipId, clip.fileName, shot)}
-                    onEnhance={
-                      cloudEnabled
-                        ? () =>
-                            void enhanceClip(
-                              clip.clipId,
-                              cloudScope,
-                              cloudModel,
-                              candidatesOnly && clipPicks
-                                ? { candidateShotIndexes: new Set(clipPicks.keys()) }
-                                : undefined,
-                            )
-                        : null
-                    }
+                    onEnhance={cloudEnabled ? () => confirmAndEnhanceClip(clip) : null}
                     enhanceDisabledReason={
                       noCandidatesForClip ? "no candidate shots in this clip" : null
                     }
@@ -828,10 +949,22 @@ export function PerceptionLabPage() {
           </div>
         )}
       </div>
+      {settingsOpen && (
+        <SettingsDrawer
+          settings={labSettings}
+          onCloudChange={updateCloudSettings}
+          hasCandidates={hasCandidates}
+          candidatesOnlyEffective={candidatesOnly}
+          auxSpend={auxSpend}
+          onClose={() => setSettingsOpen(false)}
+        />
+      )}
       {preview && <ShotPreviewModal preview={preview} onClose={() => setPreview(null)} />}
       {compareClip && (
         <CaptionCompareModal
           clip={compareClip}
+          clips={state.clips}
+          onSelectClip={setCompareClip}
           onClose={() => setCompareClip(null)}
           onJumpTo={(t) => {
             setCompareClip(null);

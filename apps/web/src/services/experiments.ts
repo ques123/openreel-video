@@ -10,18 +10,62 @@ import {
   StorageEngine,
   type ChatMessage,
   type DirectorActivity,
+  type DurationViolation,
   type MusicBrief,
   type PromptSources,
   type Storyboard,
+  type StoryboardMetrics,
 } from "@openreel/core";
 import { estimateCostUSD, fmtUSD } from "./model-pricing";
+import type { ModelChatUsage } from "./openai-proxy";
 import type { SunoTrack } from "./suno";
 
 const EXP_PREFIX = "director-exp:";
 const VIDEO_PREFIX = "director-exp-video:";
 const INDEX_KEY = "director-exp:index";
 /** Keep the most recent N experiments (each can be a few hundred KB of text). */
-const MAX_EXPERIMENTS = 200;
+export const MAX_EXPERIMENTS = 200;
+/** Start warning this close to the cap (saves past the cap evict permanently). */
+export const EXPERIMENT_CAP_WARN_AT = 190;
+
+/**
+ * Human-readable near-cap warning for the experiments list, or null while
+ * comfortably under the cap. Surfaced because eviction is otherwise silent
+ * AND destructive: the save that lands past MAX_EXPERIMENTS permanently
+ * deletes the oldest run and its rendered video (see saveExperiment).
+ */
+export function evictionWarning(count: number): string | null {
+  if (count < EXPERIMENT_CAP_WARN_AT) return null;
+  return (
+    `${count}/${MAX_EXPERIMENTS} stored — ` +
+    (count >= MAX_EXPERIMENTS
+      ? "every new run permanently deletes the oldest run and its rendered video."
+      : "oldest runs (and their rendered videos) are permanently deleted on save once the cap is hit.") +
+    " Export anything you want to keep."
+  );
+}
+
+/**
+ * Case-insensitive substring filter shared by the experiment pickers
+ * (Experiments panel, matrix run picker): matches brief, storyboard title,
+ * director model, caption models and brief angle. Blank query matches all.
+ */
+export function matchesExperimentFilter(
+  s: {
+    brief: string;
+    title?: string | null;
+    model: string;
+    captionModels?: string;
+    briefAngle?: string;
+  },
+  query: string,
+): boolean {
+  const q = query.trim().toLowerCase();
+  if (!q) return true;
+  return [s.brief, s.title ?? "", s.model, s.captionModels ?? "", s.briefAngle ?? ""].some(
+    (field) => field.toLowerCase().includes(q),
+  );
+}
 
 export interface ExperimentClipRef {
   /** Session-scoped id used inside messages/storyboard items. */
@@ -75,9 +119,21 @@ export interface DirectorExperiment {
   activity: DirectorActivity[];
   storyboard: Storyboard | null;
   warnings: string[];
-  usage: { promptTokens: number; completionTokens: number; calls: number };
+  usage: {
+    promptTokens: number;
+    completionTokens: number;
+    calls: number;
+    /** Prompt tokens served from provider cache (subset of promptTokens). */
+    cachedTokens?: number;
+  };
   /** Total LLM wall-clock across the conversation so far. */
   durationMs: number;
+  /** Zero-inference quality metrics of the accepted storyboard (see computeStoryboardMetrics). */
+  metrics?: StoryboardMetrics;
+  /** Set when the accepted cut missed the ±10% duration target (see DirectorLoopResult). */
+  durationViolation?: DurationViolation | null;
+  /** Usage of auxiliary LLM calls billed to this run (brief suggestions, music brief). */
+  auxUsage?: ModelChatUsage[];
   /** Captioning cost/time behind the run's active sources; absent = never computed (legacy). */
   captionStats?: ExperimentCaptionStats;
   /**
@@ -91,6 +147,8 @@ export interface DirectorExperiment {
     taskId: string;
     tracks: SunoTrack[];
     committedTrackId: string | null;
+    /** Usage of the LLM call that wrote the brief; absent = heuristic fallback/legacy. */
+    usage?: ModelChatUsage;
   };
 }
 
@@ -112,6 +170,10 @@ export interface ExperimentSummary {
   /** Director LLM token totals, for the at-a-glance menu row. */
   promptTokens?: number;
   completionTokens?: number;
+  /** Prompt tokens served from provider cache (subset of promptTokens). */
+  cachedTokens?: number;
+  /** Auxiliary LLM usage billed to the run (brief suggestions, music brief). */
+  auxUsage?: ModelChatUsage[];
   /** Total LLM wall-clock across the conversation so far. */
   durationMs?: number;
   /** Captioning cost/time behind the run's active sources. */
@@ -168,27 +230,66 @@ export function experimentCaptionCostUSD(s: {
 }
 
 /**
- * Compact "director model · tokens ≈$ · gen time · caption models · caption
- * tokens ≈$ · cap time" line; omits missing/unpriceable pieces (legacy
- * records — durationMs in particular predates some runs, so it's dropped
- * silently rather than showing "gen 0s"). Both durations are labeled ("gen"
- * for the director's LLM wall-clock, "cap" for captioning) since the line
- * carries two independent timings once both are present.
+ * All auxiliary LLM usage billed to a run — the recorded auxUsage list plus
+ * the music-brief call (stored on music.usage) — flattened into one list so
+ * summaries and cost lines account for every call the run made.
+ */
+export function experimentAuxUsage(exp: {
+  auxUsage?: ModelChatUsage[];
+  music?: { usage?: ModelChatUsage };
+}): ModelChatUsage[] {
+  return [...(exp.auxUsage ?? []), ...(exp.music?.usage ? [exp.music.usage] : [])];
+}
+
+/**
+ * Summed USD cost of auxiliary calls; null when none is priceable (same
+ * never-guess semantics as experimentCaptionCostUSD).
+ */
+export function experimentAuxCostUSD(aux: ModelChatUsage[]): number | null {
+  let total = 0;
+  let any = false;
+  for (const u of aux) {
+    const cost = estimateCostUSD(u.model, u.promptTokens, u.completionTokens, u.cachedTokens);
+    if (cost !== null) {
+      total += cost;
+      any = true;
+    }
+  }
+  return any ? total : null;
+}
+
+/**
+ * Compact "director model · tokens (cached) ≈$ · gen time · caption models ·
+ * caption tokens ≈$ · cap time · aux tokens ≈$" line; omits missing/
+ * unpriceable pieces (legacy records — durationMs in particular predates some
+ * runs, so it's dropped silently rather than showing "gen 0s"). Both
+ * durations are labeled ("gen" for the director's LLM wall-clock, "cap" for
+ * captioning) since the line carries two independent timings once both are
+ * present. cachedTokens (when recorded) both discounts the director ≈$ and is
+ * shown inline so cache effectiveness is visible per run; aux covers the
+ * side calls (brief suggestions, music brief) so the line is the run's total.
  */
 export function experimentCostLine(s: {
   model: string;
   promptTokens?: number;
   completionTokens?: number;
+  cachedTokens?: number;
   durationMs?: number;
   captionModels?: string;
   captionStats?: ExperimentCaptionStats;
+  auxUsage?: ModelChatUsage[];
 }): string | null {
   const parts: string[] = [];
   if (s.model) parts.push(s.model);
   const directorTok = (s.promptTokens ?? 0) + (s.completionTokens ?? 0);
   if (directorTok > 0) {
-    const dirCost = estimateCostUSD(s.model, s.promptTokens ?? 0, s.completionTokens ?? 0);
-    parts.push(`${fmtTokens(directorTok)} tok${dirCost !== null ? ` ≈${fmtUSD(dirCost)}` : ""}`);
+    const cached = s.cachedTokens ?? 0;
+    const dirCost = estimateCostUSD(s.model, s.promptTokens ?? 0, s.completionTokens ?? 0, cached);
+    parts.push(
+      `${fmtTokens(directorTok)} tok` +
+        (cached > 0 ? ` (${fmtTokens(cached)} cached)` : "") +
+        (dirCost !== null ? ` ≈${fmtUSD(dirCost)}` : ""),
+    );
   }
   if (s.durationMs) parts.push(`gen ${fmtDurationMs(s.durationMs)}`);
   if (s.captionModels) parts.push(s.captionModels);
@@ -201,6 +302,12 @@ export function experimentCostLine(s: {
     }
     const capMs = stats.cloudMs + stats.localMs;
     if (capMs > 0) parts.push(`cap ${fmtDurationMs(capMs)}`);
+  }
+  const aux = s.auxUsage ?? [];
+  const auxTok = aux.reduce((sum, u) => sum + u.promptTokens + u.completionTokens, 0);
+  if (auxTok > 0) {
+    const auxCost = experimentAuxCostUSD(aux);
+    parts.push(`aux ${fmtTokens(auxTok)} tok${auxCost !== null ? ` ≈${fmtUSD(auxCost)}` : ""}`);
   }
   return parts.length > 0 ? parts.join(" · ") : null;
 }
@@ -220,6 +327,7 @@ function fromBuffer<T>(data: ArrayBuffer): T {
 }
 
 function summarize(exp: DirectorExperiment, prev?: ExperimentSummary): ExperimentSummary {
+  const aux = experimentAuxUsage(exp);
   return {
     id: exp.id,
     at: exp.at,
@@ -236,6 +344,10 @@ function summarize(exp: DirectorExperiment, prev?: ExperimentSummary): Experimen
     videoAt: prev?.videoAt,
     promptTokens: exp.usage.promptTokens,
     completionTokens: exp.usage.completionTokens,
+    // Absent-key convention (matches briefAngle/styleId): legacy records
+    // without cache/aux tracking keep their shape unchanged in the index.
+    ...(exp.usage.cachedTokens !== undefined ? { cachedTokens: exp.usage.cachedTokens } : {}),
+    ...(aux.length > 0 ? { auxUsage: aux } : {}),
     durationMs: exp.durationMs,
     captionStats: exp.captionStats,
   };
@@ -256,6 +368,9 @@ async function backfillIndex(index: ExperimentSummary[]): Promise<boolean> {
     if (!full) continue;
     entry.promptTokens = full.usage.promptTokens;
     entry.completionTokens = full.usage.completionTokens;
+    if (full.usage.cachedTokens !== undefined) entry.cachedTokens = full.usage.cachedTokens;
+    const aux = experimentAuxUsage(full);
+    if (aux.length > 0) entry.auxUsage = aux;
     entry.durationMs = full.durationMs;
     if (full.captionStats) entry.captionStats = full.captionStats;
     changed = true;
@@ -362,4 +477,71 @@ export async function deleteExperiment(id: string): Promise<void> {
     timestamp: Date.now(),
     size: indexData.byteLength,
   });
+}
+
+/** Delete EVERY stored experiment record, rendered video and the index. */
+export async function deleteAllExperiments(): Promise<void> {
+  const index = await listExperiments();
+  for (const e of index) {
+    await storage.deleteCache(EXP_PREFIX + e.id).catch(() => undefined);
+    await storage.deleteCache(VIDEO_PREFIX + e.id).catch(() => undefined);
+  }
+  await storage.deleteCache(INDEX_KEY).catch(() => undefined);
+}
+
+/**
+ * Delete every rendered experiment video while keeping the runs themselves
+ * (a stored run re-renders on demand from its storyboard + source files).
+ * Clears the index's videoAt markers so the UI stops advertising renders.
+ */
+export async function deleteAllExperimentVideos(): Promise<void> {
+  const index = await listExperiments();
+  for (const e of index) {
+    // Unconditional: legacy entries may hold a video without a videoAt flag.
+    await storage.deleteCache(VIDEO_PREFIX + e.id).catch(() => undefined);
+    delete e.videoAt;
+  }
+  await writeIndex(index);
+}
+
+/**
+ * Portable JSON export of experiment records — the escape hatch for the
+ * MAX_EXPERIMENTS eviction cap. Contains everything persisted per run
+ * (settings, verbatim conversation, activity log, storyboard, usage/cost).
+ * Rendered debug videos are deliberately NOT included: they are large binary
+ * blobs; re-render from the storyboard + source files instead.
+ */
+export interface ExperimentsExport {
+  kind: "openreel-director-experiments";
+  version: 1;
+  exportedAt: number;
+  /** What the export deliberately leaves out (rendered videos). */
+  excludes: string;
+  experiments: DirectorExperiment[];
+}
+
+export function buildExperimentsExport(experiments: DirectorExperiment[]): ExperimentsExport {
+  return {
+    kind: "openreel-director-experiments",
+    version: 1,
+    exportedAt: Date.now(),
+    excludes:
+      "rendered debug videos (large binaries) — re-render from storyboard + source files",
+    experiments,
+  };
+}
+
+/**
+ * Load full records for `ids` (default: every indexed experiment) and build
+ * the export payload. Unreadable records are skipped silently — an export
+ * that saves 199 of 200 runs beats one that fails outright.
+ */
+export async function collectExperimentsExport(ids?: string[]): Promise<ExperimentsExport> {
+  const targetIds = ids ?? (await listExperiments()).map((e) => e.id);
+  const experiments: DirectorExperiment[] = [];
+  for (const id of targetIds) {
+    const exp = await loadExperiment(id);
+    if (exp) experiments.push(exp);
+  }
+  return buildExperimentsExport(experiments);
 }
