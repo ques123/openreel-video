@@ -93,6 +93,10 @@ export interface CloudRunMeta {
   /** Real usage summed across the run's API calls (0 when unreported). */
   promptTokens: number;
   completionTokens: number;
+  /** Prompt tokens served from provider cache (subset of promptTokens). */
+  cachedTokens?: number;
+  /** In-scope frame count before blur-gate/similarity merge (lever-1 datum). */
+  preMergeCount?: number;
 }
 
 /** Local caption pass stats (speed side of the local-vs-cloud comparison). */

@@ -6,7 +6,7 @@ export function makeShot(
   index: number,
   tStart: number,
   tEnd: number,
-  opts: Partial<Pick<Shot, "thumbnailDataUrl" | "caption" | "cloudCaption">> & {
+  opts: Partial<Pick<Shot, "thumbnailDataUrl" | "caption" | "cloudCaption" | "embedding">> & {
     motion?: number;
     sharpness?: number;
   } = {},
@@ -17,7 +17,7 @@ export function makeShot(
     tEnd,
     repFrameTime: (tStart + tEnd) / 2,
     thumbnailDataUrl: opts.thumbnailDataUrl ?? `thumb-${index}`,
-    embedding: null,
+    embedding: opts.embedding ?? null,
     frameEmbeddings: [],
     caption: opts.caption ?? null,
     cloudCaption: opts.cloudCaption ?? null,

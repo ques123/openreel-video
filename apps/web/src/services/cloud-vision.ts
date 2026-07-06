@@ -10,11 +10,28 @@
  */
 
 import type { CloudFrame, DenseCaption } from "@openreel/core";
-import { apiBaseForModel, DIRECTOR_MODEL } from "./openai-proxy";
+import { apiBaseForModel, DIRECTOR_MODEL, parseChatUsage, type RawChatUsage } from "./openai-proxy";
 
-const BATCH_SIZE = 8;
+const BATCH_SIZE = 16;
 /** Concurrent batch requests: ~6x wall-clock at identical cost. */
 const CONCURRENCY = 5;
+
+/**
+ * Per-request watchdog: without one, a single stalled request parks a worker
+ * loop forever and the bulk Promise.all never resolves. Scaled to batch size
+ * (completion length grows with frame count); an expired timer aborts the
+ * fetch, which the worker treats as a normal retryable failure. 16 frames ->
+ * ~62s, comfortably above a slow-but-live batch, far below "hung".
+ */
+const BATCH_TIMEOUT_BASE_MS = 30_000;
+const BATCH_TIMEOUT_PER_FRAME_MS = 2_000;
+
+/**
+ * Completion budget per frame: a caption is 1-3 sentences (~60-80 tokens)
+ * plus JSON overhead, so 200 leaves ~2.5x headroom while bounding a runaway
+ * response (a model stuck repeating itself) at batch scale.
+ */
+const MAX_COMPLETION_TOKENS_PER_FRAME = 200;
 
 /**
  * Caption-capable models offered in the UI. Bare ids run through the OpenAI
@@ -48,10 +65,30 @@ interface ContentPart {
   image_url?: { url: string; detail: "low" | "high" };
 }
 
-interface BatchResult {
-  captions: DenseCaption[];
+interface BatchUsage {
   promptTokens: number;
   completionTokens: number;
+  cachedTokens: number;
+}
+
+interface BatchResult extends BatchUsage {
+  captions: DenseCaption[];
+}
+
+/**
+ * A batch whose reply was unusable (invalid/strict-JSON miss, zero captions)
+ * AFTER the provider billed it: carries the real usage so a retried/skipped
+ * batch still lands in cost accounting instead of being double-billed with
+ * zero recorded.
+ */
+class BatchFailedError extends Error {
+  constructor(
+    message: string,
+    readonly usage: BatchUsage | null,
+  ) {
+    super(message);
+    this.name = "BatchFailedError";
+  }
 }
 
 async function describeBatch(
@@ -78,6 +115,12 @@ async function describeBatch(
     ),
   ];
 
+  // Runaway-output guard, scaled to batch size. OpenAI's newer models accept
+  // only max_completion_tokens; OpenRouter normalizes max_tokens for everyone.
+  const maxTokens = frames.length * MAX_COMPLETION_TOKENS_PER_FRAME;
+  const timeout = AbortSignal.timeout(
+    BATCH_TIMEOUT_BASE_MS + frames.length * BATCH_TIMEOUT_PER_FRAME_MS,
+  );
   const res = await fetch(`${apiBaseForModel(model)}/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -85,8 +128,11 @@ async function describeBatch(
       model,
       messages: [{ role: "user", content }],
       response_format: { type: "json_object" },
+      ...(model.includes("/")
+        ? { max_tokens: maxTokens }
+        : { max_completion_tokens: maxTokens }),
     }),
-    signal,
+    signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
@@ -102,10 +148,18 @@ async function describeBatch(
   }
   const data = (await res.json()) as {
     choices?: { message?: { content?: string } }[];
-    usage?: { prompt_tokens?: number; completion_tokens?: number };
+    usage?: RawChatUsage;
   };
+  // The provider bills a batch even when its reply is unusable — capture
+  // usage BEFORE any parse/validation throw so it survives the failure.
+  const usage = parseChatUsage(data.usage);
   const raw = data.choices?.[0]?.message?.content ?? "";
-  const parsed = JSON.parse(raw) as { captions?: { i?: number; text?: string }[] };
+  let parsed: { captions?: { i?: number; text?: string }[] };
+  try {
+    parsed = JSON.parse(raw) as { captions?: { i?: number; text?: string }[] };
+  } catch {
+    throw new BatchFailedError("cloud vision returned invalid JSON", usage);
+  }
   const out: DenseCaption[] = [];
   for (const c of parsed.captions ?? []) {
     const idx = (c.i ?? 0) - 1;
@@ -113,11 +167,12 @@ async function describeBatch(
       out.push({ t: frames[idx].t, text: c.text.trim() });
     }
   }
-  if (out.length === 0) throw new Error("cloud vision returned no captions");
+  if (out.length === 0) throw new BatchFailedError("cloud vision returned no captions", usage);
   return {
     captions: out,
-    promptTokens: data.usage?.prompt_tokens ?? 0,
-    completionTokens: data.usage?.completion_tokens ?? 0,
+    promptTokens: usage?.promptTokens ?? 0,
+    completionTokens: usage?.completionTokens ?? 0,
+    cachedTokens: usage?.cachedTokens ?? 0,
   };
 }
 
@@ -128,9 +183,15 @@ export interface CloudVisionRun {
   model: string;
   /** Wall-clock for the whole run. */
   ms: number;
-  /** Real usage summed across batches (0 when the API omits it). */
+  /**
+   * Real usage summed across batches (0 when the API omits it). INCLUDES
+   * failed-then-retried/skipped batches whose response carried usage —
+   * billed is billed, whether or not the captions were usable.
+   */
   promptTokens: number;
   completionTokens: number;
+  /** Prompt tokens served from the provider's cache (subset of promptTokens). */
+  cachedTokens: number;
 }
 
 export async function describeFramesCloud(
@@ -144,11 +205,20 @@ export async function describeFramesCloud(
   let framesFailed = 0;
   let promptTokens = 0;
   let completionTokens = 0;
+  let cachedTokens = 0;
   let framesDone = 0;
+  const absorbUsage = (u: BatchUsage) => {
+    promptTokens += u.promptTokens;
+    completionTokens += u.completionTokens;
+    cachedTokens += u.cachedTokens;
+  };
   const absorb = (b: BatchResult) => {
     captions.push(...b.captions);
-    promptTokens += b.promptTokens;
-    completionTokens += b.completionTokens;
+    absorbUsage(b);
+  };
+  /** A failed attempt that still carried usage was still billed — record it. */
+  const absorbFailure = (err: unknown) => {
+    if (err instanceof BatchFailedError && err.usage) absorbUsage(err.usage);
   };
 
   const batches: CloudFrame[][] = [];
@@ -168,9 +238,11 @@ export async function describeFramesCloud(
         absorb(await describeBatch(batch, model, signal));
       } catch (err) {
         if (signal?.aborted) throw err;
+        absorbFailure(err);
         try {
           absorb(await describeBatch(batch, model, signal)); // one retry
-        } catch {
+        } catch (retryErr) {
+          absorbFailure(retryErr);
           framesFailed += batch.length;
         }
       }
@@ -193,5 +265,6 @@ export async function describeFramesCloud(
     ms: Math.round(performance.now() - startMs),
     promptTokens,
     completionTokens,
+    cachedTokens,
   };
 }

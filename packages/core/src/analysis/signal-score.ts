@@ -10,7 +10,9 @@
  * reproducible and unit-tested.
  */
 
+import { similarCaptions } from "./caption-text";
 import { dot } from "./shot-metrics";
+import type { StylePreset } from "./style-presets";
 import type { AudioEvent, ClipDossier, Shot, TranscriptSegment } from "./types";
 
 export interface SelectorWeights {
@@ -24,14 +26,38 @@ export interface SelectorWeights {
   aesthetic: number;
 }
 
+/**
+ * What happens to a shot whose sharpness falls below gate.minSharpness:
+ * - "exclude": hard gate — the shot can never be picked (standard presets).
+ * - "penalize": the shot stays a candidate but its composite score is docked
+ *   by up to gate.softFocusPenalty, linear in the shortfall — soft/artistic
+ *   frames (mist, shallow focus, motion blur) survive for presets that want
+ *   them (see selectorConfigForPreset / StylePreset.allowSoftFocus).
+ */
+export type SharpnessGateMode = "exclude" | "penalize";
+
+/**
+ * The full tuning surface of the selector — everything a tuning UI would
+ * bind to. Every field is honored by selectCandidates (and the pieces it
+ * delegates to: segmentChapters, scoreShots).
+ */
 export interface SelectorConfig {
   weights: SelectorWeights;
   /** Shots failing these are gated out before scoring (reason recorded). */
   gate: {
     /** Laplacian variance floor for the shot's rep frame. */
     minSharpness: number;
-    /** Minimum shot duration, seconds. */
+    /** Minimum shot duration, seconds. Always a hard gate. */
     minShotS: number;
+    /** How a below-minSharpness shot is treated (see SharpnessGateMode). */
+    sharpnessMode: SharpnessGateMode;
+    /**
+     * Max composite-score deduction in "penalize" mode (applied in full at
+     * sharpness 0, scaling linearly to 0 at minSharpness). Composite scores
+     * live in 0..1, so 0.25 means a fully-blurry shot must beat sharp rivals
+     * by a quarter of the scale on its other signals. Unused in "exclude".
+     */
+    softFocusPenalty: number;
   };
   /** recordedAt gap between consecutive clips that starts a new chapter, minutes. */
   chapterGapMinutes: number;
@@ -48,12 +74,27 @@ export interface SelectorConfig {
 
 export const DEFAULT_SELECTOR_CONFIG: SelectorConfig = {
   weights: { motion: 0.3, audio: 0.3, speech: 0.25, aesthetic: 0.15 },
-  gate: { minSharpness: 40, minShotS: 0.8 },
+  gate: { minSharpness: 40, minShotS: 0.8, sharpnessMode: "exclude", softFocusPenalty: 0.25 },
   chapterGapMinutes: 25,
   topPerChapter: 6,
   uniquenessPenalty: 0.35,
   keywords: [],
 };
+
+/**
+ * Preset-aware selector config: presets that embrace soft/artistic frames
+ * (StylePreset.allowSoftFocus) get the blurry hard-gate converted into a
+ * scoring penalty so deliberately soft shots stay candidates; every other
+ * preset (and no preset) keeps `base` unchanged.
+ */
+export function selectorConfigForPreset(
+  preset: Pick<StylePreset, "allowSoftFocus"> | null | undefined,
+  base: SelectorConfig = DEFAULT_SELECTOR_CONFIG,
+): SelectorConfig {
+  if (!preset?.allowSoftFocus) return base;
+  if (base.gate.sharpnessMode === "penalize") return base;
+  return { ...base, gate: { ...base.gate, sharpnessMode: "penalize" } };
+}
 
 /** Per-component contributions, each normalized to 0..1 across the footage set. */
 export interface ShotScoreComponents {
@@ -72,7 +113,14 @@ export interface ShotScore {
   /** Human-readable gate reasons, e.g. "blurry (sharpness 12 < 40)". */
   gateReasons: string[];
   components: ShotScoreComponents;
-  /** Weighted composite of components, 0..1. */
+  /**
+   * Composite-score deduction applied because the shot fell below
+   * minSharpness in "penalize" mode — already subtracted from `score`,
+   * recorded so the UI can explain the shot's rank. 0 (or absent, for
+   * hand-built fixtures) when no penalty applied.
+   */
+  softPenalty?: number;
+  /** Weighted composite of components (minus softPenalty), 0..1. */
   score: number;
 }
 
@@ -109,6 +157,70 @@ export interface SelectionResult {
   scores: ShotScore[];
   /** Picks ordered by chapter then rank. */
   picks: CandidatePick[];
+}
+
+// ---------------------------------------------------------------------------
+// sharpness pipeline buckets
+// ---------------------------------------------------------------------------
+
+/**
+ * Sharpness (Laplacian variance) is measured on ~512px scan frames, but the
+ * pixels arriving at 512px depend on the pipeline that produced them. A DJI
+ * .LRF proxy is ~720p, heavily compressed, and only mildly downscaled to
+ * 512 (~1.4×) — codec smoothing survives the resize and Laplacian variances
+ * read systematically LOWER than the same scene analyzed from a 1080p/4K
+ * original, whose aggressive downscale (~4–8×) steepens edges and averages
+ * noise. Judging both buckets with one constant over-rejects proxy-analyzed
+ * footage, so proxy-bucket values are re-expressed on the full-res scale by
+ * this factor before gating and normalization. The full-res bucket uses
+ * scale 1 (behavior there is bit-identical to before). The magnitude is a
+ * considered estimate, NOT a measurement — revisit with paired LRF/original
+ * footage when available.
+ */
+export const PROXY_SHARPNESS_SCALE = 1.6;
+
+/** The shot's sharpness on the full-res scale (see PROXY_SHARPNESS_SCALE). */
+function bucketSharpness(dossier: ClipDossier, shot: Shot): number {
+  return dossier.analyzedFromProxy
+    ? shot.quality.sharpness * PROXY_SHARPNESS_SCALE
+    : shot.quality.sharpness;
+}
+
+// ---------------------------------------------------------------------------
+// transcript hallucination collapse
+// ---------------------------------------------------------------------------
+
+/**
+ * Coverage weight for a transcript segment that near-duplicates the segment
+ * that started its run. Whisper hallucination loops (wind noise, silence →
+ * the same phrase over and over) would otherwise count as wall-to-wall
+ * speech and turn junk into a ★ pick "why: speech". Non-zero because real
+ * speakers do repeat themselves once or twice — a single echo costs little,
+ * a 20× loop collapses to almost nothing.
+ */
+export const REPEATED_SPEECH_WEIGHT = 0.15;
+
+/**
+ * Per-segment coverage weights for speech scoring, aligned by index with
+ * `transcript`: 1 for the first segment of a run of near-duplicate texts,
+ * REPEATED_SPEECH_WEIGHT for each repeat. "Near-duplicate" is the same
+ * word-set Jaccard used to merge dense captions (caption-text.ts), so
+ * punctuation/filler variations still collapse while real varied speech is
+ * untouched. A genuinely new phrase starts a fresh run (weight 1).
+ */
+export function transcriptSpeechWeights(transcript: TranscriptSegment[]): number[] {
+  const weights: number[] = new Array(transcript.length);
+  let exemplar: string | null = null;
+  for (let i = 0; i < transcript.length; i += 1) {
+    const text = transcript[i].text;
+    if (exemplar !== null && similarCaptions(exemplar, text)) {
+      weights[i] = REPEATED_SPEECH_WEIGHT;
+    } else {
+      weights[i] = 1;
+      exemplar = text;
+    }
+  }
+  return weights;
 }
 
 // ---------------------------------------------------------------------------
@@ -190,16 +302,25 @@ function computeAudioComponent(
   return normalized * scale;
 }
 
+/**
+ * Fraction of the shot covered by transcript segments, with near-duplicate
+ * repeats down-weighted (see transcriptSpeechWeights) so hallucination loops
+ * don't read as dense speech. A keyword hit still boosts to 1 regardless —
+ * keywords are an explicit user ask.
+ */
 function computeSpeechComponent(
   shot: Shot,
   transcript: TranscriptSegment[],
+  segmentWeights: number[],
   keywords: string[],
 ): number {
   const duration = shot.tEnd - shot.tStart;
   if (duration <= 0) return 0;
   let covered = 0;
-  for (const segment of transcript) {
-    covered += overlapSeconds(shot.tStart, shot.tEnd, segment.t0, segment.t1);
+  for (let i = 0; i < transcript.length; i += 1) {
+    const segment = transcript[i];
+    covered +=
+      overlapSeconds(shot.tStart, shot.tEnd, segment.t0, segment.t1) * (segmentWeights[i] ?? 1);
   }
   const fraction = Math.min(1, covered / duration);
   return findKeywordMatch(shot, transcript, keywords) ? 1 : fraction;
@@ -290,8 +411,11 @@ export function segmentChapters(
  * aesthetic) is across ALL passed dossiers so scores are comparable
  * set-wide. Audio component: overlap with dossier.audioEvents scaled by
  * intensity (0 when the clip has no audio signals yet). Speech component:
- * fraction of the shot covered by transcript segments, boosted to 1 when a
- * config keyword appears in an overlapping segment.
+ * fraction of the shot covered by transcript segments — hallucination loops
+ * down-weighted (transcriptSpeechWeights) — boosted to 1 when a config
+ * keyword appears in an overlapping segment. Sharpness is judged on the
+ * full-res scale (PROXY_SHARPNESS_SCALE for proxy-analyzed clips); in
+ * "penalize" mode a below-threshold shot is scored down instead of gated.
  */
 export function scoreShots(
   dossiers: ClipDossier[],
@@ -306,8 +430,11 @@ export function scoreShots(
     entries.map((e) => e.shot.motion.score),
     0.95,
   );
+  // Sharpness comparisons all happen on the full-res scale (proxy-analyzed
+  // clips scaled up by PROXY_SHARPNESS_SCALE) so mixed proxy/full sets share
+  // one normalization and one gate constant.
   const sharpnessP95 = percentile(
-    entries.map((e) => e.shot.quality.sharpness),
+    entries.map((e) => bucketSharpness(e.dossier, e.shot)),
     0.95,
   );
   const allIntensities: number[] = [];
@@ -318,19 +445,32 @@ export function scoreShots(
   }
   const intensityP95 = percentile(allIntensities, 0.95);
 
+  // Hallucination-collapse weights are per-transcript, so compute once per
+  // dossier rather than once per shot.
+  const speechWeightsByClip = new Map<string, number[]>();
+  for (const dossier of dossiers) {
+    speechWeightsByClip.set(dossier.clipId, transcriptSpeechWeights(dossier.transcript));
+  }
+
   const { weights, gate } = config;
   const weightsSum = weights.motion + weights.audio + weights.speech + weights.aesthetic;
 
   return entries.map(({ dossier, shot }) => {
     const duration = shot.tEnd - shot.tStart;
+    const sharpness = bucketSharpness(dossier, shot);
     const components: ShotScoreComponents = {
       motion: normalize(shot.motion.score, motionP95),
       audio: computeAudioComponent(shot, dossier.audioEvents, intensityP95),
-      speech: computeSpeechComponent(shot, dossier.transcript, config.keywords),
-      aesthetic: normalize(shot.quality.sharpness, sharpnessP95),
+      speech: computeSpeechComponent(
+        shot,
+        dossier.transcript,
+        speechWeightsByClip.get(dossier.clipId) ?? [],
+        config.keywords,
+      ),
+      aesthetic: normalize(sharpness, sharpnessP95),
     };
 
-    const score =
+    const composite =
       weightsSum > 0
         ? (components.motion * weights.motion +
             components.audio * weights.audio +
@@ -340,10 +480,18 @@ export function scoreShots(
         : 0;
 
     const gateReasons: string[] = [];
-    if (shot.quality.sharpness < gate.minSharpness) {
-      gateReasons.push(
-        `blurry (sharpness ${Math.round(shot.quality.sharpness)} < ${Math.round(gate.minSharpness)})`,
-      );
+    let softPenalty = 0;
+    if (sharpness < gate.minSharpness) {
+      if (gate.sharpnessMode === "penalize") {
+        // Linear in the shortfall: full softFocusPenalty at sharpness 0,
+        // fading to 0 at the gate threshold.
+        const shortfall = gate.minSharpness > 0 ? 1 - sharpness / gate.minSharpness : 0;
+        softPenalty = gate.softFocusPenalty * shortfall;
+      } else {
+        gateReasons.push(
+          `blurry (sharpness ${Math.round(sharpness)} < ${Math.round(gate.minSharpness)})`,
+        );
+      }
     }
     if (duration < gate.minShotS) {
       gateReasons.push(`too short (${duration.toFixed(1)}s < ${gate.minShotS.toFixed(1)}s)`);
@@ -356,7 +504,8 @@ export function scoreShots(
       gated: gateReasons.length > 0,
       gateReasons,
       components,
-      score,
+      softPenalty,
+      score: Math.max(0, composite - softPenalty),
     };
   });
 }

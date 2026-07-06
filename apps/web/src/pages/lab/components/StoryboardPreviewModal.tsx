@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { Storyboard } from "@openreel/core";
+import { MUSIC_BED_VOLUME, type Storyboard } from "@openreel/core";
 import { proxiedMusicUrl, type SunoTrack } from "../../../services/suno";
 
 interface StoryboardPreviewModalProps {
@@ -74,7 +74,7 @@ export function StoryboardPreviewModal({
     const audio = audioRef.current;
     if (!audio || !selectedTrack) return;
     const wasPlaying = !audio.paused;
-    audio.volume = 0.35;
+    audio.volume = MUSIC_BED_VOLUME;
     audio.src = proxiedMusicUrl(selectedTrack.audioUrl || selectedTrack.streamAudioUrl);
     audio.load();
     if (wasPlaying) audio.play().catch(() => {});

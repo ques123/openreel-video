@@ -490,10 +490,15 @@ export function PerceptionLabPage() {
           ? musicRecord.tracks.find((t) => t.id === musicRecord.committedTrackId)
           : undefined;
         const audioUrl = track ? proxiedMusicUrl(track.audioUrl || track.streamAudioUrl) : "";
+        // In-memory dossiers only — stored experiments whose clips aren't
+        // loaded compile without ducking (transcriptOf returns undefined).
+        const dossiers = getDossiers();
         const result = await compileStoryboardToProject({
           storyboard,
           getFile: resolveFile,
           music: track && audioUrl ? { audioUrl, durationS: track.durationS } : null,
+          transcriptOf: (clipId) =>
+            dossiers.find((d) => d.clipId === clipId)?.transcript,
           onProgress: setCompileProgress,
         });
         if (result.ok) {
@@ -514,7 +519,7 @@ export function PerceptionLabPage() {
         setCompiling(false);
       }
     },
-    [compiling, exportProgress, navigate],
+    [compiling, exportProgress, navigate, getDossiers],
   );
 
   /** Compile the current storyboard into a real project and jump to #/editor. */

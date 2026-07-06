@@ -30,6 +30,8 @@ import {
   openScratchSource,
   openWindowScratchSource,
   planIngestWindows,
+  QUOTA_SAFETY_BYTES,
+  SAFE_BLOB_READ_MAX_BYTES,
   WINDOW_HEAD_BYTES,
   WINDOW_OVERLAP_BYTES,
   WINDOW_TAIL_BYTES,
@@ -66,13 +68,28 @@ interface RetainedFrame {
   height: number;
 }
 
-async function encodeJpeg(frame: RetainedFrame, quality: number): Promise<ArrayBuffer> {
+/**
+ * Encode a frame to a JPEG data URL. Base64 encoding happens HERE, on the
+ * worker thread — shipping raw JPEG bytes to the main thread and encoding
+ * there would block the UI for every shot/dense-frame message.
+ */
+async function encodeJpegDataUrl(frame: RetainedFrame, quality: number): Promise<string> {
   const canvas = new OffscreenCanvas(frame.width, frame.height);
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("Could not create 2d context for thumbnail");
   ctx.putImageData(new ImageData(frame.rgba, frame.width, frame.height), 0, 0);
   const blob = await canvas.convertToBlob({ type: "image/jpeg", quality });
-  return blob.arrayBuffer();
+  return jpegToDataUrl(await blob.arrayBuffer());
+}
+
+function jpegToDataUrl(jpeg: ArrayBuffer): string {
+  const bytes = new Uint8Array(jpeg);
+  let binary = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return `data:image/jpeg;base64,${btoa(binary)}`;
 }
 
 async function analyze(req: Extract<FunnelRequest, { type: "analyze" }>) {
@@ -93,10 +110,10 @@ async function analyze(req: Extract<FunnelRequest, { type: "analyze" }>) {
     // scanned, deleted, next window copied — so total OPFS footprint stays
     // bounded regardless of source file size while every byte still gets
     // analyzed. NEVER fall back to random-access blob reads for large files.
-    const QUOTA_SAFETY = 512 * 2 ** 20;
     const avail = await availableQuota();
     const budget =
-      debugIngestBudgetBytes ?? (avail === null ? Infinity : Math.max(0, avail - QUOTA_SAFETY));
+      debugIngestBudgetBytes ??
+      (avail === null ? Infinity : Math.max(0, avail - QUOTA_SAFETY_BYTES));
 
     // TEST HOOK: debugIngestBudgetBytes also scales down the head/tail/
     // overlap/min-window geometry. Without this, a tiny debug budget could
@@ -155,7 +172,7 @@ async function analyze(req: Extract<FunnelRequest, { type: "analyze" }>) {
       await deleteScratch(clipId);
       if (err instanceof Error && err.message === "cancelled") throw err;
       // Only harmless small files may use direct blob reads as a fallback.
-      if (blob.size <= 512 * 2 ** 20) {
+      if (blob.size <= SAFE_BLOB_READ_MAX_BYTES) {
         console.warn("[perception] OPFS ingest failed, small-file blob fallback:", err);
       } else {
         throw err;
@@ -229,7 +246,7 @@ async function analyze(req: Extract<FunnelRequest, { type: "analyze" }>) {
       const rep = retained.get(repAbsIndex) ?? retained.get(iStart) ?? keepers.get(iStart);
       if (!rep) return; // all candidate frames evicted (pathological)
 
-      const thumbJpeg = await encodeJpeg(rep, FUNNEL_DEFAULTS.thumbnailQuality);
+      const thumbDataUrl = await encodeJpegDataUrl(rep, FUNNEL_DEFAULTS.thumbnailQuality);
 
       // frames[0] = rep; then up to maxEmbedFramesPerShot-1 keepers spread
       // across the shot (skip ones within a stride of the rep frame).
@@ -258,10 +275,10 @@ async function analyze(req: Extract<FunnelRequest, { type: "analyze" }>) {
           motion: { score: summary.motionScore, peakTime: summary.motionPeakTime },
           quality: { sharpness: summary.repSharpness },
         },
-        thumbJpeg,
+        thumbDataUrl,
         frames,
       };
-      post(message, [thumbJpeg, ...frames.map((f) => f.data)]);
+      post(message, frames.map((f) => f.data));
       shotIndex += 1;
 
       // Free everything belonging to the finalized shot.
@@ -399,21 +416,18 @@ async function analyze(req: Extract<FunnelRequest, { type: "analyze" }>) {
           if (changed) {
             lastDenseHist = hist;
             lastDenseT = wrapped.timestamp;
-            const jpeg = await encodeJpeg(
+            const dataUrl = await encodeJpegDataUrl(
               { t: wrapped.timestamp, rgba: img.data, width: img.width, height: img.height },
               FUNNEL_DEFAULTS.denseFrameQuality,
             );
-            post(
-              {
-                type: "dense-frame",
-                requestId,
-                clipId,
-                t: wrapped.timestamp,
-                jpeg,
-                sharpness: samples[si].sharpness,
-              },
-              [jpeg],
-            );
+            post({
+              type: "dense-frame",
+              requestId,
+              clipId,
+              t: wrapped.timestamp,
+              dataUrl,
+              sharpness: samples[si].sharpness,
+            });
           }
         }
 

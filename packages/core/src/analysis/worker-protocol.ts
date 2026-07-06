@@ -82,9 +82,10 @@ export interface FunnelIngestProgressResponse {
 }
 
 /**
- * A finalized shot. thumbJpeg + all frame buffers are transferred.
- * frames[0] is the representative frame; the rest are sampled across the
- * shot so long shots stay searchable end to end.
+ * A finalized shot. All frame buffers are transferred. frames[0] is the
+ * representative frame; the rest are sampled across the shot so long shots
+ * stay searchable end to end. The thumbnail arrives as a data URL — base64
+ * encoding runs in the worker to keep it off the main thread.
  */
 export interface FunnelShotResponse {
   type: "shot";
@@ -94,17 +95,19 @@ export interface FunnelShotResponse {
     Shot,
     "embedding" | "frameEmbeddings" | "thumbnailDataUrl" | "caption" | "cloudCaption"
   >;
-  thumbJpeg: ArrayBuffer;
+  /** JPEG data URL of the representative frame (worker-encoded). */
+  thumbDataUrl: string;
   frames: RepFramePixels[];
 }
 
-/** A frame sampled every ~denseCaptionEveryS for the caption pass (jpeg transferred). */
+/** A frame sampled every ~denseCaptionEveryS for the caption pass. */
 export interface FunnelDenseFrameResponse {
   type: "dense-frame";
   requestId: string;
   clipId: string;
   t: number;
-  jpeg: ArrayBuffer;
+  /** JPEG data URL (worker-encoded base64, ready to store in the dossier). */
+  dataUrl: string;
   /** Laplacian variance at scan resolution (blur gate for cloud captioning). */
   sharpness: number;
 }

@@ -10,7 +10,11 @@
  * cut compiles without its bed.
  */
 
-import { compileStoryboardTimeline, type Storyboard } from "@openreel/core";
+import {
+  compileStoryboardTimeline,
+  type Storyboard,
+  type TranscriptSegment,
+} from "@openreel/core";
 import { useProjectStore } from "../stores/project-store";
 
 export interface CompileContext {
@@ -18,6 +22,8 @@ export interface CompileContext {
   getFile: (clipId: string) => File | null;
   /** Pre-proxied audio URL + duration of the committed music track; null/absent = no music. */
   music?: { audioUrl: string; durationS: number } | null;
+  /** clipId → dossier transcript; enables music ducking under speech. */
+  transcriptOf?: (clipId: string) => TranscriptSegment[] | undefined;
   onProgress: (line: string) => void;
 }
 
@@ -26,7 +32,7 @@ export async function compileStoryboardToProject(
 ): Promise<
   { ok: true; warning?: string } | { ok: false; missing: string[]; error?: string }
 > {
-  const { storyboard, getFile, music, onProgress } = ctx;
+  const { storyboard, getFile, music, transcriptOf, onProgress } = ctx;
 
   // Resolve every DISTINCT source clip (items reuse clips — dedup by clipId)
   // up front, so a missing file blocks before any store mutation.
@@ -94,7 +100,7 @@ export async function compileStoryboardToProject(
   const { tracks, duration } = compileStoryboardTimeline(
     storyboard,
     (clipId) => mediaIds.get(clipId)!,
-    musicOpt ? { music: musicOpt } : undefined,
+    { music: musicOpt, transcriptOf },
   );
   const store = useProjectStore.getState();
   store.loadProject({

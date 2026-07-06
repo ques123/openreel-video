@@ -14,7 +14,8 @@ import {
   createWhisperWorker,
 } from "./create-workers";
 import { cleanCaption } from "./caption-text";
-import { DossierCache } from "./dossier-cache";
+import { BLUR_SHARPNESS_THRESHOLD, BLURRY_FRAME_CAPTION } from "./cloud-vision-plan";
+import { DossierCache, ThrottledDossierSaver } from "./dossier-cache";
 import {
   DOSSIER_VERSION,
   FUNNEL_DEFAULTS,
@@ -22,6 +23,7 @@ import {
   type AudioEvent,
   type ClipDossier,
   type DenseCaption,
+  type DenseFrame,
   type DossierPerf,
   type FunnelProgressEvent,
   type InferenceDevice,
@@ -40,6 +42,34 @@ export type ProgressListener = (event: FunnelProgressEvent) => void;
 
 /** Max embedding requests in flight (backpressure). */
 const MAX_EMBED_IN_FLIGHT = 4;
+
+/** Sync shot captions + request an incremental save every N captioned frames. */
+const CAPTION_SAVE_EVERY_FRAMES = 25;
+/** Min wall-clock between incremental dossier saves during a caption pass. */
+const CAPTION_SAVE_MIN_INTERVAL_MS = 10_000;
+
+/**
+ * The dense frames a local caption pass still has to process, in frame
+ * order. Resume point first: captions are appended in frame order, so
+ * anything at or before the last captioned timestamp is done (failed frames
+ * retry). Then the blur gate: frames the cloud pass would skip as too
+ * blurry to describe (same threshold) get `blurry: true` — the caller
+ * annotates them with BLURRY_FRAME_CAPTION instead of spending ~1.4s of
+ * FastVLM on motion smear. Pure; exported for unit tests.
+ */
+export function planLocalCaptionFrames(
+  denseFrames: DenseFrame[],
+  denseCaptions: DenseCaption[],
+): Array<{ frame: DenseFrame; blurry: boolean }> {
+  const lastT =
+    denseCaptions.length > 0 ? denseCaptions[denseCaptions.length - 1].t : -Infinity;
+  return denseFrames
+    .filter((f) => f.t > lastT)
+    .map((frame) => ({
+      frame,
+      blurry: frame.sharpness !== undefined && frame.sharpness < BLUR_SHARPNESS_THRESHOLD,
+    }));
+}
 
 interface PendingEmbed {
   resolve: (vector: Float32Array, ms: number) => void;
@@ -141,6 +171,15 @@ export class FunnelOrchestrator {
   warmUp(device: "auto" | InferenceDevice = "auto") {
     this.ensureEmbeddingWorker(device);
     this.ensureWhisperWorker(device);
+    // FastVLM (~1GB) is by far the biggest download and used to start only
+    // after clip 1's full visual+audio pass. Kick it now, fire-and-forget:
+    // the worker downloads in parallel and a failure here must never break
+    // warmUp (captioning is best-effort enrichment).
+    try {
+      this.ensureCaptionWorker(device);
+    } catch (err) {
+      console.warn("[perception] caption worker warm-up failed:", err);
+    }
   }
 
   dispose() {
@@ -341,13 +380,13 @@ export class FunnelOrchestrator {
             break;
 
           case "shot":
-            this.handleShot(run, msg.shot, msg.thumbJpeg, msg.frames);
+            this.handleShot(run, msg.shot, msg.thumbDataUrl, msg.frames);
             break;
 
           case "dense-frame":
             run.denseFrames.push({
               t: msg.t,
-              dataUrl: jpegToDataUrl(msg.jpeg),
+              dataUrl: msg.dataUrl,
               sharpness: msg.sharpness,
             });
             break;
@@ -450,10 +489,9 @@ export class FunnelOrchestrator {
       Shot,
       "embedding" | "frameEmbeddings" | "thumbnailDataUrl" | "caption" | "cloudCaption"
     >,
-    thumbJpeg: ArrayBuffer,
+    thumbnailDataUrl: string,
     frames: Array<{ data: ArrayBuffer; width: number; height: number }>,
   ) {
-    const thumbnailDataUrl = jpegToDataUrl(thumbJpeg);
     const shot: Shot = {
       ...partialShot,
       thumbnailDataUrl,
@@ -587,52 +625,60 @@ export class FunnelOrchestrator {
   /**
    * Caption the dossier's dense frames, filling the denseCaptions timeline
    * and each shot's caption (nearest frame to its rep time). Frames already
-   * captioned (resume after an interrupted pass) are skipped by timestamp.
-   * Serialized globally, incremental cache saves for crash resilience.
+   * captioned (resume after an interrupted pass) are skipped by timestamp;
+   * blurry frames skip FastVLM and get the canned BLURRY_FRAME_CAPTION
+   * annotation (same gate as the cloud pass) so downstream consumers still
+   * see one annotation per frame. Serialized globally; incremental cache
+   * saves are throttled fire-and-forget (they re-serialize the WHOLE
+   * dossier) with a guaranteed final awaited save.
    */
   private captionDense(
     file: File,
     dossier: ClipDossier,
     device: "auto" | InferenceDevice = "auto",
   ) {
-    // Resume point: captions are appended in frame order, so anything at or
-    // before the last captioned timestamp is done (failed frames retry).
-    const lastT =
-      dossier.denseCaptions.length > 0
-        ? dossier.denseCaptions[dossier.denseCaptions.length - 1].t
-        : -Infinity;
-    const frames = dossier.denseFrames.filter((f) => f.t > lastT);
-    if (frames.length === 0) {
+    const pending = planLocalCaptionFrames(dossier.denseFrames, dossier.denseCaptions);
+    if (pending.length === 0) {
       this.syncShotCaptions(dossier);
       return;
     }
     this.ensureCaptionWorker(device);
     const total = dossier.denseFrames.length;
+    const saver = new ThrottledDossierSaver(
+      () => this.cache.save(file, dossier),
+      CAPTION_SAVE_MIN_INTERVAL_MS,
+    );
 
     this.captionChain = this.captionChain.then(async () => {
       const captions: DenseCaption[] = dossier.denseCaptions;
-      let done = total - frames.length;
-      for (const frame of frames) {
-        try {
-          const { caption: raw, ms } = await this.requestCaption(frame.dataUrl);
-          const text = cleanCaption(raw);
-          if (text) captions.push({ t: frame.t, text });
-          const perf = dossier.localCaptionPerf ?? { totalMs: 0, frames: 0 };
-          perf.totalMs += ms;
-          perf.frames += 1;
-          dossier.localCaptionPerf = perf;
-        } catch {
-          // best-effort; skip this frame
+      let done = total - pending.length;
+      for (const { frame, blurry } of pending) {
+        if (blurry) {
+          // No model call — the frame is below the cloud pass's blur
+          // threshold, so FastVLM would only describe motion smear.
+          captions.push({ t: frame.t, text: BLURRY_FRAME_CAPTION });
+        } else {
+          try {
+            const { caption: raw, ms } = await this.requestCaption(frame.dataUrl);
+            const text = cleanCaption(raw);
+            if (text) captions.push({ t: frame.t, text });
+            const perf = dossier.localCaptionPerf ?? { totalMs: 0, frames: 0 };
+            perf.totalMs += ms;
+            perf.frames += 1;
+            dossier.localCaptionPerf = perf;
+          } catch {
+            // best-effort; skip this frame
+          }
         }
         done += 1;
         this.emit({ kind: "dense-captions", clipId: dossier.clipId, done, total });
-        if (done % 25 === 0) {
+        if (done % CAPTION_SAVE_EVERY_FRAMES === 0) {
           this.syncShotCaptions(dossier);
-          await this.cache.save(file, dossier).catch(() => undefined);
+          saver.request();
         }
       }
       this.syncShotCaptions(dossier);
-      await this.cache.save(file, dossier).catch(() => undefined);
+      await saver.flush();
     });
   }
 
@@ -973,14 +1019,4 @@ export class FunnelOrchestrator {
       }
     }
   }
-}
-
-function jpegToDataUrl(jpeg: ArrayBuffer): string {
-  const bytes = new Uint8Array(jpeg);
-  let binary = "";
-  const CHUNK = 0x8000;
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
-  }
-  return `data:image/jpeg;base64,${btoa(binary)}`;
 }

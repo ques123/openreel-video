@@ -1,18 +1,22 @@
 import { describe, expect, it } from "vitest";
 import {
   MIN_WINDOW_BYTES,
+  QUOTA_SAFETY_BYTES,
+  SAFE_BLOB_READ_MAX_BYTES,
   WINDOW_HEAD_BYTES,
   WINDOW_OVERLAP_BYTES,
   WINDOW_TAIL_BYTES,
   mapWindowRead,
+  planAudioBackfillRoute,
   planIngestWindows,
 } from "../workers/opfs-scratch";
 import type { WindowScratchMeta } from "../workers/opfs-scratch";
 
-// planIngestWindows and mapWindowRead are the only pure pieces of
-// opfs-scratch.ts — everything else touches OPFS (FileSystemSyncAccessHandle
-// et al.), which doesn't exist in vitest's node environment. Those are
-// exercised manually / by the funnel integration, not here.
+// planIngestWindows, mapWindowRead and planAudioBackfillRoute are the only
+// pure pieces of opfs-scratch.ts — everything else touches OPFS
+// (FileSystemSyncAccessHandle et al.), which doesn't exist in vitest's node
+// environment. Those are exercised manually / by the funnel integration,
+// not here.
 
 type Window = { startByte: number; endByte: number };
 
@@ -244,5 +248,30 @@ describe("mapWindowRead", () => {
 
   it("returns [] for an empty range without treating it as an uncovered gap", () => {
     expect(mapWindowRead(baseMeta, 500, 500)).toEqual([]);
+  });
+});
+
+describe("planAudioBackfillRoute", () => {
+  it("routes small files through direct blob reads (up to and including the ceiling)", () => {
+    expect(planAudioBackfillRoute(10e6, 0)).toBe("blob");
+    expect(planAudioBackfillRoute(SAFE_BLOB_READ_MAX_BYTES, null)).toBe("blob");
+  });
+
+  it("routes an over-ceiling file to a scratch copy when quota fits it plus safety", () => {
+    const size = SAFE_BLOB_READ_MAX_BYTES + 1;
+    expect(planAudioBackfillRoute(size, size + QUOTA_SAFETY_BYTES)).toBe("scratch-copy");
+    // The 17GB crash case, with room to spare: copy, never raw blob reads.
+    expect(planAudioBackfillRoute(17e9, 30e9)).toBe("scratch-copy");
+  });
+
+  it("skips when quota can't hold the file plus the safety margin", () => {
+    const size = SAFE_BLOB_READ_MAX_BYTES + 1;
+    expect(planAudioBackfillRoute(size, size + QUOTA_SAFETY_BYTES - 1)).toBe("skip");
+    // The exact 17GB scenario that used to crash Chrome via raw BlobSource.
+    expect(planAudioBackfillRoute(17e9, 10e9)).toBe("skip");
+  });
+
+  it("skips large files when quota is unknown — never risks raw blob reads", () => {
+    expect(planAudioBackfillRoute(17e9, null)).toBe("skip");
   });
 });

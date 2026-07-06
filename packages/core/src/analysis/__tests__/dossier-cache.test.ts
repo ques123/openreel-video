@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { deserializeDossier, serializeDossier } from "../dossier-cache";
+import {
+  deserializeDossier,
+  serializeDossier,
+  ThrottledDossierSaver,
+} from "../dossier-cache";
 import type { ClipDossier } from "../types";
 
 function makeDossier(): ClipDossier {
@@ -143,6 +147,111 @@ describe("legacy migration (pre-split cloud stores)", () => {
     expect(restored.cloudRuns.shots).toMatchObject({ model: "gpt-5.2", framesSent: 1 });
     expect(restored.cloudRuns.timeline).toBeNull();
     expect(restored.localCaptionPerf).toBeNull();
+  });
+});
+
+describe("ThrottledDossierSaver", () => {
+  /** Save fn whose promises resolve only when the test says so. */
+  function makeHarness(minIntervalMs = 10_000) {
+    let nowMs = 0;
+    const resolvers: Array<() => void> = [];
+    const rejecters: Array<(err: Error) => void> = [];
+    let calls = 0;
+    const saver = new ThrottledDossierSaver(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          calls += 1;
+          resolvers.push(resolve);
+          rejecters.push(reject);
+        }),
+      minIntervalMs,
+      () => nowMs,
+    );
+    const tick = () => new Promise<void>((r) => setTimeout(r, 0));
+    return {
+      saver,
+      tick,
+      calls: () => calls,
+      advance: (ms: number) => {
+        nowMs += ms;
+      },
+      resolveSave: async (i: number) => {
+        resolvers[i]();
+        await tick();
+      },
+      rejectSave: async (i: number) => {
+        rejecters[i](new Error("save failed"));
+        await tick();
+      },
+    };
+  }
+
+  it("starts a save on the first request", () => {
+    const h = makeHarness();
+    h.saver.request();
+    expect(h.calls()).toBe(1);
+  });
+
+  it("never runs two saves concurrently (in-flight guard)", async () => {
+    const h = makeHarness();
+    h.saver.request();
+    h.advance(60_000); // interval long past — only the in-flight guard blocks
+    h.saver.request();
+    h.saver.request();
+    expect(h.calls()).toBe(1);
+    await h.resolveSave(0);
+    h.saver.request();
+    expect(h.calls()).toBe(2);
+  });
+
+  it("drops requests inside the wall-clock throttle window", async () => {
+    const h = makeHarness(10_000);
+    h.saver.request();
+    await h.resolveSave(0);
+    h.advance(9_999);
+    h.saver.request();
+    expect(h.calls()).toBe(1); // too soon — dropped
+    h.advance(1);
+    h.saver.request();
+    expect(h.calls()).toBe(2); // interval elapsed — saved
+  });
+
+  it("flush awaits the in-flight save, then runs one final unconditional save", async () => {
+    const h = makeHarness();
+    h.saver.request();
+    let flushed = false;
+    const flush = h.saver.flush().then(() => {
+      flushed = true;
+    });
+    await h.tick();
+    expect(flushed).toBe(false); // still waiting on the in-flight save
+    await h.resolveSave(0);
+    expect(h.calls()).toBe(2); // final save started despite the throttle window
+    await h.resolveSave(1);
+    await flush;
+    expect(flushed).toBe(true);
+  });
+
+  it("flush saves even when nothing is in flight", async () => {
+    const h = makeHarness();
+    const flush = h.saver.flush();
+    expect(h.calls()).toBe(1);
+    await h.resolveSave(0);
+    await flush;
+  });
+
+  it("swallows save errors and keeps working afterwards", async () => {
+    const h = makeHarness(10_000);
+    h.saver.request();
+    await h.rejectSave(0); // must not throw/unhandled-reject
+    h.advance(10_000);
+    h.saver.request();
+    expect(h.calls()).toBe(2);
+    await h.resolveSave(1);
+    const flush = h.saver.flush();
+    expect(h.calls()).toBe(3);
+    await h.resolveSave(2);
+    await expect(flush).resolves.toBeUndefined();
   });
 });
 

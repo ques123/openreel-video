@@ -25,6 +25,16 @@ describe("STYLE_PRESETS", () => {
       expect(preset.musicHint.length).toBeGreaterThan(0);
     }
   });
+
+  it("marks exactly the soft-friendly presets allowSoftFocus", () => {
+    const soft = STYLE_PRESETS.filter((p) => p.allowSoftFocus).map((p) => p.id);
+    expect(soft).toEqual(["atmospheric", "cinematic", "memory-film", "visual-poem"]);
+    // Punchy/sharp presets keep the hard blurry gate.
+    for (const id of ["energetic-vlog", "neistat-vlog", "hype-reel", "social-teaser"]) {
+      const preset = STYLE_PRESETS.find((p) => p.id === id);
+      expect(preset?.allowSoftFocus).toBeFalsy();
+    }
+  });
 });
 
 describe("stylePresetById", () => {

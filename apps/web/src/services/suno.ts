@@ -15,7 +15,12 @@ import {
   type MusicBrief,
   type Storyboard,
 } from "@openreel/core";
-import { BASE as OPENAI_BASE } from "./openai-proxy";
+import {
+  BASE as OPENAI_BASE,
+  parseChatUsage,
+  type ModelChatUsage,
+  type RawChatUsage,
+} from "./openai-proxy";
 
 export const BASE = "/api/proxy/suno";
 
@@ -161,7 +166,10 @@ const BRIEF_INSTRUCTIONS =
  * write a contextual music brief. Falls back to the pure heuristic in
  * @openreel/core on ANY failure — network, bad JSON, missing fields — so
  * music generation never blocks on this call. Always clamped to
- * MUSIC_LIMITS regardless of origin.
+ * MUSIC_LIMITS regardless of origin. `onUsage` reports the real billed
+ * usage; it fires BEFORE response validation (billed is billed, even when
+ * the reply is unusable and the heuristic fallback ships instead) and not
+ * at all when the request itself failed.
  */
 export async function generateMusicBrief(
   userBrief: string,
@@ -169,6 +177,7 @@ export async function generateMusicBrief(
   targetS: number | null,
   sceneHints: string[],
   styleHint?: string | null,
+  onUsage?: (usage: ModelChatUsage) => void,
 ): Promise<MusicBrief> {
   try {
     const lines = [
@@ -197,7 +206,12 @@ export async function generateMusicBrief(
     });
     if (!res.ok) throw new Error(`music brief LLM ${res.status}`);
 
-    const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+    const data = (await res.json()) as {
+      choices?: { message?: { content?: string } }[];
+      usage?: RawChatUsage;
+    };
+    const usage = parseChatUsage(data.usage);
+    if (usage) onUsage?.({ ...usage, model: BRIEF_MODEL });
     const raw = data.choices?.[0]?.message?.content ?? "";
     const parsed = JSON.parse(raw) as { style?: unknown; title?: unknown; prompt?: unknown };
     if (

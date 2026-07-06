@@ -254,6 +254,12 @@ export function useDirector(deps: UseDirectorDeps) {
                 if (!exp) return;
                 exp.usage.promptTokens += usage.promptTokens;
                 exp.usage.completionTokens += usage.completionTokens;
+                // cachedTokens isn't on DirectorExperiment["usage"] yet (the
+                // experiments.ts type belongs to another review phase) —
+                // recorded via a widening cast so history carries the cache
+                // data from day one; the persisted JSON shape is additive.
+                const u = exp.usage as typeof exp.usage & { cachedTokens?: number };
+                u.cachedTokens = (u.cachedTokens ?? 0) + usage.cachedTokens;
                 exp.usage.calls += 1;
               },
             ),

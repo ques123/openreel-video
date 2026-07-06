@@ -16,6 +16,13 @@ export interface StylePreset {
   directorNote: string;
   /** Style words for the music (Suno) brief. */
   musicHint: string;
+  /**
+   * True for presets that embrace soft/artistic frames (mist, shallow
+   * focus, motion blur): the selector's blurry hard-gate becomes a scoring
+   * penalty instead (signal-score.ts selectorConfigForPreset), so such
+   * shots stay candidates. Absent/false = keep the hard gate.
+   */
+  allowSoftFocus?: boolean;
 }
 
 export const STYLE_PRESETS: readonly StylePreset[] = [
@@ -26,6 +33,7 @@ export const STYLE_PRESETS: readonly StylePreset[] = [
     directorNote:
       "This should feel like a mood you sink into, not a story being told. Let every shot breathe longer than feels safe, keep the quiet moments quiet, and let light and weather do the talking. Nothing needs to happen; it needs to feel.",
     musicHint: "ambient, slow, warm textures, minimal percussion",
+    allowSoftFocus: true,
   },
   {
     id: "energetic-vlog",
@@ -53,6 +61,7 @@ export const STYLE_PRESETS: readonly StylePreset[] = [
     directorNote:
       "Make it feel like a real travel film: grand establishing moments, deliberate pacing, and a sense of place above all. Favor the widest, most composed views and give arrivals and reveals room to land. It should feel bigger than a holiday video.",
     musicHint: "cinematic orchestral-hybrid, uplifting, swelling builds",
+    allowSoftFocus: true,
   },
   {
     id: "memory-film",
@@ -61,6 +70,7 @@ export const STYLE_PRESETS: readonly StylePreset[] = [
     directorNote:
       "This is a keepsake, not a production. Favor the imperfect, human moments — laughter, glances, hands, small details — over the impressive ones, and let it feel like flipping through a memory. Soft pacing, warm and a little bittersweet.",
     musicHint: "nostalgic, gentle piano and acoustic guitar, warm, intimate, wistful",
+    allowSoftFocus: true,
   },
   {
     id: "beat-montage",
@@ -101,6 +111,7 @@ export const STYLE_PRESETS: readonly StylePreset[] = [
     directorNote:
       "Build it around images that rhyme — echoes of color, shape, and gesture — more than around events. Slow, deliberate, and a little abstract; it should invite a second watch. One idea holds it together like a refrain.",
     musicHint: "minimalist, contemplative, strings or piano, spacious",
+    allowSoftFocus: true,
   },
   {
     id: "social-teaser",

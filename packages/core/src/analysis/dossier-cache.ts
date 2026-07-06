@@ -134,6 +134,58 @@ export function deserializeDossier(data: ArrayBuffer): ClipDossier {
   };
 }
 
+/**
+ * Coalescing, wall-clock-throttled scheduler for one dossier's incremental
+ * saves. Saving re-serializes the WHOLE dossier (every dense-frame JPEG), so
+ * the caption pass must not await a full write every few frames:
+ *
+ *  - request() is fire-and-forget. It starts a save only when none is in
+ *    flight AND at least minIntervalMs passed since the last one started;
+ *    otherwise it's dropped. Dropping is safe because the dossier is mutated
+ *    in place — any later save (or the final flush) persists this state too,
+ *    so a crash loses at most minIntervalMs of captions.
+ *  - flush() awaits the in-flight save (if any), then runs one final,
+ *    unconditional save — call it on completion so nothing is ever lost.
+ *
+ * Save errors are swallowed (incremental persistence is best-effort, same
+ * as the `.catch(() => undefined)` the call sites always used).
+ */
+export class ThrottledDossierSaver {
+  private inFlight: Promise<void> | null = null;
+  private lastStartMs = -Infinity;
+
+  constructor(
+    private readonly save: () => Promise<void>,
+    private readonly minIntervalMs: number = 10_000,
+    /** Injectable clock (tests). */
+    private readonly now: () => number = () => Date.now(),
+  ) {}
+
+  /** Fire-and-forget: save unless one is in flight or too recent. */
+  request(): void {
+    if (this.inFlight) return;
+    if (this.now() - this.lastStartMs < this.minIntervalMs) return;
+    void this.begin();
+  }
+
+  /** Await any in-flight save, then run one final unconditional save. */
+  async flush(): Promise<void> {
+    if (this.inFlight) await this.inFlight;
+    await this.begin();
+  }
+
+  private begin(): Promise<void> {
+    this.lastStartMs = this.now();
+    const done = this.save()
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.inFlight === done) this.inFlight = null;
+      });
+    this.inFlight = done;
+    return done;
+  }
+}
+
 export class DossierCache {
   constructor(private readonly storage: StorageEngine = new StorageEngine()) {}
 

@@ -8,7 +8,12 @@
  */
 
 import { stylePresetById, STYLE_PRESETS, type StylePreset } from "@openreel/core";
-import { BASE as OPENAI_BASE } from "./openai-proxy";
+import {
+  BASE as OPENAI_BASE,
+  parseChatUsage,
+  type ModelChatUsage,
+  type RawChatUsage,
+} from "./openai-proxy";
 
 export interface BriefSuggestion {
   label: string;
@@ -125,12 +130,15 @@ function buildStyleInstruction(style: StylePreset | null): string {
 /**
  * One-shot call: digest + optional target length + style lock (or null to
  * vary styles across cards) in, 4 (or a few less) story-voiced cards out.
+ * `onUsage` reports the real billed usage — invoked BEFORE response parsing
+ * so a malformed reply still lands in cost accounting (billed is billed).
  */
 export async function suggestBriefs(
   digest: string,
   targetS: number | null,
   style: StylePreset | null,
   signal?: AbortSignal,
+  onUsage?: (usage: ModelChatUsage) => void,
 ): Promise<BriefSuggestion[]> {
   const userLines = [
     digest,
@@ -156,7 +164,12 @@ export async function suggestBriefs(
     throw new Error(`Brief suggestions request failed (${res.status}): ${body.slice(0, 300)}`);
   }
 
-  const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+  const data = (await res.json()) as {
+    choices?: { message?: { content?: string } }[];
+    usage?: RawChatUsage;
+  };
+  const usage = parseChatUsage(data.usage);
+  if (usage) onUsage?.({ ...usage, model: SUGGEST_BRIEFS_MODEL });
   const raw = data.choices?.[0]?.message?.content ?? "";
   return parseSuggestions(raw);
 }
