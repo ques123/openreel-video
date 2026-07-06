@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { Storyboard } from "@openreel/core";
+import { stylePresetById, type Storyboard } from "@openreel/core";
 import {
   experimentCaptionCostUSD,
   experimentCostLine,
@@ -258,6 +258,11 @@ function chipsFor(exp: ExperimentSummary, all: ExperimentSummary[]): SettingChip
       value: exp.targetDurationS ? `${exp.targetDurationS}s` : "—",
       common: uniform((e) => e.targetDurationS ?? null),
     },
+    {
+      label: "style",
+      value: exp.styleId ? (stylePresetById(exp.styleId)?.label ?? exp.styleId) : "—",
+      common: uniform((e) => e.styleId ?? null),
+    },
     { label: "model", value: exp.model, common: uniform((e) => e.model) },
     {
       label: "captions",
@@ -460,6 +465,11 @@ export function ExperimentMatrixModal({
                       )}
                       <p className="text-xs font-medium text-text-primary break-words">
                         {e.title ?? "(untitled)"}
+                        {e.briefAngle && (
+                          <span className="ml-1.5 px-1.5 py-0.5 text-[10px] rounded border border-primary/40 text-primary font-normal align-middle">
+                            {e.briefAngle}
+                          </span>
+                        )}
                       </p>
                       <p
                         className="text-[11px] text-text-secondary leading-snug line-clamp-2"

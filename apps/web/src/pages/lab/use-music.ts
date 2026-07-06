@@ -137,6 +137,7 @@ export function useMusic() {
       storyboard: Storyboard | null,
       targetS: number | null,
       sceneHints: string[],
+      styleMusicHint?: string | null,
     ) => {
       if (runningRef.current) return; // guard against a duplicate start
       runningRef.current = true;
@@ -147,7 +148,13 @@ export function useMusic() {
       setState({ ...initialState, phase: "generating", startedAtMs });
       void (async () => {
         try {
-          const brief = await generateMusicBrief(userBrief, storyboard, targetS, sceneHints);
+          const brief = await generateMusicBrief(
+            userBrief,
+            storyboard,
+            targetS,
+            sceneHints,
+            styleMusicHint,
+          );
           if (cancelledRef.current) return;
           setState((s) => ({ ...s, brief }));
           const taskId = await startMusicGeneration(brief);

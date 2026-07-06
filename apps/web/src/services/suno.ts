@@ -1,5 +1,5 @@
 /**
- * Suno music generation client (sunoapi.org, V5 custom-mode, instrumental).
+ * Suno music generation client (sunoapi.org, custom-mode, instrumental).
  * Same-origin proxy pattern as openai-proxy.ts: calls go to /api/proxy/suno/*
  * — nginx on abacus rewrites to https://api.sunoapi.org/api/v1 and injects
  * the API key server-side, so no key ever exists in the browser.
@@ -24,6 +24,13 @@ const CALLBACK_URL = "https://openreel.pbrain.dev/api/suno-callback";
 
 /** One-shot brief-writer model — cheap, fast, strict JSON only. */
 const BRIEF_MODEL = "gpt-5.4-mini";
+
+/**
+ * Suno generation model. V5_5 shares V5's limits (style 1000 / title 100 /
+ * prompt 5000 — see MUSIC_LIMITS in @openreel/core), so a swap here needs no
+ * clamp changes; older models (V4) have TIGHTER limits and would.
+ */
+const SUNO_MODEL = "V5_5";
 
 interface SunoEnvelope<T> {
   code: number;
@@ -78,7 +85,7 @@ export async function startMusicGeneration(brief: MusicBrief): Promise<string> {
     body: JSON.stringify({
       customMode: true,
       instrumental: true,
-      model: "V5",
+      model: SUNO_MODEL,
       style: brief.style,
       title: brief.title,
       prompt: brief.prompt,
@@ -142,7 +149,7 @@ export async function pollMusicTask(taskId: string): Promise<MusicTaskResult> {
 }
 
 const BRIEF_INSTRUCTIONS =
-  "You write a music brief for sunoapi.org's V5 custom-mode instrumental generator, scoring " +
+  "You write a music brief for sunoapi.org's custom-mode instrumental generator, scoring " +
   "background music for a video edit. Match the mood, energy and pacing of the user's brief " +
   "and the storyboard/scene descriptions. The result MUST be instrumental (no vocals, no lyrics) " +
   'and sit under dialogue and sound effects without competing for attention. Reply with STRICT ' +
@@ -161,6 +168,7 @@ export async function generateMusicBrief(
   storyboard: Storyboard | null,
   targetS: number | null,
   sceneHints: string[],
+  styleHint?: string | null,
 ): Promise<MusicBrief> {
   try {
     const lines = [
@@ -172,6 +180,7 @@ export async function generateMusicBrief(
         : null,
       targetS != null ? `Target track length: ~${Math.round(targetS)} seconds` : null,
       sceneHints.length > 0 ? `Scene descriptions: ${sceneHints.join("; ")}` : null,
+      styleHint ? `Video style: ${styleHint}` : null,
     ].filter((l): l is string => Boolean(l));
 
     const res = await fetch(`${OPENAI_BASE}/chat/completions`, {
@@ -203,7 +212,13 @@ export async function generateMusicBrief(
     }
     return clampMusicBrief({ style: parsed.style, title: parsed.title, prompt: parsed.prompt });
   } catch {
-    return clampMusicBrief(buildMusicBriefFallback(userBrief, storyboard, targetS));
+    const fallback = buildMusicBriefFallback(userBrief, storyboard, targetS);
+    // buildMusicBriefFallback doesn't take a style hint (core, frozen) — fold
+    // it into the style field ourselves, clamping again since prepending can
+    // push it back over MUSIC_LIMITS.style.
+    return styleHint
+      ? clampMusicBrief({ ...fallback, style: `${styleHint}, ${fallback.style}` })
+      : fallback;
   }
 }
 

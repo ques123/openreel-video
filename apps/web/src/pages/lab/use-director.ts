@@ -8,6 +8,7 @@ import {
   buildSystemPrompt,
   runDirectorLoop,
   searchShots,
+  stylePresetById,
   type ChatMessage,
   type ClipDossier,
   type CloudRunMeta,
@@ -270,13 +271,22 @@ export function useDirector(deps: UseDirectorDeps) {
   );
 
   const start = useCallback(
-    (brief: string, targetDurationS: number | null, sources?: PromptSources) => {
+    (
+      brief: string,
+      targetDurationS: number | null,
+      sources?: PromptSources,
+      briefAngle?: string,
+      styleId?: string,
+    ) => {
       const dossiers = getDossiers();
       if (dossiers.length === 0) {
         dispatch({ type: "failure", error: "No analyzed clips yet — drop footage first." });
         return;
       }
       const promptSources = sources ?? DEFAULT_PROMPT_SOURCES;
+      // Unknown/stale ids resolve to null and are silently dropped — never
+      // persisted, never appended to the seed message.
+      const stylePreset = stylePresetById(styleId);
       dossiersRef.current = dossiers;
       const seed: ChatMessage[] = [
         { role: "system", content: buildSystemPrompt() },
@@ -285,7 +295,12 @@ export function useDirector(deps: UseDirectorDeps) {
           content:
             buildDossierMessage(dossiers, promptSources) +
             "\n\n" +
-            buildBriefMessage(brief, targetDurationS),
+            buildBriefMessage(
+              stylePreset
+                ? `${brief}\n\nHow it should feel (style — ${stylePreset.label}): ${stylePreset.directorNote}`
+                : brief,
+              targetDurationS,
+            ),
         },
       ];
       messagesRef.current = seed;
@@ -347,6 +362,12 @@ export function useDirector(deps: UseDirectorDeps) {
         at: Date.now(),
         updatedAt: Date.now(),
         brief,
+        // Only set when a suggestion card seeded this brief — keeps old
+        // records' shape unchanged (absent key, not an explicit undefined).
+        ...(briefAngle ? { briefAngle } : {}),
+        // Same absent-key convention; also guards against persisting a
+        // stale/unknown id (stylePreset is null if styleId didn't resolve).
+        ...(stylePreset ? { styleId: stylePreset.id } : {}),
         targetDurationS,
         promptSources,
         captionModels,
