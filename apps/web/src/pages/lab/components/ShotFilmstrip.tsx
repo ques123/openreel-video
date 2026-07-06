@@ -1,5 +1,14 @@
+import { useLayoutEffect, useRef } from "react";
 import type { CandidatePick, Shot } from "@openreel/core";
 import type { LabClip } from "../use-perception-lab";
+import {
+  STRIP_VIEWPORT_MARGIN_PX,
+  intersectionObserverSupported,
+  placeholderStripHeightPx,
+  recordStripHeight,
+  shouldRenderShotCards,
+  useNearViewport,
+} from "./strip-visibility";
 
 function fmtTime(s: number): string {
   const m = Math.floor(s / 60);
@@ -31,6 +40,12 @@ interface ShotFilmstripProps {
   enhanceDisabledReason?: string | null;
   /** Open the side-by-side frame/local/cloud caption comparison. */
   onCompare?: () => void;
+  /**
+   * Optional cost figure rendered next to the Enhance button (pure display,
+   * e.g. "≈$0.03 · 24 frames" from enhance-cost.ts's formatCostPreview) —
+   * the page owns the math.
+   */
+  enhanceCostLabel?: string | null;
   /** Non-null when bulk-enhance selection is active: this clip's checkbox state. */
   selected?: boolean | null;
   onSelectChange?: (checked: boolean) => void;
@@ -44,6 +59,7 @@ export function ShotFilmstrip({
   onEnhance,
   enhanceDisabledReason,
   onCompare,
+  enhanceCostLabel,
   selected = null,
   onSelectChange,
 }: ShotFilmstripProps) {
@@ -54,8 +70,26 @@ export function ShotFilmstrip({
   // drop-time pairing only) — check both.
   const proxyName = clip.proxyName ?? clip.dossier?.analyzedFromProxy ?? null;
 
+  // Viewport gating (see strip-visibility.ts): render the thumbnail <img>s
+  // only while the strip is within ~a screen of the viewport; empty same-size
+  // cells otherwise, so scroll geometry and the shot anchor ids stay stable.
+  const [rootRef, nearViewport] = useNearViewport<HTMLDivElement>(STRIP_VIEWPORT_MARGIN_PX);
+  const showShotCards = shouldRenderShotCards({
+    shotCount: clip.shots.length,
+    observerSupported: intersectionObserverSupported(),
+    nearViewport,
+  });
+  const stripRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    // Record the rendered row's height so offscreen placeholders match it
+    // exactly (all strips share the same card CSS).
+    if (showShotCards && clip.shots.length > 0 && stripRef.current) {
+      recordStripHeight(stripRef.current.offsetHeight);
+    }
+  }, [showShotCards, clip.shots.length]);
+
   return (
-    <div className="bg-background-secondary border border-border rounded-lg p-3">
+    <div ref={rootRef} className="bg-background-secondary border border-border rounded-lg p-3">
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2 min-w-0">
           {selected !== null && clip.status === "done" && (
@@ -117,17 +151,27 @@ export function ShotFilmstrip({
             </span>
           )}
           {onEnhance && clip.status === "done" && !clip.cloud?.busy && (
-            <button
-              className="text-xs px-1.5 py-0.5 rounded border border-sky-500/50 text-sky-600 hover:bg-sky-500/10 disabled:opacity-40 disabled:cursor-default"
-              onClick={enhanceDisabledReason ? undefined : onEnhance}
-              disabled={!!enhanceDisabledReason}
-              title={
-                enhanceDisabledReason ??
-                "Send this clip's sampled frames to the cloud vision model for much better descriptions"
-              }
-            >
-              {clip.dossier?.cloudVision ? "re-enhance" : "enhance"}
-            </button>
+            <>
+              {enhanceCostLabel && !enhanceDisabledReason && (
+                <span
+                  className="text-xs text-text-secondary"
+                  title="Estimated before anything is sent: measured per-frame token profile × current model pricing"
+                >
+                  {enhanceCostLabel}
+                </span>
+              )}
+              <button
+                className="text-xs px-1.5 py-0.5 rounded border border-sky-500/50 text-sky-600 hover:bg-sky-500/10 disabled:opacity-40 disabled:cursor-default"
+                onClick={enhanceDisabledReason ? undefined : onEnhance}
+                disabled={!!enhanceDisabledReason}
+                title={
+                  enhanceDisabledReason ??
+                  "Send this clip's sampled frames to the cloud vision model for much better descriptions"
+                }
+              >
+                {clip.dossier?.cloudVision ? "re-enhance" : "enhance"}
+              </button>
+            </>
           )}
           {clip.dossier?.perf.cacheHit && (
             <span className="text-xs px-1.5 py-0.5 rounded bg-primary/20 text-primary">
@@ -187,73 +231,90 @@ export function ShotFilmstrip({
         </div>
       )}
 
-      <div className="flex gap-2 overflow-x-auto pb-1">
-        {clip.shots.map((shot) => {
-          const hitScore = highlights.get(shot.index);
-          const pick = picks?.get(shot.index);
-          return (
+      <div
+        ref={stripRef}
+        className="flex gap-2 overflow-x-auto pb-1"
+        style={showShotCards ? undefined : { height: placeholderStripHeightPx() }}
+      >
+        {!showShotCards &&
+          // Offscreen: one empty cell per shot keeps the row's width/height
+          // and the `shot-…` anchor ids (scrollIntoView targets) without
+          // mounting any of the base64 thumbnails.
+          clip.shots.map((shot) => (
             <div
               key={shot.index}
               id={`shot-${clip.clipId}-${shot.index}`}
-              className={`shrink-0 w-36 rounded-md overflow-hidden border-2 transition-colors cursor-pointer ${
-                hitScore !== undefined
-                  ? "border-primary shadow-lg shadow-primary/30"
-                  : "border-transparent hover:border-border"
-              }`}
-              onClick={() => onShotClick?.(shot)}
-              title={`shot ${shot.index} · ${fmtTime(shot.tStart)}–${fmtTime(shot.tEnd)}${
-                shot.cloudCaption && shot.caption
-                  ? `\ncloud: ${shot.cloudCaption}\nlocal: ${shot.caption}`
-                  : shot.cloudCaption ?? shot.caption
-                    ? `\n${shot.cloudCaption ?? shot.caption}`
-                    : ""
-              }`}
-            >
-              <div className="relative">
-                <img
-                  src={shot.thumbnailDataUrl}
-                  alt={`shot ${shot.index}`}
-                  className="w-full aspect-video object-cover bg-black"
-                  draggable={false}
-                />
-                {hitScore !== undefined && (
-                  <span className="absolute top-1 right-1 text-[10px] font-mono px-1 rounded bg-primary text-white">
-                    {hitScore.toFixed(2)}
+              className="shrink-0 w-36 rounded-md bg-background"
+              aria-hidden
+            />
+          ))}
+        {showShotCards &&
+          clip.shots.map((shot) => {
+            const hitScore = highlights.get(shot.index);
+            const pick = picks?.get(shot.index);
+            return (
+              <div
+                key={shot.index}
+                id={`shot-${clip.clipId}-${shot.index}`}
+                className={`shrink-0 w-36 rounded-md overflow-hidden border-2 transition-colors cursor-pointer ${
+                  hitScore !== undefined
+                    ? "border-primary shadow-lg shadow-primary/30"
+                    : "border-transparent hover:border-border"
+                }`}
+                onClick={() => onShotClick?.(shot)}
+                title={`shot ${shot.index} · ${fmtTime(shot.tStart)}–${fmtTime(shot.tEnd)}${
+                  shot.cloudCaption && shot.caption
+                    ? `\ncloud: ${shot.cloudCaption}\nlocal: ${shot.caption}`
+                    : shot.cloudCaption ?? shot.caption
+                      ? `\n${shot.cloudCaption ?? shot.caption}`
+                      : ""
+                }`}
+              >
+                <div className="relative">
+                  <img
+                    src={shot.thumbnailDataUrl}
+                    alt={`shot ${shot.index}`}
+                    className="w-full aspect-video object-cover bg-black"
+                    draggable={false}
+                  />
+                  {hitScore !== undefined && (
+                    <span className="absolute top-1 right-1 text-[10px] font-mono px-1 rounded bg-primary text-white">
+                      {hitScore.toFixed(2)}
+                    </span>
+                  )}
+                  {pick && (
+                    <span
+                      className="absolute top-1 left-1 text-[10px] font-mono px-1 rounded bg-amber-500/90 text-black"
+                      title={
+                        pick.reasons.join(", ") +
+                        (pick.uniquenessPenalty > 0
+                          ? ` (uniqueness −${pick.uniquenessPenalty.toFixed(2)})`
+                          : "")
+                      }
+                    >
+                      ★{pick.rank}
+                    </span>
+                  )}
+                  {!shot.embedding && clip.status !== "error" && (
+                    <span className="absolute bottom-1 right-1 text-[10px] px-1 rounded bg-black/60 text-white/70">
+                      embedding…
+                    </span>
+                  )}
+                </div>
+                <div className="px-1.5 py-1 bg-background text-[10px] text-text-secondary flex items-center justify-between">
+                  <span className="font-mono">
+                    {fmtTime(shot.tStart)}–{fmtTime(shot.tEnd)}
                   </span>
-                )}
-                {pick && (
-                  <span
-                    className="absolute top-1 left-1 text-[10px] font-mono px-1 rounded bg-amber-500/90 text-black"
-                    title={
-                      pick.reasons.join(", ") +
-                      (pick.uniquenessPenalty > 0
-                        ? ` (uniqueness −${pick.uniquenessPenalty.toFixed(2)})`
-                        : "")
-                    }
-                  >
-                    ★{pick.rank}
+                  <span title={`motion ${shot.motion.score.toFixed(1)}`}>
+                    {motionBadge(shot.motion.score)}
                   </span>
-                )}
-                {!shot.embedding && clip.status !== "error" && (
-                  <span className="absolute bottom-1 right-1 text-[10px] px-1 rounded bg-black/60 text-white/70">
-                    embedding…
+                  <span title={`sharpness ${shot.quality.sharpness.toFixed(0)}`}>
+                    {shot.quality.sharpness > 200 ? "sharp" : "soft"}
                   </span>
-                )}
+                </div>
               </div>
-              <div className="px-1.5 py-1 bg-background text-[10px] text-text-secondary flex items-center justify-between">
-                <span className="font-mono">
-                  {fmtTime(shot.tStart)}–{fmtTime(shot.tEnd)}
-                </span>
-                <span title={`motion ${shot.motion.score.toFixed(1)}`}>
-                  {motionBadge(shot.motion.score)}
-                </span>
-                <span title={`sharpness ${shot.quality.sharpness.toFixed(0)}`}>
-                  {shot.quality.sharpness > 200 ? "sharp" : "soft"}
-                </span>
-              </div>
-            </div>
-          );
-        })}
+            );
+          })}
         {clip.shots.length === 0 && clip.status === "analyzing" && (
           <div className="text-xs text-text-secondary py-6 px-2">
             decoding & watching for shots…

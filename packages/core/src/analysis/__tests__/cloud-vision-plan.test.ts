@@ -141,6 +141,61 @@ describe("planCloudFrames", () => {
     const plan = planCloudFrames(makeDossier({ denseFrames: many }), "timeline");
     expect(plan.blurrySkipped).toEqual([]);
     expect(plan.frames).toHaveLength(MAX_CLOUD_FRAMES);
+    // preMergeCount is the pre-cap in-scope count (nothing merged here).
+    expect(plan.preMergeCount).toBe(MAX_CLOUD_FRAMES + 50);
+  });
+});
+
+describe("planCloudFrames preMergeCount (merge-lever instrumentation)", () => {
+  const cap = (t: number, text: string) => ({ t, text });
+
+  it("timeline scope: counts in-scope frames before the blur gate and merge", () => {
+    const dossier = makeDossier({
+      denseFrames: frames,
+      denseCaptions: [
+        cap(1, "road with trees and blue sky"),
+        cap(5, "road with trees and blue sky ahead"),
+        cap(9, "road with trees and sky"),
+        cap(12, "a market stall piled with durians"),
+        cap(30, "vendor weighing durians at a market stall"),
+      ],
+    });
+    const plan = planCloudFrames(dossier, "timeline");
+    // 5 in scope; 1-9s merged into one rep -> 3 sent. Savings = 5 - 3.
+    expect(plan.preMergeCount).toBe(5);
+    expect(plan.frames).toHaveLength(3);
+  });
+
+  it("counts blur-gated frames too — the gate is part of the lever being measured", () => {
+    const dossier = makeDossier({
+      denseFrames: [
+        { t: 1, dataUrl: "f1", sharpness: 400 },
+        { t: 5, dataUrl: "f5", sharpness: BLUR_SHARPNESS_THRESHOLD - 1 },
+        { t: 9, dataUrl: "f9", sharpness: 400 },
+      ],
+      denseCaptions: [cap(1, "temple gate in sunlight"), cap(9, "temple gate in the sunlight")],
+    });
+    const plan = planCloudFrames(dossier, "timeline");
+    expect(plan.preMergeCount).toBe(3);
+    expect(plan.frames).toHaveLength(1);
+  });
+
+  it("candidate filtering happens BEFORE the count — out-of-range frames are not lever savings", () => {
+    // Shot 0 spans 0-10; frames at 12 and 30 are out of scope, not merged away.
+    const dossier = makeDossier({ denseFrames: frames });
+    const plan = planCloudFrames(dossier, "timeline", {
+      candidateShotIndexes: new Set([0]),
+    });
+    expect(plan.preMergeCount).toBe(3);
+    expect(plan.outOfCandidateRanges).toBe(2);
+    expect(plan.frames.map((f) => f.t)).toEqual([1, 5, 9]);
+  });
+
+  it("shots scope has no gate or merge: preMergeCount equals frames sent", () => {
+    const dossier = makeDossier({ denseFrames: frames });
+    const plan = planCloudFrames(dossier, "shots");
+    expect(plan.preMergeCount).toBe(plan.frames.length);
+    expect(plan.preMergeCount).toBe(3);
   });
 });
 

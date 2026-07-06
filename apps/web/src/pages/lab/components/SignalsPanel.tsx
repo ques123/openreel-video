@@ -1,18 +1,27 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   AudioEnvelope,
   AudioEvent,
   CandidatePick,
   SelectionResult,
+  SelectorConfig,
   Shot,
   ShotScore,
 } from "@openreel/core";
+import { isDefaultSelectorConfig } from "../selector-settings";
 import type { LabClip } from "../use-perception-lab";
+import { SelectorTuningPanel } from "./SelectorTuningPanel";
 
 interface SignalsPanelProps {
   clips: LabClip[];
   selection: SelectionResult | null;
   onShotClick: (clip: LabClip, shot: Shot) => void;
+  /** The user's saved (pre-preset) selector config — the tuning panel's source of truth. */
+  selectorConfig: SelectorConfig;
+  onSelectorConfigChange: (patch: Partial<SelectorConfig>) => void;
+  onResetSelectorConfig: () => void;
+  /** Non-null when a style preset is currently overriding the gate mode for selection. */
+  presetOverrideNote: string | null;
 }
 
 function fmtTime(s: number): string {
@@ -179,8 +188,22 @@ function ClipSignals({
  * candidates-only cloud enhance consume, so what the user sees here is
  * exactly what downstream steps acted on.
  */
-export function SignalsPanel({ clips, selection, onShotClick }: SignalsPanelProps) {
+export function SignalsPanel({
+  clips,
+  selection,
+  onShotClick,
+  selectorConfig,
+  onSelectorConfigChange,
+  onResetSelectorConfig,
+  presetOverrideNote,
+}: SignalsPanelProps) {
   const doneClips = useMemo(() => clips.filter((c) => c.status === "done"), [clips]);
+  // Starts open when the persisted config is already non-default (so a
+  // returning/tuned session shows its dials, not just a "tuned" pill), closed
+  // otherwise to keep the panel compact. Deliberately not resynced after
+  // mount — this is just the initial disclosure state.
+  const [tuneOpen, setTuneOpen] = useState(() => !isDefaultSelectorConfig(selectorConfig));
+  const tuned = !isDefaultSelectorConfig(selectorConfig);
 
   const scoresByClip = useMemo(() => {
     const m = new Map<string, Map<number, ShotScore>>();
@@ -212,7 +235,35 @@ export function SignalsPanel({ clips, selection, onShotClick }: SignalsPanelProp
 
   return (
     <div className="bg-background-secondary border border-border rounded-lg p-3">
-      <h3 className="text-sm font-semibold text-text-primary mb-2">Signals & selection</h3>
+      <div className="flex items-center justify-between gap-2 mb-2">
+        <h3 className="text-sm font-semibold text-text-primary flex items-center gap-1.5">
+          Signals & selection
+          {tuned && (
+            <span
+              className="px-1.5 py-0.5 rounded text-[10px] font-mono border border-amber-500/60 text-amber-500 font-normal"
+              title="Selector config differs from the shipped defaults"
+            >
+              tuned
+            </span>
+          )}
+        </h3>
+        <button
+          type="button"
+          onClick={() => setTuneOpen((o) => !o)}
+          className="text-[10px] text-text-secondary hover:text-text-primary underline decoration-dotted shrink-0"
+        >
+          {tuneOpen ? "hide tuning" : "tune"}
+        </button>
+      </div>
+
+      {tuneOpen && (
+        <SelectorTuningPanel
+          config={selectorConfig}
+          onChange={onSelectorConfigChange}
+          onReset={onResetSelectorConfig}
+          presetOverrideNote={presetOverrideNote}
+        />
+      )}
 
       {!selection || doneClips.length === 0 ? (
         <p className="text-xs text-text-secondary">

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cleanCaption, mergeDenseCaptions } from "../caption-text";
+import { cleanCaption, mergeDenseCaptions, similarCaptions } from "../caption-text";
 
 describe("cleanCaption", () => {
   it("strips Florence's boilerplate framing", () => {
@@ -43,6 +43,29 @@ describe("cleanCaption", () => {
     expect(cleanCaption("A man in a grey shirt grimaces as rain soaks the stalls.")).toBe(
       "A man in a grey shirt grimaces as rain soaks the stalls",
     );
+  });
+});
+
+describe("similarCaptions", () => {
+  // Also the transcript hallucination-collapse primitive (signal-score.ts):
+  // whisper loops repeat the same phrase with tiny punctuation variations.
+  it("matches identical and punctuation-variant texts", () => {
+    expect(similarCaptions("thanks for watching", "thanks for watching")).toBe(true);
+    expect(similarCaptions("Thanks for watching.", "Thanks for watching!")).toBe(true);
+  });
+
+  it("matches high word-overlap variations", () => {
+    expect(similarCaptions("road, trees and sky", "the road, trees and the sky")).toBe(true);
+  });
+
+  it("rejects genuinely different texts", () => {
+    expect(similarCaptions("thanks for watching", "the boats are heading out now")).toBe(false);
+    expect(similarCaptions("we reached the summit", "look at that view down there")).toBe(false);
+  });
+
+  it("never matches empty word sets against non-empty text", () => {
+    expect(similarCaptions("...", "thanks for watching")).toBe(false);
+    expect(similarCaptions("", "")).toBe(true); // exact-equality fast path
   });
 });
 

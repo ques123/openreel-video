@@ -7,10 +7,12 @@ import {
   fmtTokens,
   listExperiments,
   loadExperiment,
+  matchesExperimentFilter,
   type DirectorExperiment,
   type ExperimentSummary,
 } from "../../../services/experiments";
 import { estimateCostUSD, fmtUSD } from "../../../services/model-pricing";
+import { isDefaultSelectorConfig } from "../selector-settings";
 
 interface ExperimentMatrixModalProps {
   /** clipId -> File resolver for an experiment (cacheKey remap done upstream). */
@@ -268,6 +270,19 @@ function chipsFor(exp: ExperimentSummary, all: ExperimentSummary[]): SettingChip
       value: exp.styleId ? (stylePresetById(exp.styleId)?.label ?? exp.styleId) : "—",
       common: uniform((e) => e.styleId ?? null),
     },
+    {
+      label: "selector",
+      // "tuned"/"default" for at-a-glance readability; the common/differs
+      // border (below) still compares the FULL config, so two differently-
+      // tuned runs both showing "tuned" still light up amber against each
+      // other — candidates-mode picks came from genuinely different configs.
+      value: exp.selectorConfig
+        ? isDefaultSelectorConfig(exp.selectorConfig)
+          ? "default"
+          : "tuned"
+        : "—",
+      common: uniform((e) => JSON.stringify(e.selectorConfig ?? null)),
+    },
     { label: "model", value: exp.model, common: uniform((e) => e.model) },
     {
       label: "captions",
@@ -286,9 +301,16 @@ function statsLine(exp: ExperimentSummary): string | null {
   const parts: string[] = [];
   const directorTok = (exp.promptTokens ?? 0) + (exp.completionTokens ?? 0);
   if (directorTok > 0) {
-    const dirCost = estimateCostUSD(exp.model, exp.promptTokens ?? 0, exp.completionTokens ?? 0);
+    const cached = exp.cachedTokens ?? 0;
+    const dirCost = estimateCostUSD(
+      exp.model,
+      exp.promptTokens ?? 0,
+      exp.completionTokens ?? 0,
+      cached,
+    );
     parts.push(
       `${exp.model} ${fmtTokens(exp.promptTokens ?? 0)}/${fmtTokens(exp.completionTokens ?? 0)} tok` +
+        (cached > 0 ? ` (${fmtTokens(cached)} cached)` : "") +
         (dirCost !== null ? ` ≈${fmtUSD(dirCost)}` : ""),
     );
   }
@@ -322,6 +344,7 @@ export function ExperimentMatrixModal({
   const [experiments, setExperiments] = useState<ExperimentSummary[]>([]);
   const [included, setIncluded] = useState<string[]>([]);
   const [loaded, setLoaded] = useState<Record<string, DirectorExperiment>>({});
+  const [filter, setFilter] = useState("");
   const gridRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -352,6 +375,8 @@ export function ExperimentMatrixModal({
   const selected = included
     .map((id) => experiments.find((e) => e.id === id))
     .filter((e): e is ExperimentSummary => !!e);
+
+  const visiblePicks = experiments.filter((e) => matchesExperimentFilter(e, filter));
 
   const allVideos = () =>
     [...(gridRef.current?.querySelectorAll<HTMLVideoElement>("[data-matrix-video]") ?? [])];
@@ -403,7 +428,23 @@ export function ExperimentMatrixModal({
             {experiments.length === 0 && (
               <p className="text-xs text-text-secondary p-2">No experiments yet.</p>
             )}
-            {experiments.map((e) => {
+            {experiments.length > 0 && (
+              <input
+                type="search"
+                value={filter}
+                onChange={(ev) => setFilter(ev.target.value)}
+                placeholder="filter by brief / title / model"
+                className="w-full bg-background border border-border rounded-md px-2 py-1 text-xs text-text-primary placeholder:text-text-secondary/60 outline-none focus:border-primary"
+              />
+            )}
+            {/* Filter narrows the PICKER only — already-included runs stay
+                in the grid so a search can't silently drop a comparison. */}
+            {visiblePicks.length === 0 && experiments.length > 0 && (
+              <p className="text-xs text-text-secondary p-2">
+                no runs match “{filter.trim()}”
+              </p>
+            )}
+            {visiblePicks.map((e) => {
               const cost = experimentCostLine(e);
               return (
                 <label

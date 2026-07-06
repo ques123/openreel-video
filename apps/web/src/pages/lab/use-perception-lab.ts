@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "r
 import {
   applyCloudResults,
   blurryAnnotations,
+  DEFAULT_SELECTOR_CONFIG,
   expandSpanCaptions,
   FunnelOrchestrator,
   planCloudFrames,
@@ -16,12 +17,16 @@ import {
   type InferenceDevice,
   type SearchHit,
   type SelectionResult,
+  type SelectorConfig,
   type Shot,
   type TranscriptSegment,
 } from "@openreel/core";
 import { describeFramesCloud } from "../../services/cloud-vision";
 
-export type ClipStatus = "analyzing" | "done" | "error";
+export type ClipStatus = "analyzing" | "done" | "error" | "cancelled";
+
+/** What one enhanceClip run ended as (drives the bulk-run failure summary). */
+export type EnhanceOutcome = { ok: true } | { ok: false; error: string };
 
 export interface LabClip {
   clipId: string;
@@ -36,6 +41,12 @@ export interface LabClip {
   proxyName?: string;
   status: ClipStatus;
   error?: string;
+  /**
+   * True when this analysis replaces a cached dossier invalidated by a
+   * DOSSIER_VERSION bump — the UI labels it "re-analyzing (pipeline
+   * updated)" instead of it looking like a brand-new clip.
+   */
+  staleReanalysis?: boolean;
   durationS: number;
   /** Non-null when quota forced partial analysis (covers [0, this]). */
   analyzedThroughS: number | null;
@@ -116,7 +127,8 @@ const initialModelStatus: ModelStatus = {
   files: {},
 };
 
-const initialState: LabState = {
+/** Exported for unit testing (a clean starting point for reducer tests). */
+export const initialState: LabState = {
   clips: [],
   models: {
     embed: { ...initialModelStatus },
@@ -135,6 +147,7 @@ type Action =
       /** Set when this clip is a DJI .LRF proxy pair (see addFiles). */
       proxyName?: string;
     }
+  | { type: "clip-removed"; clipId: string }
   | { type: "event"; event: FunnelProgressEvent }
   | { type: "search-start"; query: string }
   | { type: "search-done"; query: string; hits: SearchHit[] }
@@ -155,7 +168,8 @@ function updateClip(
   };
 }
 
-function reducer(state: LabState, action: Action): LabState {
+/** Exported for unit testing (pure state transitions, no React needed). */
+export function reducer(state: LabState, action: Action): LabState {
   switch (action.type) {
     case "clip-added":
       return {
@@ -187,6 +201,9 @@ function reducer(state: LabState, action: Action): LabState {
           },
         ],
       };
+
+    case "clip-removed":
+      return { ...state, clips: state.clips.filter((c) => c.clipId !== action.clipId) };
 
     case "cloud-start":
       return updateClip(state, action.clipId, (c) => ({
@@ -332,11 +349,15 @@ function reducer(state: LabState, action: Action): LabState {
             // Rolling-window ingest is over — the clip is fully analyzed.
             ingestWindow: undefined,
           }));
+        case "cache-invalidated":
+          return updateClip(state, e.clipId, (c) => ({ ...c, staleReanalysis: true }));
         case "clip-error":
+          // A deliberate cancel is not an error — distinct status, no error
+          // text (the message is just "cancelled").
           return updateClip(state, e.clipId, (c) => ({
             ...c,
-            status: "error",
-            error: e.message,
+            status: e.cancelled ? "cancelled" : "error",
+            error: e.cancelled ? undefined : e.message,
           }));
         case "model-progress": {
           const model = state.models[e.model];
@@ -395,7 +416,17 @@ function readDebugIngestBudgetBytes(): number | undefined {
   }
 }
 
-export function usePerceptionLab(forceDevice: "auto" | InferenceDevice = "auto") {
+export function usePerceptionLab(
+  forceDevice: "auto" | InferenceDevice = "auto",
+  /**
+   * Effective SelectorConfig (tuned settings + any active style-preset
+   * adjustment — see selector-settings.ts effectiveSelectorConfig) for the
+   * selection memo below. Defaults to DEFAULT_SELECTOR_CONFIG so callers
+   * (and reducer-level tests, which never touch this hook) don't have to
+   * pass one.
+   */
+  selectorConfig: SelectorConfig = DEFAULT_SELECTOR_CONFIG,
+) {
   const [state, dispatch] = useReducer(reducer, initialState);
   const orchestratorRef = useRef<FunnelOrchestrator | null>(null);
   const dossiersRef = useRef<Map<string, ClipDossier>>(new Map());
@@ -562,7 +593,8 @@ export function usePerceptionLab(forceDevice: "auto" | InferenceDevice = "auto")
         const queryEmbedding = await orchestrator.embedText(templateQuery(trimmed), forceDevice);
         const result = searchShots(queryEmbedding, [...dossiersRef.current.values()], 12);
         dispatch({ type: "search-done", query: trimmed, hits: result.hits });
-      } catch {
+      } catch (err) {
+        console.error("[lab] search failed:", err);
         dispatch({ type: "search-done", query: trimmed, hits: [] });
       }
     },
@@ -570,6 +602,31 @@ export function usePerceptionLab(forceDevice: "auto" | InferenceDevice = "auto")
   );
 
   const getFile = useCallback((clipId: string) => filesRef.current.get(clipId) ?? null, []);
+
+  /**
+   * Cancel a clip's analysis (queued or in-flight). The clip lands in the
+   * distinct "cancelled" status via the orchestrator's cancelled-flagged
+   * clip-error event — see FunnelOrchestrator.cancelClip for the mid-flight
+   * semantics (partial work discarded, scratch cleaned, queue unblocked).
+   */
+  const cancelClip = useCallback((clipId: string) => {
+    orchestratorRef.current?.cancelClip(clipId);
+  }, []);
+
+  /**
+   * Drop a clip from this session: cancels any in-flight analysis first,
+   * then removes it from clip state, the dossier snapshot and the file map
+   * (so selection/search/director stop seeing it). SESSION-ONLY semantics:
+   * a dossier already persisted to IndexedDB stays cached there — it is
+   * keyed by file identity, so re-dropping the same file is an instant
+   * cache hit, and the storage panel's clear tools own actual eviction.
+   */
+  const removeClip = useCallback((clipId: string) => {
+    orchestratorRef.current?.cancelClip(clipId);
+    dossiersRef.current.delete(clipId);
+    filesRef.current.delete(clipId);
+    dispatch({ type: "clip-removed", clipId });
+  }, []);
 
   /** Snapshot of all completed dossiers (for the director). */
   const getDossiers = useCallback(() => [...dossiersRef.current.values()], []);
@@ -592,14 +649,18 @@ export function usePerceptionLab(forceDevice: "auto" | InferenceDevice = "auto")
       scope: CloudScope,
       model?: string,
       opts?: { candidateShotIndexes?: Set<number> },
-    ) => {
+    ): Promise<EnhanceOutcome> => {
       const dossier = dossiersRef.current.get(clipId);
       const file = filesRef.current.get(clipId);
-      if (!dossier || !file) return;
-      const { frames, blurrySkipped, outOfCandidateRanges } = planCloudFrames(dossier, scope, opts);
+      if (!dossier || !file) return { ok: false, error: "clip not analyzed yet" };
+      const { frames, blurrySkipped, outOfCandidateRanges, preMergeCount } = planCloudFrames(
+        dossier,
+        scope,
+        opts,
+      );
       if (frames.length === 0) {
         dispatch({ type: "cloud-error", clipId, message: "no frames available yet" });
-        return;
+        return { ok: false, error: "no frames available yet" };
       }
       dispatch({
         type: "cloud-start",
@@ -628,15 +689,20 @@ export function usePerceptionLab(forceDevice: "auto" | InferenceDevice = "auto")
           ms: run.ms,
           promptTokens: run.promptTokens,
           completionTokens: run.completionTokens,
+          // Cache-discount + merge-lever telemetry: how much of the prompt
+          // the provider served from cache, and how many in-scope frames the
+          // blur gate + similarity merge saved (preMergeCount vs framesSent).
+          cachedTokens: run.cachedTokens,
+          preMergeCount,
         });
         await getOrchestrator().saveDossier(file, dossier);
         dispatch({ type: "cloud-done", clipId });
+        return { ok: true };
       } catch (err) {
-        dispatch({
-          type: "cloud-error",
-          clipId,
-          message: err instanceof Error ? err.message : String(err),
-        });
+        console.error(`[lab] cloud enhance failed for "${dossier.fileName}":`, err);
+        const message = err instanceof Error ? err.message : String(err);
+        dispatch({ type: "cloud-error", clipId, message });
+        return { ok: false, error: message };
       }
     },
     [getOrchestrator],
@@ -648,9 +714,11 @@ export function usePerceptionLab(forceDevice: "auto" | InferenceDevice = "auto")
    * candidates-mode, and candidates-only enhance all read from. Recomputed
    * whenever the clips array is replaced (the reducer does this on every
    * event, including in-place mutations like shot-embedded/shot-captioned/
-   * audio-signals that matter to scoring). Swallows core errors so a
-   * mid-flight core implementation can't crash the lab UI — callers treat
-   * null as "not ready yet".
+   * audio-signals that matter to scoring) OR whenever selectorConfig changes
+   * (tuning panel edits, reset-to-defaults, or a style-preset swap) — the
+   * whole point of the tuning UI is that this recomputes live. Swallows
+   * core errors so a mid-flight core implementation can't crash the lab UI —
+   * callers treat null as "not ready yet".
    */
   const selection = useMemo<SelectionResult | null>(() => {
     const dossiers = state.clips
@@ -658,11 +726,12 @@ export function usePerceptionLab(forceDevice: "auto" | InferenceDevice = "auto")
       .map((c) => c.dossier as ClipDossier);
     if (dossiers.length === 0) return null;
     try {
-      return selectCandidates(dossiers);
-    } catch {
+      return selectCandidates(dossiers, selectorConfig);
+    } catch (err) {
+      console.error("[lab] selectCandidates failed:", err);
       return null;
     }
-  }, [state.clips]);
+  }, [state.clips, selectorConfig]);
 
   return {
     state,
@@ -672,6 +741,8 @@ export function usePerceptionLab(forceDevice: "auto" | InferenceDevice = "auto")
     getDossiers,
     embedQuery,
     enhanceClip,
+    cancelClip,
+    removeClip,
     selection,
     storage,
   };

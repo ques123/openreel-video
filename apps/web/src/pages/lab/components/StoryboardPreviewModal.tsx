@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
-import type { Storyboard } from "@openreel/core";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { MUSIC_BED_VOLUME, type Storyboard } from "@openreel/core";
 import { proxiedMusicUrl, type SunoTrack } from "../../../services/suno";
+import { nextSegmentIndex, pastSegmentEnd } from "./segment-boundary";
 
 interface StoryboardPreviewModalProps {
   storyboard: Storyboard;
@@ -27,10 +28,25 @@ function fmtTime(s: number): string {
 }
 
 /**
+ * requestVideoFrameCallback support (Chrome 83+/Safari 15.4+; the odd browser
+ * without it and jsdom keep the timeupdate fallback). Prototype-checked once
+ * so the render path can pick the fallback handler statically.
+ */
+const HAS_RVFC =
+  typeof HTMLVideoElement !== "undefined" &&
+  typeof HTMLVideoElement.prototype.requestVideoFrameCallback === "function";
+
+/**
  * Plays the storyboard's segments in order from the ORIGINAL files with a
- * single <video>. Segment boundaries are enforced on timeupdate (~250ms
- * granularity — segments may run a hair long; fine for a preview). Seeks land
- * on the nearest keyframe, so starts can be a few tenths off too.
+ * single <video>. Segment boundaries are enforced per PRESENTED frame via
+ * requestVideoFrameCallback (Chrome/Safari), so cuts land within a frame of
+ * the out-point — close to the frame-exact export, which refine decisions on
+ * sub-second segments are judged against. Where rVFC is unavailable the old
+ * timeupdate fallback (~250ms granularity; segments may run a hair long)
+ * still applies. Segment starts assign `currentTime`, which modern engines
+ * treat as a PRECISE seek (decode from the previous keyframe up to the exact
+ * time); `fastSeek()` would start playback sooner but lands on keyframes —
+ * the wrong trade when auditioning cut points.
  */
 export function StoryboardPreviewModal({
   storyboard,
@@ -47,7 +63,8 @@ export function StoryboardPreviewModal({
   );
   const [done, setDone] = useState(false);
   const [playbackError, setPlaybackError] = useState<string | null>(null);
-  // Guard so a burst of timeupdates past the boundary advances only once.
+  // Guard so a burst of boundary checks (presented frames or timeupdates)
+  // past the out-point advances only once.
   const advancedFromRef = useRef(-1);
 
   const musicTracks = music?.tracks ?? [];
@@ -74,7 +91,7 @@ export function StoryboardPreviewModal({
     const audio = audioRef.current;
     if (!audio || !selectedTrack) return;
     const wasPlaying = !audio.paused;
-    audio.volume = 0.35;
+    audio.volume = MUSIC_BED_VOLUME;
     audio.src = proxiedMusicUrl(selectedTrack.audioUrl || selectedTrack.streamAudioUrl);
     audio.load();
     if (wasPlaying) audio.play().catch(() => {});
@@ -143,6 +160,75 @@ export function StoryboardPreviewModal({
       v.play().catch(() => {});
     }
   }, [index, url, item]);
+
+  /**
+   * Advance (or finish) once the presented time reaches the segment's
+   * out-point. Shared by the per-frame rVFC watcher and the timeupdate
+   * fallback; `advancedFromRef` keeps a burst of checks past the boundary
+   * from advancing more than once. Returns true when it advanced/finished.
+   */
+  const crossBoundary = useCallback(
+    (v: HTMLVideoElement, presentedTimeS: number): boolean => {
+      if (!item) return false;
+      if (!pastSegmentEnd(presentedTimeS, item.outS) || advancedFromRef.current === index) {
+        return false;
+      }
+      advancedFromRef.current = index;
+      const next = nextSegmentIndex(index, items.length);
+      if (next !== null) {
+        setIndex(next);
+      } else {
+        v.pause();
+        setDone(true);
+      }
+      return true;
+    },
+    [index, item, items.length],
+  );
+
+  // Frame-accurate boundary watcher: rVFC fires per PRESENTED frame (vs
+  // timeupdate's ~250ms), so a cut is caught within one frame of the
+  // out-point instead of up to ~0.3s late. Re-armed per segment/source; the
+  // callback is cancelled on pause, segment change, and unmount, and
+  // re-registered on play — plus on seeked, because a seek presents a frame
+  // even while paused (scrubbing past the end while paused must still
+  // advance, matching the old timeupdate behavior).
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v || !url) return;
+    if (typeof v.requestVideoFrameCallback !== "function") return; // fallback handles it
+    let handle: number | null = null;
+    const cancel = () => {
+      if (handle !== null) {
+        v.cancelVideoFrameCallback(handle);
+        handle = null;
+      }
+    };
+    // Params typed structurally (not VideoFrameRequestCallback) so eslint's
+    // no-undef doesn't trip on the DOM lib type name.
+    const tick = (_now: number, meta: { mediaTime: number }) => {
+      handle = null;
+      // mediaTime is the presented frame's time — currentTime can run a
+      // little ahead of what's actually on screen. Skip checks mid-seek so a
+      // stale frame from before a segment swap can't trip the next boundary.
+      if (!v.seeking && crossBoundary(v, meta.mediaTime)) return;
+      if (!v.paused && !v.ended) handle = v.requestVideoFrameCallback(tick);
+    };
+    const arm = () => {
+      if (handle === null) handle = v.requestVideoFrameCallback(tick);
+    };
+    v.addEventListener("play", arm);
+    v.addEventListener("seeked", arm);
+    v.addEventListener("pause", cancel);
+    // autoPlay may have started before this effect ran — catch up.
+    if (!v.paused) arm();
+    return () => {
+      cancel();
+      v.removeEventListener("play", arm);
+      v.removeEventListener("seeked", arm);
+      v.removeEventListener("pause", cancel);
+    };
+  }, [url, crossBoundary]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -256,21 +342,18 @@ export function StoryboardPreviewModal({
             onLoadedMetadata={(e) => {
               e.currentTarget.currentTime = item.inS;
             }}
-            onTimeUpdate={(e) => {
-              const v = e.currentTarget;
-              if (v.currentTime < item.outS - 0.05 || advancedFromRef.current === index) return;
-              advancedFromRef.current = index;
-              if (index + 1 < items.length) {
-                setIndex(index + 1);
-              } else {
-                v.pause();
-                setDone(true);
-              }
-            }}
+            onTimeUpdate={
+              HAS_RVFC
+                ? undefined
+                : (e) => {
+                    const v = e.currentTarget;
+                    crossBoundary(v, v.currentTime);
+                  }
+            }
             onSeeked={() => {
               // Re-arm the boundary when the user scrubs back inside the segment.
               const v = videoRef.current;
-              if (v && v.currentTime < item.outS - 0.05) advancedFromRef.current = -1;
+              if (v && !pastSegmentEnd(v.currentTime, item.outS)) advancedFromRef.current = -1;
             }}
           />
         )}

@@ -16,6 +16,13 @@ export interface StylePreset {
   directorNote: string;
   /** Style words for the music (Suno) brief. */
   musicHint: string;
+  /**
+   * True for presets that embrace soft/artistic frames (mist, shallow
+   * focus, motion blur): the selector's blurry hard-gate becomes a scoring
+   * penalty instead (signal-score.ts selectorConfigForPreset), so such
+   * shots stay candidates. Absent/false = keep the hard gate.
+   */
+  allowSoftFocus?: boolean;
 }
 
 export const STYLE_PRESETS: readonly StylePreset[] = [
@@ -26,6 +33,7 @@ export const STYLE_PRESETS: readonly StylePreset[] = [
     directorNote:
       "This should feel like a mood you sink into, not a story being told. Let every shot breathe longer than feels safe, keep the quiet moments quiet, and let light and weather do the talking. Nothing needs to happen; it needs to feel.",
     musicHint: "ambient, slow, warm textures, minimal percussion",
+    allowSoftFocus: true,
   },
   {
     id: "energetic-vlog",
@@ -43,7 +51,7 @@ export const STYLE_PRESETS: readonly StylePreset[] = [
     label: "Neistat style",
     tagline: "Casey Neistat school — relentless momentum, jump cuts, abrupt ends",
     directorNote:
-      "Cut this like a Casey Neistat vlog. Cold-open on the most kinetic moment we have, then keep relentless forward momentum: jump cuts that skip the boring middle of everything, time-lapse energy to eat the transitions, and quick asides on small human details that make it personal. Story beats polish — and the second the story is told, end. Abruptly.",
+      "Cut this like a Casey Neistat vlog. Cold-open on the most kinetic moment we have, then keep relentless forward momentum: jump cuts that skip the boring middle of everything, time-lapse energy to eat the transitions, and quick asides on small human details that make it personal. Story beats polish — and the second the story is told, end. Abruptly. The music is added after the cut is locked, so carry the momentum in the cutting itself and the track will be made to match.",
     musicHint: "cool driving NYC-vlog energy, indie rock or electronic, momentum, confident",
   },
   {
@@ -53,6 +61,7 @@ export const STYLE_PRESETS: readonly StylePreset[] = [
     directorNote:
       "Make it feel like a real travel film: grand establishing moments, deliberate pacing, and a sense of place above all. Favor the widest, most composed views and give arrivals and reveals room to land. It should feel bigger than a holiday video.",
     musicHint: "cinematic orchestral-hybrid, uplifting, swelling builds",
+    allowSoftFocus: true,
   },
   {
     id: "memory-film",
@@ -61,13 +70,19 @@ export const STYLE_PRESETS: readonly StylePreset[] = [
     directorNote:
       "This is a keepsake, not a production. Favor the imperfect, human moments — laughter, glances, hands, small details — over the impressive ones, and let it feel like flipping through a memory. Soft pacing, warm and a little bittersweet.",
     musicHint: "nostalgic, gentle piano and acoustic guitar, warm, intimate, wistful",
+    allowSoftFocus: true,
   },
   {
+    // Copy honesty: music is generated AFTER the storyboard is locked (beat
+    // markers exist only in the manual editor), so nothing here may promise
+    // cuts landing ON musical beats — sell the rhythm of the cutting itself
+    // and let the generated track match it. The musicHint is exempt: it
+    // instructs the music generator, which CAN deliver a clear beat.
     id: "beat-montage",
-    label: "Beat montage",
-    tagline: "Cut to the rhythm — the music leads",
+    label: "Rhythm montage",
+    tagline: "Fast rhythmic cuts, music-video energy",
     directorNote:
-      "The music drives everything: cut on the beat, let the energy of the track decide the pacing, and treat the visuals like verses and choruses — patterns, repetitions, payoffs. No moment should outstay its bar.",
+      "Cut it like a music video: fast, rhythmic, relentless. Keep a driving pulse of short shots — patterns, repetitions, payoffs — and build and release energy like verses and choruses. The track is written after the cut is locked, so bake the rhythm into the editing itself and the music will be made to match. No moment outstays its welcome.",
     musicHint: "strong rhythmic pulse, clear beat, builds and drops, punchy",
   },
   {
@@ -101,6 +116,7 @@ export const STYLE_PRESETS: readonly StylePreset[] = [
     directorNote:
       "Build it around images that rhyme — echoes of color, shape, and gesture — more than around events. Slow, deliberate, and a little abstract; it should invite a second watch. One idea holds it together like a refrain.",
     musicHint: "minimalist, contemplative, strings or piano, spacious",
+    allowSoftFocus: true,
   },
   {
     id: "social-teaser",

@@ -10,7 +10,13 @@
  * runs in real time (a 30s cut takes ~30s), with per-segment progress.
  */
 
-import type { DirectorActivity, PromptSources, Storyboard, StoryboardItem } from "@openreel/core";
+import {
+  MUSIC_BED_VOLUME,
+  type DirectorActivity,
+  type PromptSources,
+  type Storyboard,
+  type StoryboardItem,
+} from "@openreel/core";
 import { estimateCostUSD, fmtUSD } from "./model-pricing";
 import {
   experimentCaptionCostUSD,
@@ -426,7 +432,7 @@ export async function exportDebugVideo(context: DebugExportContext): Promise<Blo
       const buf = await res.arrayBuffer();
       const audioBuffer = await audioCtx.decodeAudioData(buf);
       const gain = audioCtx.createGain();
-      gain.gain.value = 0.35;
+      gain.gain.value = MUSIC_BED_VOLUME;
       musicBedSource = audioCtx.createBufferSource();
       musicBedSource.buffer = audioBuffer;
       musicBedSource.loop = true;

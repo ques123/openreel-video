@@ -13,6 +13,26 @@ export function dossierCacheKey(file: File): string {
   return `${KEY_PREFIX}:${file.name}:${file.size}:${file.lastModified}`;
 }
 
+/**
+ * The cache keys this file's dossier would live under for every OLDER
+ * DOSSIER_VERSION, newest first. The version is baked into the key, so after
+ * a bump a plain load() misses without ever seeing the old record — these
+ * keys are how "cached but version-invalidated" is told apart from "brand
+ * new clip". Pure; exported for unit tests.
+ */
+export function staleDossierCacheKeys(
+  file: File,
+): Array<{ version: number; key: string }> {
+  const keys: Array<{ version: number; key: string }> = [];
+  for (let v = DOSSIER_VERSION - 1; v >= 1; v -= 1) {
+    keys.push({
+      version: v,
+      key: `perception:v${v}:${file.name}:${file.size}:${file.lastModified}`,
+    });
+  }
+  return keys;
+}
+
 interface SerializedShot extends Omit<Shot, "embedding" | "frameEmbeddings"> {
   embeddingB64: string | null;
   frameEmbeddingsB64: string[];
@@ -134,6 +154,58 @@ export function deserializeDossier(data: ArrayBuffer): ClipDossier {
   };
 }
 
+/**
+ * Coalescing, wall-clock-throttled scheduler for one dossier's incremental
+ * saves. Saving re-serializes the WHOLE dossier (every dense-frame JPEG), so
+ * the caption pass must not await a full write every few frames:
+ *
+ *  - request() is fire-and-forget. It starts a save only when none is in
+ *    flight AND at least minIntervalMs passed since the last one started;
+ *    otherwise it's dropped. Dropping is safe because the dossier is mutated
+ *    in place — any later save (or the final flush) persists this state too,
+ *    so a crash loses at most minIntervalMs of captions.
+ *  - flush() awaits the in-flight save (if any), then runs one final,
+ *    unconditional save — call it on completion so nothing is ever lost.
+ *
+ * Save errors are swallowed (incremental persistence is best-effort, same
+ * as the `.catch(() => undefined)` the call sites always used).
+ */
+export class ThrottledDossierSaver {
+  private inFlight: Promise<void> | null = null;
+  private lastStartMs = -Infinity;
+
+  constructor(
+    private readonly save: () => Promise<void>,
+    private readonly minIntervalMs: number = 10_000,
+    /** Injectable clock (tests). */
+    private readonly now: () => number = () => Date.now(),
+  ) {}
+
+  /** Fire-and-forget: save unless one is in flight or too recent. */
+  request(): void {
+    if (this.inFlight) return;
+    if (this.now() - this.lastStartMs < this.minIntervalMs) return;
+    void this.begin();
+  }
+
+  /** Await any in-flight save, then run one final unconditional save. */
+  async flush(): Promise<void> {
+    if (this.inFlight) await this.inFlight;
+    await this.begin();
+  }
+
+  private begin(): Promise<void> {
+    this.lastStartMs = this.now();
+    const done = this.save()
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.inFlight === done) this.inFlight = null;
+      });
+    this.inFlight = done;
+    return done;
+  }
+}
+
 export class DossierCache {
   constructor(private readonly storage: StorageEngine = new StorageEngine()) {}
 
@@ -154,6 +226,24 @@ export class DossierCache {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * The newest OLD-version dossier cached for this file, or null when none
+   * exists (a genuinely new clip). Only the version number is reported —
+   * the stale record's schema is arbitrary, so its data is never
+   * deserialized. The record itself is left in place (the storage panel's
+   * clear tools own cache eviction).
+   */
+  async findStaleVersion(file: File): Promise<number | null> {
+    for (const { version, key } of staleDossierCacheKeys(file)) {
+      try {
+        if (await this.storage.loadCache(key)) return version;
+      } catch {
+        // Unreadable record = treat as absent; this is best-effort labeling.
+      }
+    }
+    return null;
   }
 
   async save(file: File, dossier: ClipDossier): Promise<void> {

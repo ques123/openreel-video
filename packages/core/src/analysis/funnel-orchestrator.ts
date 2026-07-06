@@ -14,7 +14,8 @@ import {
   createWhisperWorker,
 } from "./create-workers";
 import { cleanCaption } from "./caption-text";
-import { DossierCache } from "./dossier-cache";
+import { BLUR_SHARPNESS_THRESHOLD, BLURRY_FRAME_CAPTION } from "./cloud-vision-plan";
+import { DossierCache, ThrottledDossierSaver } from "./dossier-cache";
 import {
   DOSSIER_VERSION,
   FUNNEL_DEFAULTS,
@@ -22,6 +23,7 @@ import {
   type AudioEvent,
   type ClipDossier,
   type DenseCaption,
+  type DenseFrame,
   type DossierPerf,
   type FunnelProgressEvent,
   type InferenceDevice,
@@ -40,6 +42,34 @@ export type ProgressListener = (event: FunnelProgressEvent) => void;
 
 /** Max embedding requests in flight (backpressure). */
 const MAX_EMBED_IN_FLIGHT = 4;
+
+/** Sync shot captions + request an incremental save every N captioned frames. */
+const CAPTION_SAVE_EVERY_FRAMES = 25;
+/** Min wall-clock between incremental dossier saves during a caption pass. */
+const CAPTION_SAVE_MIN_INTERVAL_MS = 10_000;
+
+/**
+ * The dense frames a local caption pass still has to process, in frame
+ * order. Resume point first: captions are appended in frame order, so
+ * anything at or before the last captioned timestamp is done (failed frames
+ * retry). Then the blur gate: frames the cloud pass would skip as too
+ * blurry to describe (same threshold) get `blurry: true` — the caller
+ * annotates them with BLURRY_FRAME_CAPTION instead of spending ~1.4s of
+ * FastVLM on motion smear. Pure; exported for unit tests.
+ */
+export function planLocalCaptionFrames(
+  denseFrames: DenseFrame[],
+  denseCaptions: DenseCaption[],
+): Array<{ frame: DenseFrame; blurry: boolean }> {
+  const lastT =
+    denseCaptions.length > 0 ? denseCaptions[denseCaptions.length - 1].t : -Infinity;
+  return denseFrames
+    .filter((f) => f.t > lastT)
+    .map((frame) => ({
+      frame,
+      blurry: frame.sharpness !== undefined && frame.sharpness < BLUR_SHARPNESS_THRESHOLD,
+    }));
+}
 
 interface PendingEmbed {
   resolve: (vector: Float32Array, ms: number) => void;
@@ -86,6 +116,8 @@ interface ClipRun {
   embedsInFlight: number;
   embedQueue: Array<() => void>;
   finished: boolean;
+  /** Set by cancelClip(); the run fails with a cancelled-flagged clip-error. */
+  cancelled: boolean;
   resolve: (dossier: ClipDossier) => void;
   reject: (err: Error) => void;
 }
@@ -123,6 +155,15 @@ export class FunnelOrchestrator {
   private clipModelLoadMs = 0;
   private whisperModelLoadMs = 0;
 
+  /** Clip whose visual pass currently owns the funnel worker (see cancelClip). */
+  private activeVisualClipId: string | null = null;
+  /**
+   * Cancellations that arrived while analyzeFile was still in its async
+   * cache-lookup phase (no ClipRun registered yet) — analyzeFile honors
+   * them before starting the pipeline.
+   */
+  private readonly preRunCancels = new Set<string>();
+
   /** Serialize visual passes: one clip decodes at a time. */
   private funnelChain: Promise<void> = Promise.resolve();
   /** Serialize caption generation: it's heavy and enrichment is background work. */
@@ -141,6 +182,15 @@ export class FunnelOrchestrator {
   warmUp(device: "auto" | InferenceDevice = "auto") {
     this.ensureEmbeddingWorker(device);
     this.ensureWhisperWorker(device);
+    // FastVLM (~1GB) is by far the biggest download and used to start only
+    // after clip 1's full visual+audio pass. Kick it now, fire-and-forget:
+    // the worker downloads in parallel and a failure here must never break
+    // warmUp (captioning is best-effort enrichment).
+    try {
+      this.ensureCaptionWorker(device);
+    } catch (err) {
+      console.warn("[perception] caption worker warm-up failed:", err);
+    }
   }
 
   dispose() {
@@ -162,6 +212,8 @@ export class FunnelOrchestrator {
     }
     this.pendingCaptions.clear();
     this.pendingAudioEnrichment.clear();
+    this.preRunCancels.clear();
+    this.activeVisualClipId = null;
     for (const [, run] of this.runsByClipId) {
       if (!run.finished) run.reject(new Error("disposed"));
     }
@@ -196,6 +248,8 @@ export class FunnelOrchestrator {
     const identity = opts.identityFile ?? file;
     const cached = await this.cache.load(identity);
     if (cached) {
+      // A cancel that raced the cache lookup loses to an instant hit.
+      this.preRunCancels.delete(clipId);
       const dossier: ClipDossier = {
         ...cached,
         clipId,
@@ -234,6 +288,20 @@ export class FunnelOrchestrator {
       return dossier;
     }
 
+    // The current-version key missed. If an OLDER-version record exists this
+    // is a re-analysis forced by a DOSSIER_VERSION bump, not a new clip —
+    // tell the UI so 91 clips "re-analyzing" after a deploy have a label.
+    const staleVersion = await this.cache.findStaleVersion(identity);
+    if (staleVersion !== null) {
+      this.emit({ kind: "cache-invalidated", clipId, previousVersion: staleVersion });
+    }
+
+    if (this.preRunCancels.delete(clipId)) {
+      // Cancelled while the cache lookups above were in flight — never start.
+      this.emit({ kind: "clip-error", clipId, message: "cancelled", cancelled: true });
+      throw new Error("cancelled");
+    }
+
     const run: ClipRun = {
       clipId,
       file,
@@ -263,6 +331,7 @@ export class FunnelOrchestrator {
       embedsInFlight: 0,
       embedQueue: [],
       finished: false,
+      cancelled: false,
       resolve: () => undefined,
       reject: () => undefined,
     };
@@ -302,16 +371,60 @@ export class FunnelOrchestrator {
     });
   }
 
-  cancelClip(clipId: string) {
-    this.funnelWorker?.postMessage({ type: "cancel", clipId });
+  /**
+   * Cancel a clip's in-flight analysis. Semantics: the clip FAILS — its
+   * "clip-error" event carries `cancelled: true` with message "cancelled"
+   * (analyzeFile's promise rejects the same way), all partial work is
+   * discarded, and its OPFS scratch is cleaned up. Not pause/resume.
+   *
+   * - Queued (visual pass not started): fails immediately and its turn in
+   *   the serialized decode queue is skipped.
+   * - Mid-visual-pass: the funnel worker aborts at its next checkpoint
+   *   (per ingest chunk / decoded frame / window), which is what actually
+   *   unblocks the decode queue — the clip-error fires when the worker
+   *   acknowledges, so the UI may show a brief "cancelling…".
+   * - Past the visual pass (whisper/embed phase): fails immediately; late
+   *   worker responses for the deregistered run are ignored on arrival.
+   *
+   * Returns false when no run is registered for the id — including the
+   * window where analyzeFile is still awaiting its cache lookup, in which
+   * case the intent is remembered and honored before the pipeline starts.
+   */
+  cancelClip(clipId: string): boolean {
+    const run = this.runsByClipId.get(clipId);
+    if (!run) {
+      this.preRunCancels.add(clipId);
+      return false;
+    }
+    if (run.finished) return false;
+    run.cancelled = true;
+    if (this.activeVisualClipId === clipId) {
+      // The worker polls this clip's cancel flag between ingest chunks,
+      // decoded frames and windows, then answers with an "error" response
+      // that routes through failRun (normalized to "cancelled" there).
+      this.funnelWorker?.postMessage({ type: "cancel", clipId });
+    } else {
+      this.failRun(run, "cancelled");
+    }
+    return true;
   }
 
   // -------------------------------------------------------------------------
 
   private runVisualPass(run: ClipRun): Promise<void> {
+    // Cancelled while queued: cancelClip already failed the run — skip the
+    // worker round-trip so the next clip in the queue starts immediately.
+    if (run.finished || run.cancelled) return Promise.resolve();
     return new Promise<void>((resolveVisual) => {
       const worker = this.ensureFunnelWorker();
       const requestId = uid("funnel");
+
+      /** This pass is over (done/error/cancelled): release the worker slot. */
+      const finishVisual = () => {
+        if (this.activeVisualClipId === run.clipId) this.activeVisualClipId = null;
+        worker.removeEventListener("message", handler);
+        resolveVisual();
+      };
 
       const handler = (event: MessageEvent<FunnelResponse>) => {
         const msg = event.data;
@@ -341,13 +454,13 @@ export class FunnelOrchestrator {
             break;
 
           case "shot":
-            this.handleShot(run, msg.shot, msg.thumbJpeg, msg.frames);
+            this.handleShot(run, msg.shot, msg.thumbDataUrl, msg.frames);
             break;
 
           case "dense-frame":
             run.denseFrames.push({
               t: msg.t,
-              dataUrl: jpegToDataUrl(msg.jpeg),
+              dataUrl: msg.dataUrl,
               sharpness: msg.sharpness,
             });
             break;
@@ -373,6 +486,13 @@ export class FunnelOrchestrator {
             break;
 
           case "done":
+            if (run.finished || run.cancelled) {
+              // Cancelled mid-decode but the pass completed before the worker
+              // saw the flag — discard the result instead of racing to done.
+              finishVisual();
+              this.failRun(run, "cancelled");
+              break;
+            }
             run.decodeMs = msg.perf.decodeMs;
             run.ingestMs = msg.perf.ingestMs;
             run.usedOpfs = msg.usedOpfs;
@@ -380,8 +500,7 @@ export class FunnelOrchestrator {
             run.ingestWindows = msg.ingestWindows;
             run.audioPcm = msg.audioPcm;
             run.visualDone = true;
-            worker.removeEventListener("message", handler);
-            resolveVisual();
+            finishVisual();
             // Start the audio pass now that the funnel worker is done reading
             // this file (whisper worker serializes its own queue).
             if (msg.audioPcm) {
@@ -424,14 +543,16 @@ export class FunnelOrchestrator {
             break;
 
           case "error":
-            worker.removeEventListener("message", handler);
-            resolveVisual();
-            this.failRun(run, msg.message);
+            finishVisual();
+            // A cancel abort can also surface as a scratch-read error if the
+            // teardown races the decode — normalize to "cancelled".
+            this.failRun(run, run.cancelled ? "cancelled" : msg.message);
             break;
         }
       };
 
       worker.addEventListener("message", handler);
+      this.activeVisualClipId = run.clipId;
       worker.postMessage({
         type: "analyze",
         requestId,
@@ -450,10 +571,9 @@ export class FunnelOrchestrator {
       Shot,
       "embedding" | "frameEmbeddings" | "thumbnailDataUrl" | "caption" | "cloudCaption"
     >,
-    thumbJpeg: ArrayBuffer,
+    thumbnailDataUrl: string,
     frames: Array<{ data: ArrayBuffer; width: number; height: number }>,
   ) {
-    const thumbnailDataUrl = jpegToDataUrl(thumbJpeg);
     const shot: Shot = {
       ...partialShot,
       thumbnailDataUrl,
@@ -587,52 +707,60 @@ export class FunnelOrchestrator {
   /**
    * Caption the dossier's dense frames, filling the denseCaptions timeline
    * and each shot's caption (nearest frame to its rep time). Frames already
-   * captioned (resume after an interrupted pass) are skipped by timestamp.
-   * Serialized globally, incremental cache saves for crash resilience.
+   * captioned (resume after an interrupted pass) are skipped by timestamp;
+   * blurry frames skip FastVLM and get the canned BLURRY_FRAME_CAPTION
+   * annotation (same gate as the cloud pass) so downstream consumers still
+   * see one annotation per frame. Serialized globally; incremental cache
+   * saves are throttled fire-and-forget (they re-serialize the WHOLE
+   * dossier) with a guaranteed final awaited save.
    */
   private captionDense(
     file: File,
     dossier: ClipDossier,
     device: "auto" | InferenceDevice = "auto",
   ) {
-    // Resume point: captions are appended in frame order, so anything at or
-    // before the last captioned timestamp is done (failed frames retry).
-    const lastT =
-      dossier.denseCaptions.length > 0
-        ? dossier.denseCaptions[dossier.denseCaptions.length - 1].t
-        : -Infinity;
-    const frames = dossier.denseFrames.filter((f) => f.t > lastT);
-    if (frames.length === 0) {
+    const pending = planLocalCaptionFrames(dossier.denseFrames, dossier.denseCaptions);
+    if (pending.length === 0) {
       this.syncShotCaptions(dossier);
       return;
     }
     this.ensureCaptionWorker(device);
     const total = dossier.denseFrames.length;
+    const saver = new ThrottledDossierSaver(
+      () => this.cache.save(file, dossier),
+      CAPTION_SAVE_MIN_INTERVAL_MS,
+    );
 
     this.captionChain = this.captionChain.then(async () => {
       const captions: DenseCaption[] = dossier.denseCaptions;
-      let done = total - frames.length;
-      for (const frame of frames) {
-        try {
-          const { caption: raw, ms } = await this.requestCaption(frame.dataUrl);
-          const text = cleanCaption(raw);
-          if (text) captions.push({ t: frame.t, text });
-          const perf = dossier.localCaptionPerf ?? { totalMs: 0, frames: 0 };
-          perf.totalMs += ms;
-          perf.frames += 1;
-          dossier.localCaptionPerf = perf;
-        } catch {
-          // best-effort; skip this frame
+      let done = total - pending.length;
+      for (const { frame, blurry } of pending) {
+        if (blurry) {
+          // No model call — the frame is below the cloud pass's blur
+          // threshold, so FastVLM would only describe motion smear.
+          captions.push({ t: frame.t, text: BLURRY_FRAME_CAPTION });
+        } else {
+          try {
+            const { caption: raw, ms } = await this.requestCaption(frame.dataUrl);
+            const text = cleanCaption(raw);
+            if (text) captions.push({ t: frame.t, text });
+            const perf = dossier.localCaptionPerf ?? { totalMs: 0, frames: 0 };
+            perf.totalMs += ms;
+            perf.frames += 1;
+            dossier.localCaptionPerf = perf;
+          } catch {
+            // best-effort; skip this frame
+          }
         }
         done += 1;
         this.emit({ kind: "dense-captions", clipId: dossier.clipId, done, total });
-        if (done % 25 === 0) {
+        if (done % CAPTION_SAVE_EVERY_FRAMES === 0) {
           this.syncShotCaptions(dossier);
-          await this.cache.save(file, dossier).catch(() => undefined);
+          saver.request();
         }
       }
       this.syncShotCaptions(dossier);
-      await this.cache.save(file, dossier).catch(() => undefined);
+      await saver.flush();
     });
   }
 
@@ -753,8 +881,15 @@ export class FunnelOrchestrator {
     run.finished = true;
     this.runsByClipId.delete(run.clipId);
     this.funnelWorker?.postMessage({ type: "cleanup", clipId: run.clipId });
-    console.error(`[perception] clip "${run.file.name}" failed:`, message);
-    this.emit({ kind: "clip-error", clipId: run.clipId, message });
+    if (!run.cancelled) {
+      console.error(`[perception] clip "${run.file.name}" failed:`, message);
+    }
+    this.emit({
+      kind: "clip-error",
+      clipId: run.clipId,
+      message,
+      ...(run.cancelled ? { cancelled: true } : {}),
+    });
     run.reject(new Error(message));
   }
 
@@ -973,14 +1108,4 @@ export class FunnelOrchestrator {
       }
     }
   }
-}
-
-function jpegToDataUrl(jpeg: ArrayBuffer): string {
-  const bytes = new Uint8Array(jpeg);
-  let binary = "";
-  const CHUNK = 0x8000;
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
-  }
-  return `data:image/jpeg;base64,${btoa(binary)}`;
 }

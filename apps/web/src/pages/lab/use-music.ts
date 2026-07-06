@@ -14,6 +14,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { MusicBrief, Storyboard } from "@openreel/core";
+import type { ModelChatUsage } from "../../services/openai-proxy";
 import {
   generateMusicBrief,
   pollMusicTask,
@@ -26,6 +27,13 @@ export type MusicPhase = "off" | "generating" | "partial" | "ready" | "error";
 export interface MusicState {
   phase: MusicPhase;
   brief: MusicBrief | null;
+  /**
+   * Real billed usage of the LLM brief-writer call for this session — null
+   * when the call hasn't happened, was never billed, or the heuristic
+   * fallback wrote the brief without a (successful) request. Surfaced here
+   * so the page can fold it into the experiment's cost accounting.
+   */
+  briefUsage: ModelChatUsage | null;
   taskId: string | null;
   tracks: SunoTrack[];
   committedTrackId: string | null;
@@ -40,6 +48,7 @@ const TIMEOUT_MS = 10 * 60 * 1000;
 const initialState: MusicState = {
   phase: "off",
   brief: null,
+  briefUsage: null,
   taskId: null,
   tracks: [],
   committedTrackId: null,
@@ -154,6 +163,11 @@ export function useMusic() {
             targetS,
             sceneHints,
             styleMusicHint,
+            (usage) => {
+              // Billed even if the brief later falls back to the heuristic.
+              if (cancelledRef.current) return;
+              setState((s) => ({ ...s, briefUsage: usage }));
+            },
           );
           if (cancelledRef.current) return;
           setState((s) => ({ ...s, brief }));

@@ -7,9 +7,13 @@
 
 import { ALL_FORMATS, BlobSource, Input, AudioSampleSink, type Source } from "mediabunny";
 import {
+  availableQuota,
+  copyBlobToScratch,
+  deleteScratchEntry,
   openPartialScratchSource,
   openPcmScratch,
   openScratchSource,
+  planAudioBackfillRoute,
   type PcmScratchReader,
 } from "./opfs-scratch";
 import { pipeline, type AutomaticSpeechRecognitionPipeline } from "@huggingface/transformers";
@@ -302,6 +306,8 @@ async function transcribe(req: Extract<WhisperRequest, { type: "transcribe" }>) 
   }
 
   let scratchClose: (() => void) | null = null;
+  /** Temporary scratch copy made for THIS request (deleted before returning). */
+  let tempScratchKey: string | null = null;
   try {
     // envelopeOnly requests never touch the ASR pipeline, so they don't wait
     // on (or trigger) model init — a cache backfill pass can complete before
@@ -321,12 +327,46 @@ async function transcribe(req: Extract<WhisperRequest, { type: "transcribe" }>) 
       scratchClose = scratch.close;
       source = scratch.source;
     } else {
-      source = new BlobSource(blob, { maxCacheSize: 64 * 2 ** 20 });
+      // No scratch copy exists for this clip (audio-signal backfill of a
+      // legacy cached dossier, or the small-file blob-fallback path). Raw
+      // BlobSource reads are random-access blob slices — the exact pattern
+      // that leaked browser-process memory and crashed Chrome at 17GB — so
+      // gate by size: big files get a one-off sequential scratch copy
+      // (leak-free) when quota allows, and are SKIPPED when it doesn't.
+      const route = planAudioBackfillRoute(blob.size, await availableQuota());
+      if (route === "blob") {
+        source = new BlobSource(blob, { maxCacheSize: 64 * 2 ** 20 });
+      } else if (route === "scratch-copy") {
+        tempScratchKey = `${clipId}.enrich`;
+        await copyBlobToScratch(blob, tempScratchKey);
+        const scratch = await openScratchSource(tempScratchKey);
+        scratchClose = scratch.close;
+        source = scratch.source;
+      } else {
+        const sizeGb = (blob.size / 1e9).toFixed(1);
+        console.warn(
+          `[perception] skipping audio pass for "${clipId}": ${sizeGb}GB file ` +
+            `is too large for raw blob reads (browser-crash risk) and doesn't ` +
+            `fit in OPFS scratch quota. Audio signals stay unfilled.`,
+        );
+        post({
+          type: "error",
+          requestId,
+          clipId,
+          message: `audio pass skipped: ${sizeGb}GB file exceeds safe blob-read size and available scratch quota`,
+        });
+        return;
+      }
     }
     const decoded = await decodeAudioTo16kMono(source, capS);
-    // Release the exclusive sync-access lock before the long ASR compute.
+    // Release the exclusive sync-access lock before the long ASR compute,
+    // and drop the temporary multi-GB scratch copy — the PCM is in memory now.
     scratchClose?.();
     scratchClose = null;
+    if (tempScratchKey) {
+      await deleteScratchEntry(tempScratchKey);
+      tempScratchKey = null;
+    }
     const audioDecodeMs = performance.now() - decodeStart;
 
     if (!decoded) {
@@ -401,6 +441,8 @@ async function transcribe(req: Extract<WhisperRequest, { type: "transcribe" }>) 
     post({ type: "error", requestId, clipId, message });
   } finally {
     scratchClose?.();
+    // Error-path cleanup: the happy path already deleted it after decode.
+    if (tempScratchKey) await deleteScratchEntry(tempScratchKey);
   }
 }
 

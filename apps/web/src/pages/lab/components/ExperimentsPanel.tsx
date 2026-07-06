@@ -1,9 +1,13 @@
 import { useEffect, useState } from "react";
 import {
+  collectExperimentsExport,
+  evictionWarning,
   experimentCostLine,
   listExperiments,
+  matchesExperimentFilter,
   type ExperimentSummary,
 } from "../../../services/experiments";
+import { downloadJson } from "./download-json";
 
 interface ExperimentsPanelProps {
   /** Change this value to make the panel re-read the index (new run saved). */
@@ -11,6 +15,9 @@ interface ExperimentsPanelProps {
   onOpen: (id: string) => void;
   onCompareGrid: () => void;
 }
+
+/** Show the filter input once the list is long enough to need one. */
+const FILTER_AT = 6;
 
 function fmtWhen(ms: number): string {
   return new Date(ms).toISOString().replace("T", " ").slice(5, 16);
@@ -28,10 +35,15 @@ function srcBadge(s: ExperimentSummary): string {
 /**
  * Every director run ever made on this machine, newest first — settings,
  * conversation and storyboard are all persisted, so experiments survive
- * reloads and can be re-watched/exported later.
+ * reloads and can be re-watched/exported later. The index is CAPPED at
+ * MAX_EXPERIMENTS with silent oldest-first eviction on save, hence the
+ * near-cap warning and the JSON export escape hatch (records only — rendered
+ * videos are too big to export; re-render from storyboard + source files).
  */
 export function ExperimentsPanel({ refreshToken, onOpen, onCompareGrid }: ExperimentsPanelProps) {
   const [experiments, setExperiments] = useState<ExperimentSummary[]>([]);
+  const [filter, setFilter] = useState("");
+  const [exporting, setExporting] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -51,12 +63,37 @@ export function ExperimentsPanel({ refreshToken, onOpen, onCompareGrid }: Experi
 
   if (experiments.length === 0) return null;
 
+  // Warn on the TOTAL count (the cap cares nothing for the active filter).
+  const capWarning = evictionWarning(experiments.length);
+  const visible = experiments.filter((e) => matchesExperimentFilter(e, filter));
+
+  const exportAll = () => {
+    setExporting(true);
+    void collectExperimentsExport()
+      .then((payload) =>
+        downloadJson(
+          `openreel-experiments-${new Date().toISOString().slice(0, 10)}.json`,
+          payload,
+        ),
+      )
+      .catch(() => undefined)
+      .finally(() => setExporting(false));
+  };
+
   return (
     <div className="bg-background-secondary border border-border rounded-lg p-3">
       <h3 className="text-sm font-semibold text-text-primary mb-2 flex items-center">
         Experiments
         <span className="font-normal text-text-secondary ml-1.5">{experiments.length}</span>
         <span className="flex-1" />
+        <button
+          className="text-[10px] font-normal px-1.5 py-0.5 rounded border border-border text-text-secondary hover:text-text-primary disabled:opacity-40 mr-1.5"
+          onClick={exportAll}
+          disabled={exporting}
+          title="Download every stored experiment as JSON (settings, conversations, storyboards, usage — rendered videos are not included)"
+        >
+          {exporting ? "exporting…" : "⬇ json"}
+        </button>
         <button
           className="text-[10px] font-normal px-1.5 py-0.5 rounded border border-border text-text-secondary hover:text-text-primary"
           onClick={onCompareGrid}
@@ -65,8 +102,22 @@ export function ExperimentsPanel({ refreshToken, onOpen, onCompareGrid }: Experi
           compare grid ⊞
         </button>
       </h3>
+      {capWarning && (
+        <p className="text-[10px] text-amber-500 border border-amber-500/40 bg-amber-500/10 rounded px-1.5 py-1 mb-1.5">
+          {capWarning}
+        </p>
+      )}
+      {experiments.length >= FILTER_AT && (
+        <input
+          type="search"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="filter by brief / title / model"
+          className="w-full mb-1.5 bg-background border border-border rounded-md px-2 py-1 text-xs text-text-primary placeholder:text-text-secondary/60 outline-none focus:border-primary"
+        />
+      )}
       <ul className="space-y-1 max-h-60 overflow-y-auto">
-        {experiments.map((e) => {
+        {visible.map((e) => {
           const cost = experimentCostLine(e);
           return (
             <li
@@ -86,6 +137,11 @@ export function ExperimentsPanel({ refreshToken, onOpen, onCompareGrid }: Experi
             </li>
           );
         })}
+        {visible.length === 0 && (
+          <li className="text-xs text-text-secondary px-1.5 py-1">
+            no experiments match “{filter.trim()}”
+          </li>
+        )}
       </ul>
     </div>
   );

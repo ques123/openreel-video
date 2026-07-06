@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  DIRECT_MAX_ROUNDS,
   DirectorLoopError,
+  REFINE_MAX_ROUNDS,
   runDirectorLoop,
   type DirectorLoopDeps,
 } from "../director-loop";
@@ -125,6 +127,59 @@ describe("runDirectorLoop", () => {
     expect(toolIds).toEqual(["c1", "c2", "c3"]);
   });
 
+  it("runs a round's search calls concurrently and replies in call order", async () => {
+    const started: string[] = [];
+    const resolvers = new Map<string, (r: SearchResult) => void>();
+    const deps = scripted(
+      [
+        turn(null, searchCall("c1", "market"), searchCall("c2", "dog")),
+        turn(null, submitCall("c3", { items: [validItem] })),
+      ],
+      {
+        search: (query) => {
+          started.push(query);
+          return new Promise<SearchResult>((resolve) => resolvers.set(query, resolve));
+        },
+      },
+    );
+    const run = runDirectorLoop(seed, deps);
+    // Both searches must be in flight before EITHER has resolved (the old
+    // sequential loop only started the second after the first finished).
+    await new Promise((r) => setTimeout(r, 0));
+    expect(started).toEqual(["market", "dog"]);
+    // Resolve out of order: replies must still land in call order.
+    resolvers.get("dog")!(oneHit);
+    resolvers.get("market")!(oneHit);
+    const result = await run;
+    const toolIds = result.messages
+      .filter((m): m is Extract<ChatMessage, { role: "tool" }> => m.role === "tool")
+      .map((m) => m.tool_call_id);
+    expect(toolIds).toEqual(["c1", "c2", "c3"]);
+  });
+
+  it("keeps per-call error replies when one concurrent search fails", async () => {
+    const deps = scripted(
+      [
+        turn(null, searchCall("c1", "market"), searchCall("c2", "dog")),
+        turn(null, submitCall("c3", { items: [validItem] })),
+      ],
+      {
+        search: async (query) => {
+          if (query === "market") throw new Error("index unavailable");
+          return oneHit;
+        },
+      },
+    );
+    const result = await runDirectorLoop(seed, deps);
+    const byId = new Map(
+      result.messages
+        .filter((m): m is Extract<ChatMessage, { role: "tool" }> => m.role === "tool")
+        .map((m) => [m.tool_call_id, m.content]),
+    );
+    expect(byId.get("c1")).toContain("search_shots error: index unavailable");
+    expect(byId.get("c2")).toContain('search_shots("dog")');
+  });
+
   it("nudges a prose-only turn back onto the tools", async () => {
     const deps = scripted([
       turn("I think I will pick the eating shots."),
@@ -219,5 +274,118 @@ describe("runDirectorLoop", () => {
     ) as Extract<ChatMessage, { role: "tool" }>;
     expect(reply.content).toContain('"query"');
     void emptySearch;
+  });
+
+  describe("round caps", () => {
+    const brokenSubmits = (n: number) =>
+      Array.from({ length: n }, (_, i) => turn(null, submitCall(`c${i}`, "{broken")));
+    const refineSeed: ChatMessage[] = [
+      ...seed,
+      { role: "assistant", content: "here is the storyboard" },
+      { role: "user", content: "USER FEEDBACK: tighter" },
+    ];
+
+    it("caps a direct run at DIRECT_MAX_ROUNDS", async () => {
+      const deps = scripted(brokenSubmits(DIRECT_MAX_ROUNDS + 2));
+      await expect(runDirectorLoop(seed, deps)).rejects.toMatchObject({ code: "no-storyboard" });
+      expect(deps.calls).toHaveLength(DIRECT_MAX_ROUNDS);
+    });
+
+    it("caps a refine (seed already holds assistant turns) at REFINE_MAX_ROUNDS", async () => {
+      const deps = scripted(brokenSubmits(DIRECT_MAX_ROUNDS + 2));
+      await expect(runDirectorLoop(refineSeed, deps)).rejects.toMatchObject({
+        code: "no-storyboard",
+      });
+      expect(deps.calls).toHaveLength(REFINE_MAX_ROUNDS);
+      expect(deps.calls[REFINE_MAX_ROUNDS - 1].toolChoice).toEqual({ name: "submit_storyboard" });
+    });
+
+    it("honors an explicit mode over the seed heuristic", async () => {
+      const deps = scripted(brokenSubmits(DIRECT_MAX_ROUNDS + 2), { mode: "refine" });
+      await expect(runDirectorLoop(seed, deps)).rejects.toMatchObject({ code: "no-storyboard" });
+      expect(deps.calls).toHaveLength(REFINE_MAX_ROUNDS);
+    });
+  });
+
+  describe("salvage duration handling", () => {
+    // Fixture shots: #0 0-10s, #1 10-25s, #2 25-60s.
+    const threeTens = [
+      { clipId: "clip-a", shotIndex: 0, in: 0, out: 10, role: "hook", why: "x" },
+      { clipId: "clip-a", shotIndex: 1, in: 10, out: 20, role: "action", why: "x" },
+      { clipId: "clip-a", shotIndex: 2, in: 25, out: 35, role: "outro", why: "x" },
+    ];
+
+    it("mechanically trims an over-target salvage toward the target", async () => {
+      const deps = scripted([turn(null, submitCall("c1", { items: threeTens }))], {
+        maxRounds: 1,
+        targetDurationS: 12,
+      });
+      const result = await runDirectorLoop(seed, deps);
+      // 30s submitted: drop the 10s tail (20s left), shorten the next by 8s.
+      expect(result.storyboard.items).toHaveLength(2);
+      expect(result.storyboard.items[1]).toMatchObject({ inS: 10, outS: 12 });
+      expect(result.durationViolation).toEqual({
+        targetS: 12,
+        submittedS: 30,
+        deliveredS: 12,
+        direction: "over",
+        trimmed: true,
+      });
+      expect(result.warnings[0]).toContain("DURATION");
+      expect(result.warnings[0]).toContain("trimmed to 12.0s");
+    });
+
+    it("flags an under-target salvage without trimming", async () => {
+      const deps = scripted([turn(null, submitCall("c1", { items: [validItem] }))], {
+        maxRounds: 1,
+        targetDurationS: 30,
+      });
+      const result = await runDirectorLoop(seed, deps);
+      expect(result.storyboard.items).toHaveLength(1);
+      expect(result.durationViolation).toEqual({
+        targetS: 30,
+        submittedS: 5,
+        deliveredS: 5,
+        direction: "under",
+        trimmed: false,
+      });
+      expect(result.warnings[0]).toContain("DURATION");
+    });
+
+    it("reports no violation on a normal accept", async () => {
+      const deps = scripted([turn(null, submitCall("c1", { items: [validItem] }))], {
+        targetDurationS: 5,
+      });
+      const result = await runDirectorLoop(seed, deps);
+      expect(result.durationViolation).toBeNull();
+    });
+  });
+
+  it("reports mid-speech-cut and adjacent-cosine metrics on the result", async () => {
+    const e = (x: number, y: number) => Float32Array.from([x, y]);
+    const withData = [
+      makeDossier({
+        clipId: "clip-a",
+        fileName: "a.mp4",
+        shots: [makeShot(0, 0, 10, { embedding: e(1, 0) }), makeShot(1, 10, 25, { embedding: e(1, 0) })],
+        transcript: [{ t0: 2, t1: 6, text: "a full spoken sentence" }],
+      }),
+    ];
+    const items = [
+      // out=4 lands 2s inside the 2-6s segment: too deep to snap, mid-speech.
+      { clipId: "clip-a", shotIndex: 0, in: 0, out: 4, role: "hook", why: "x" },
+      { clipId: "clip-a", shotIndex: 1, in: 10, out: 15, role: "b-roll", why: "x" },
+    ];
+    const deps = scripted([turn(null, submitCall("c1", { items }))], { dossiers: withData });
+    const result = await runDirectorLoop(seed, deps);
+    expect(result.metrics).toMatchObject({
+      cutCount: 4,
+      midSpeechCutCount: 1,
+      midSpeechCutFraction: 0.25,
+      adjacentPairCount: 1,
+    });
+    expect(result.metrics.adjacentCosineMean).toBeCloseTo(1);
+    expect(result.metrics.adjacentCosineMax).toBeCloseTo(1);
+    expect(result.durationViolation).toBeNull();
   });
 });

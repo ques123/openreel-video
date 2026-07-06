@@ -55,6 +55,34 @@ export interface ChatCompleteRequest {
 export interface ChatUsage {
   promptTokens: number;
   completionTokens: number;
+  /**
+   * Prompt tokens served from the provider's prompt cache — a SUBSET of
+   * promptTokens, billed at a discount (see model-pricing.ts). 0 when the
+   * API omits the detail or nothing was cached.
+   */
+  cachedTokens: number;
+}
+
+/** ChatUsage plus the model that billed it, for recording usage away from the call site. */
+export interface ModelChatUsage extends ChatUsage {
+  model: string;
+}
+
+/** Wire-format usage block on a chat completion (OpenAI and OpenRouter). */
+export interface RawChatUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  prompt_tokens_details?: { cached_tokens?: number };
+}
+
+/** Normalize a wire usage block; null when the API omitted usage entirely. */
+export function parseChatUsage(usage: RawChatUsage | undefined): ChatUsage | null {
+  if (!usage) return null;
+  return {
+    promptTokens: usage.prompt_tokens ?? 0,
+    completionTokens: usage.completion_tokens ?? 0,
+    cachedTokens: usage.prompt_tokens_details?.cached_tokens ?? 0,
+  };
 }
 
 export async function chatComplete(
@@ -82,14 +110,10 @@ export async function chatComplete(
   }
   const data = (await res.json()) as {
     choices?: { message?: AssistantTurn }[];
-    usage?: { prompt_tokens?: number; completion_tokens?: number };
+    usage?: RawChatUsage;
   };
-  if (data.usage && onUsage) {
-    onUsage({
-      promptTokens: data.usage.prompt_tokens ?? 0,
-      completionTokens: data.usage.completion_tokens ?? 0,
-    });
-  }
+  const usage = parseChatUsage(data.usage);
+  if (usage && onUsage) onUsage(usage);
   const message = data.choices?.[0]?.message;
   if (!message) throw new Error("OpenAI response had no message");
   return message;

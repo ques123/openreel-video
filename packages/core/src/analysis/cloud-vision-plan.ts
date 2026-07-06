@@ -43,6 +43,14 @@ export interface CloudFramePlan {
    * candidateShotIndexes is unset.
    */
   outOfCandidateRanges: number;
+  /**
+   * In-scope frame count BEFORE the blur gate + similarity merge (after
+   * candidate-range filtering, before the MAX_CLOUD_FRAMES cap). Compare
+   * with frames.length to measure what the merge lever actually saves —
+   * the data BLUR_SHARPNESS_THRESHOLD and the Jaccard gate get tuned
+   * against. Equals frames.length for "shots" scope (no gate, no merge).
+   */
+  preMergeCount: number;
 }
 
 /**
@@ -70,10 +78,12 @@ export function planCloudFrames(
   opts: PlanCloudFramesOpts = {},
 ): CloudFramePlan {
   if (scope === "shots") {
+    const shotFrames = selectCloudFrames(dossier, scope, opts.candidateShotIndexes);
     return {
-      frames: selectCloudFrames(dossier, scope, opts.candidateShotIndexes),
+      frames: shotFrames,
       blurrySkipped: [],
       outOfCandidateRanges: 0,
+      preMergeCount: shotFrames.length,
     };
   }
 
@@ -124,7 +134,12 @@ export function planCloudFrames(
       repText = text;
     }
   }
-  return { frames: frames.slice(0, MAX_CLOUD_FRAMES), blurrySkipped, outOfCandidateRanges };
+  return {
+    frames: frames.slice(0, MAX_CLOUD_FRAMES),
+    blurrySkipped,
+    outOfCandidateRanges,
+    preMergeCount: denseFrames.length,
+  };
 }
 
 /**

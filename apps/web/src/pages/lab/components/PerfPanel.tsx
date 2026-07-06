@@ -1,5 +1,6 @@
 import { estimateCostUSD, fmtUSD } from "../../../services/model-pricing";
 import type { LabClip, ModelStatus, StorageStatus } from "../use-perception-lab";
+import { StorageBreakdownSection } from "./StorageBreakdownSection";
 
 interface PerfPanelProps {
   clips: LabClip[];
@@ -189,21 +190,24 @@ export function PerfPanel({ clips, models, storage }: PerfPanelProps) {
         </div>
       )}
 
-      {storage && (
-        <div className="mb-3">
-          <p className="text-xs font-semibold text-text-primary mb-1">Storage</p>
-          <p className="text-[10px] font-mono text-text-secondary">
-            scratch: {fmtGB(Math.max(0, storage.quotaBytes - storage.usageBytes))} free of{" "}
-            {fmtGB(storage.quotaBytes)} ·{" "}
-            {storage.persisted ? "persistent ✓" : "best-effort"}
-          </p>
-          {storage.quotaBytes - storage.usageBytes < 20e9 && (
-            <p className="text-[10px] text-text-secondary/60">
-              long clips analyze in rolling passes sized to this budget
+      <div className="mb-3 space-y-1">
+        <p className="text-xs font-semibold text-text-primary mb-1">Storage</p>
+        {storage && (
+          <>
+            <p className="text-[10px] font-mono text-text-secondary">
+              scratch: {fmtGB(Math.max(0, storage.quotaBytes - storage.usageBytes))} free of{" "}
+              {fmtGB(storage.quotaBytes)} ·{" "}
+              {storage.persisted ? "persistent ✓" : "best-effort"}
             </p>
-          )}
-        </div>
-      )}
+            {storage.quotaBytes - storage.usageBytes < 20e9 && (
+              <p className="text-[10px] text-text-secondary/60">
+                long clips analyze in rolling passes sized to this budget
+              </p>
+            )}
+          </>
+        )}
+        <StorageBreakdownSection />
+      </div>
 
       {done.length > 0 && (
         <table className="w-full text-[10px] font-mono">

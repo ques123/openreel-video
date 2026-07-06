@@ -49,6 +49,45 @@ export async function availableQuota(): Promise<number | null> {
 }
 
 /**
+ * Headroom left un-spent when budgeting OPFS quota (storage estimates are
+ * approximate and other tabs/caches share the origin's quota).
+ */
+export const QUOTA_SAFETY_BYTES = 512 * 2 ** 20;
+
+/**
+ * Largest file safe to read through raw blob machinery (BlobSource /
+ * random-access blob.slice()). Chrome's blob layer leaks browser-process
+ * memory roughly per byte served — a 17GB clip crashed ALL of Chrome (see
+ * module doc). The funnel's small-file blob fallback uses the same ceiling.
+ */
+export const SAFE_BLOB_READ_MAX_BYTES = 512 * 2 ** 20;
+
+export type AudioBackfillRoute = "blob" | "scratch-copy" | "skip";
+
+/**
+ * How the whisper worker may read a clip it was handed as a raw Blob (no
+ * OPFS scratch copy, no PCM sidecar — e.g. the audio-signal backfill for a
+ * legacy cached dossier). Pure, unit-tested.
+ *
+ *  - "blob":         small enough for direct BlobSource reads.
+ *  - "scratch-copy": too big for blob reads, but fits in quota — stream-copy
+ *                    to OPFS ONCE (sequential blob reads are leak-free),
+ *                    then decode from the scratch copy.
+ *  - "skip":         neither is safe; the caller must skip the work rather
+ *                    than risk crashing the browser.
+ */
+export function planAudioBackfillRoute(
+  blobSize: number,
+  quotaAvailable: number | null,
+): AudioBackfillRoute {
+  if (blobSize <= SAFE_BLOB_READ_MAX_BYTES) return "blob";
+  if (quotaAvailable !== null && blobSize <= quotaAvailable - QUOTA_SAFETY_BYTES) {
+    return "scratch-copy";
+  }
+  return "skip";
+}
+
+/**
  * Stream-copy a Blob into the OPFS scratch dir under `key`.
  * Single sequential read of the source; bounded memory (one chunk at a time).
  */
