@@ -9,6 +9,7 @@
 
 import { mergeDenseCaptions } from "./caption-text";
 import type { SearchResult } from "./retrieval";
+import type { SelectionResult } from "./signal-score";
 import type { ClipDossier, DenseCaption } from "./types";
 import { storyboardDurationS, type Storyboard } from "./director-types";
 
@@ -40,6 +41,13 @@ export interface PromptSources {
    */
   cloudShotsModel?: string;
   cloudTimelineModel?: string;
+  /**
+   * How footage reaches the director. "full" (default) = every clip's full
+   * scene timeline. "candidates" = the signal-stack selector's scored
+   * top-picks per chapter, plus one-line gists of everything else so quiet
+   * moments stay visible and the model can still pull any shot.
+   */
+  promptMode?: "full" | "candidates";
 }
 
 export const DEFAULT_PROMPT_SOURCES: PromptSources = {
@@ -220,6 +228,24 @@ export function buildDossierMessage(
     `this is ALL the available footage, listed in RECORDING ORDER (oldest first).\n\n` +
     dossiersToPromptText(dossiers, sources)
   );
+}
+
+/**
+ * Candidates-mode footage message: chapters with the selector's scored
+ * top-picks rendered in full detail (timecodes, captions per the sources
+ * mixer, score + reasons), followed by a compact one-line-per-shot GIST list
+ * of ALL remaining shots (so nothing is invisible), plus transcripts per the
+ * sources mixer. Same RECORDING ORDER guarantees as buildDossierMessage;
+ * explains to the model that picks are heuristic suggestions, not commands,
+ * and any gist shot may be pulled instead.
+ */
+export function buildCandidatesMessage(
+  dossiers: ClipDossier[],
+  selection: SelectionResult,
+  sources?: PromptSources,
+): string {
+  void dossiers; void selection; void sources;
+  throw new Error("not implemented");
 }
 
 export function formatSearchResults(query: string, result: SearchResult): string {

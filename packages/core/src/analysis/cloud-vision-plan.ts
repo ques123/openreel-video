@@ -47,7 +47,22 @@ export interface CloudFramePlan {
  * frame + time span. Frames the local caption pass hasn't reached never
  * merge — there is nothing to judge similarity with.
  */
-export function planCloudFrames(dossier: ClipDossier, scope: CloudScope): CloudFramePlan {
+export interface PlanCloudFramesOpts {
+  /**
+   * When set, restrict the plan to the selector's candidate shots: shots
+   * scope sends only these shots' rep frames; timeline scope keeps only
+   * dense frames inside these shots' [tStart, tEnd] ranges (then blur-gates
+   * and merges as usual). Unset = current behavior (all shots/frames).
+   */
+  candidateShotIndexes?: Set<number>;
+}
+
+export function planCloudFrames(
+  dossier: ClipDossier,
+  scope: CloudScope,
+  opts: PlanCloudFramesOpts = {},
+): CloudFramePlan {
+  void opts; // consumed once candidate-driven planning lands (builder C)
   if (scope === "shots") {
     return { frames: selectCloudFrames(dossier, scope), blurrySkipped: [] };
   }
