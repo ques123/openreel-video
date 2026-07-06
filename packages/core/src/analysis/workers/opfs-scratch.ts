@@ -260,6 +260,16 @@ export async function openPcmScratch(key: string): Promise<PcmScratchReader> {
 }
 
 /**
+ * Delete exactly ONE scratch entry by name — no companion fan-out. The
+ * window loop uses this to drop a finished window while `.head`/`.tail`/
+ * `.audio` must live on.
+ */
+export async function deleteScratchEntry(name: string): Promise<void> {
+  void name;
+  throw new Error("not implemented");
+}
+
+/**
  * Open a scratch file as a mediabunny StreamSource backed by a sync access
  * handle. Caller MUST call close() (the handle holds an exclusive lock).
  */
