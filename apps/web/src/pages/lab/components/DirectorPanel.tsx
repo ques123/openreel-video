@@ -7,7 +7,11 @@ import {
   type PromptSources,
 } from "@openreel/core";
 import type { BriefSuggestion } from "../../../services/brief-suggestions";
-import { DIRECTOR_MODEL, DIRECTOR_MODELS } from "../../../services/openai-proxy";
+import {
+  DIRECTOR_MODEL,
+  DIRECTOR_MODELS,
+  shortModelLabel,
+} from "../../../services/openai-proxy";
 import type { UseDirectorReturn } from "../use-director";
 import type { MusicState } from "../use-music";
 import { PromptInspectorModal } from "./PromptInspectorModal";
@@ -427,7 +431,7 @@ export function DirectorPanel({
             >
               {DIRECTOR_MODELS.map((m) => (
                 <option key={m} value={m}>
-                  {m.replace("gpt-", "")}
+                  {shortModelLabel(m)}
                 </option>
               ))}
             </select>

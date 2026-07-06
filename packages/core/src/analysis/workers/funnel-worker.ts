@@ -298,13 +298,19 @@ async function analyze(req: Extract<FunnelRequest, { type: "analyze" }>) {
         const windowIngestStart = performance.now();
         await copyRangeToScratch(blob, clipId, startByte, endByte, onIngestProgress, shouldCancel);
         ingestMs += performance.now() - windowIngestStart;
-        scratch = await openWindowScratchSource(clipId, {
-          totalSize,
-          headBytes,
-          windowStart: startByte,
-          windowBytes: endByte - startByte,
-          tailStart: totalSize - tailBytes,
-        });
+        scratch = await openWindowScratchSource(
+          clipId,
+          {
+            totalSize,
+            headBytes,
+            windowStart: startByte,
+            windowBytes: endByte - startByte,
+            tailStart: totalSize - tailBytes,
+          },
+          // Bounded fallback for container metadata living outside
+          // head/window/tail (e.g. a trailer bigger than the tail cut).
+          blob,
+        );
       } else if (usedOpfs) {
         scratch = await openScratchSource(clipId);
       }

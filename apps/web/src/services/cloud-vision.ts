@@ -10,14 +10,26 @@
  */
 
 import type { CloudFrame, DenseCaption } from "@openreel/core";
-import { BASE, DIRECTOR_MODEL } from "./openai-proxy";
+import { apiBaseForModel, DIRECTOR_MODEL } from "./openai-proxy";
 
 const BATCH_SIZE = 8;
 /** Concurrent batch requests: ~6x wall-clock at identical cost. */
 const CONCURRENCY = 5;
 
-/** Caption-capable models offered in the UI (all confirmed on the proxy). */
-export const CAPTION_MODELS = ["gpt-5.2", "gpt-5.4-mini", "gpt-5.4-nano"] as const;
+/**
+ * Caption-capable models offered in the UI. Bare ids run through the OpenAI
+ * proxy; "qwen/..." ids through the OpenRouter proxy (both same-origin,
+ * keys injected server-side). The Qwen3-VL pair is the open-weights
+ * cost/quality ladder: 235B ≈ frontier quality at ~1/5 the price of
+ * gpt-5.4-mini's output rate; 30B-A3B is the budget tier.
+ */
+export const CAPTION_MODELS = [
+  "gpt-5.2",
+  "gpt-5.4-mini",
+  "gpt-5.4-nano",
+  "qwen/qwen3-vl-235b-a22b-instruct",
+  "qwen/qwen3-vl-30b-a3b-instruct",
+] as const;
 export type CaptionModel = (typeof CAPTION_MODELS)[number];
 
 const INSTRUCTIONS =
@@ -66,7 +78,7 @@ async function describeBatch(
     ),
   ];
 
-  const res = await fetch(`${BASE}/chat/completions`, {
+  const res = await fetch(`${apiBaseForModel(model)}/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -79,6 +91,14 @@ async function describeBatch(
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new Error(`cloud vision ${res.status}: ${body.slice(0, 200)}`);
+  }
+  // An unproxied path falls through to the SPA and returns 200 text/html —
+  // catch that before json() turns it into a cryptic SyntaxError.
+  if (!(res.headers.get("content-type") ?? "").includes("json")) {
+    throw new Error(
+      "cloud vision: proxy route is not set up on the server (got HTML instead " +
+        "of JSON) — for qwen/* models run docs/openrouter-proxy/apply-openrouter-proxy.sh on abacus",
+    );
   }
   const data = (await res.json()) as {
     choices?: { message?: { content?: string } }[];

@@ -12,6 +12,7 @@ import { buildFootageDigest, stylePresetById } from "@openreel/core";
 import { suggestBriefs, type BriefSuggestion } from "../../services/brief-suggestions";
 import { compileStoryboardToProject } from "../../services/compile-storyboard";
 import { CAPTION_MODELS, type CaptionModel } from "../../services/cloud-vision";
+import { shortModelLabel } from "../../services/openai-proxy";
 import { downloadBlob, exportDebugVideo, type DebugExportMeta } from "../../services/debug-export";
 import {
   saveExperiment,
@@ -647,11 +648,11 @@ export function PerceptionLabPage() {
                 className="bg-background-secondary border border-border rounded px-1.5 py-0.5 text-text-primary"
                 value={cloudModel}
                 onChange={(e) => setCloudModel(e.target.value as CaptionModel)}
-                title="Caption model: 5.2 = flagship; 5.4-mini ~3x cheaper; 5.4-nano ~11x cheaper. Runs per model coexist for comparison."
+                title="Caption model: 5.2 = flagship; 5.4-mini ~3x cheaper; 5.4-nano ~11x cheaper; qwen3-vl via OpenRouter = open-weights ladder (235b ≈ frontier at ~1/5 of mini's output price). Runs per model coexist for comparison."
               >
                 {CAPTION_MODELS.map((m) => (
                   <option key={m} value={m}>
-                    {m.replace("gpt-", "")}
+                    {shortModelLabel(m)}
                   </option>
                 ))}
               </select>

@@ -381,9 +381,25 @@ export function mapWindowRead(
  * (windowed scans request only timestamps the window covers). Caller MUST
  * close() (sync handles are exclusive).
  */
+/**
+ * Total bytes of out-of-coverage reads a window source may serve straight
+ * from the source Blob before erroring. Container parsers occasionally read
+ * OUTSIDE head/window/tail — e.g. a moov/trailer that starts earlier than
+ * the tail cut. A few small random-access blob reads are harmless (the
+ * Chrome blob leak is a per-byte cost that only matters at GB scale, which
+ * this cap makes impossible); unbounded fallback would silently reintroduce
+ * exactly that leak, hence the hard ceiling.
+ */
+export const WINDOW_BLOB_FALLBACK_MAX_BYTES = 64 * 2 ** 20;
+
 export async function openWindowScratchSource(
   key: string,
   meta: WindowScratchMeta,
+  /**
+   * Source Blob for BOUNDED out-of-coverage fallback reads (see
+   * WINDOW_BLOB_FALLBACK_MAX_BYTES). Omit to make uncovered reads throw.
+   */
+  fallbackBlob?: Blob,
 ): Promise<ScratchReader> {
   const dir = await getScratchDir();
 
@@ -406,14 +422,37 @@ export async function openWindowScratchSource(
   }
 
   let closed = false;
+  let fallbackBytesUsed = 0;
+  let fallbackWarned = false;
 
   const source = new StreamSource({
     getSize: () => meta.totalSize,
     read: (start, end) => {
       const segments = mapWindowRead(meta, start, end);
       if (!segments) {
+        // Out-of-coverage read (container box outside head/window/tail).
+        // Serve it from the source Blob — bounded, so a pathological layout
+        // can't reintroduce the blob-layer memory leak.
+        const len = end - start;
+        if (fallbackBlob && fallbackBytesUsed + len <= WINDOW_BLOB_FALLBACK_MAX_BYTES) {
+          fallbackBytesUsed += len;
+          if (!fallbackWarned) {
+            fallbackWarned = true;
+            console.warn(
+              `[perception] window source: read at ${start}..${end} is outside ` +
+                `head/window/tail coverage — serving from the source blob ` +
+                `(container metadata outside the ingest windows; capped at ` +
+                `${WINDOW_BLOB_FALLBACK_MAX_BYTES / 2 ** 20}MB per clip).`,
+            );
+          }
+          return fallbackBlob
+            .slice(start, end)
+            .arrayBuffer()
+            .then((buf) => new Uint8Array(buf));
+        }
         throw new Error(
-          `read at ${start}..${end} is outside the current ingest window (rolling-window analysis)`,
+          `read at ${start}..${end} is outside the current ingest window (rolling-window analysis)` +
+            (fallbackBlob ? ` and the ${WINDOW_BLOB_FALLBACK_MAX_BYTES / 2 ** 20}MB blob-fallback budget is exhausted` : ""),
         );
       }
       const buffer = new Uint8Array(end - start);
