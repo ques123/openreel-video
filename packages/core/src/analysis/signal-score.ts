@@ -10,7 +10,8 @@
  * reproducible and unit-tested.
  */
 
-import type { ClipDossier, Shot } from "./types";
+import { dot } from "./shot-metrics";
+import type { AudioEvent, ClipDossier, Shot, TranscriptSegment } from "./types";
 
 export interface SelectorWeights {
   /** Shot motion score (normalized within the footage set). */
@@ -110,6 +111,133 @@ export interface SelectionResult {
   picks: CandidatePick[];
 }
 
+// ---------------------------------------------------------------------------
+// internal helpers
+// ---------------------------------------------------------------------------
+
+/** Clamped overlap (seconds) between two intervals; 0 when disjoint. */
+function overlapSeconds(aStart: number, aEnd: number, bStart: number, bEnd: number): number {
+  return Math.max(0, Math.min(aEnd, bEnd) - Math.max(aStart, bStart));
+}
+
+/**
+ * "95th percentile" via nearest-rank on the sorted array, rounding the rank
+ * DOWN (`floor(p * (n-1))`). This — rather than linear interpolation, which
+ * would blend the second-highest value with the outlier itself — is what
+ * keeps a single extreme outlier from dragging the normalization denominator
+ * (and therefore every other shot's normalized score) toward it: with a
+ * handful of points the flooring lands one rank below the max whenever the
+ * outlier is the single largest value.
+ */
+function percentile(values: number[], p: number): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.floor(p * (sorted.length - 1))));
+  return sorted[idx];
+}
+
+/** value / p95, clamped to [0, 1]; 0 when p95 is non-positive (no signal at all). */
+function normalize(value: number, p95: number): number {
+  if (p95 <= 0) return 0;
+  return Math.min(1, value / p95);
+}
+
+/** The overlapping audio event with the highest intensity, plus its overlap duration. */
+function findMaxAudioEvent(
+  shot: Shot,
+  events: AudioEvent[] | undefined,
+): { event: AudioEvent; overlapS: number } | null {
+  if (!events || events.length === 0) return null;
+  let best: { event: AudioEvent; overlapS: number } | null = null;
+  for (const event of events) {
+    const overlapS = overlapSeconds(shot.tStart, shot.tEnd, event.t, event.t + event.durS);
+    if (overlapS <= 0) continue;
+    if (!best || event.intensity > best.event.intensity) {
+      best = { event, overlapS };
+    }
+  }
+  return best;
+}
+
+/** The first overlapping transcript segment that contains a config keyword. */
+function findKeywordMatch(
+  shot: Shot,
+  transcript: TranscriptSegment[],
+  keywords: string[],
+): { segment: TranscriptSegment; keyword: string } | null {
+  if (keywords.length === 0) return null;
+  const lowerKeywords = keywords.map((k) => k.toLowerCase()).filter((k) => k.length > 0);
+  if (lowerKeywords.length === 0) return null;
+  for (const segment of transcript) {
+    if (overlapSeconds(shot.tStart, shot.tEnd, segment.t0, segment.t1) <= 0) continue;
+    const lowerText = segment.text.toLowerCase();
+    for (const keyword of lowerKeywords) {
+      if (lowerText.includes(keyword)) return { segment, keyword };
+    }
+  }
+  return null;
+}
+
+function computeAudioComponent(
+  shot: Shot,
+  events: AudioEvent[] | undefined,
+  intensityP95: number,
+): number {
+  const found = findMaxAudioEvent(shot, events);
+  if (!found) return 0;
+  const normalized = normalize(found.event.intensity, intensityP95);
+  const scale = Math.min(1, found.overlapS / 1);
+  return normalized * scale;
+}
+
+function computeSpeechComponent(
+  shot: Shot,
+  transcript: TranscriptSegment[],
+  keywords: string[],
+): number {
+  const duration = shot.tEnd - shot.tStart;
+  if (duration <= 0) return 0;
+  let covered = 0;
+  for (const segment of transcript) {
+    covered += overlapSeconds(shot.tStart, shot.tEnd, segment.t0, segment.t1);
+  }
+  const fraction = Math.min(1, covered / duration);
+  return findKeywordMatch(shot, transcript, keywords) ? 1 : fraction;
+}
+
+function formatHHMM(epochMs: number): string {
+  return new Date(epochMs).toISOString().slice(11, 16);
+}
+
+function clipsLabel(n: number): string {
+  return `${n} clip${n === 1 ? "" : "s"}`;
+}
+
+function buildChapter(index: number, clips: ClipDossier[]): Chapter {
+  const first = clips[0].recordedAt as number;
+  const last = clips[clips.length - 1].recordedAt as number;
+  const timeLabel = first === last ? formatHHMM(first) : `${formatHHMM(first)}–${formatHHMM(last)}`;
+  return {
+    index,
+    clipIds: clips.map((c) => c.clipId),
+    startedAt: first,
+    label: `ch ${index + 1} · ${timeLabel} UTC · ${clipsLabel(clips.length)}`,
+  };
+}
+
+function buildUnknownChapter(index: number, clips: ClipDossier[]): Chapter {
+  return {
+    index,
+    clipIds: clips.map((c) => c.clipId),
+    startedAt: null,
+    label: `ch ${index + 1} · unknown time · ${clipsLabel(clips.length)}`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// public API
+// ---------------------------------------------------------------------------
+
 /**
  * Group clips into chapters by recordedAt gaps (> chapterGapMinutes starts a
  * new chapter). Clips are considered in recording order; clips with null
@@ -120,8 +248,41 @@ export function segmentChapters(
   dossiers: ClipDossier[],
   config: SelectorConfig = DEFAULT_SELECTOR_CONFIG,
 ): Chapter[] {
-  void dossiers; void config;
-  throw new Error("not implemented");
+  if (dossiers.length === 0) return [];
+
+  const withTime = dossiers.filter((d) => d.recordedAt !== null);
+  const withoutTime = dossiers.filter((d) => d.recordedAt === null);
+  // Reimplemented locally (not imported from director-prompt.ts, which is
+  // mid-edit elsewhere): sort ascending, nulls-last convention via Infinity.
+  // recordedAt is the file mtime = when recording STOPPED, so the gap we
+  // measure between clip N and clip N+1 is stop-time-to-stop-time — that's
+  // an approximation of the real gap (it's off by clip N's own duration in
+  // the "no gap at all" direction) but is what's available and is
+  // monotonic/consistent for splitting long idle stretches into chapters.
+  const sorted = [...withTime].sort((a, b) => (a.recordedAt as number) - (b.recordedAt as number));
+
+  const gapMs = config.chapterGapMinutes * 60_000;
+  const chapters: Chapter[] = [];
+  let current: ClipDossier[] = [];
+
+  for (const dossier of sorted) {
+    if (current.length > 0) {
+      const prev = current[current.length - 1];
+      const gap = (dossier.recordedAt as number) - (prev.recordedAt as number);
+      if (gap > gapMs) {
+        chapters.push(buildChapter(chapters.length, current));
+        current = [];
+      }
+    }
+    current.push(dossier);
+  }
+  if (current.length > 0) chapters.push(buildChapter(chapters.length, current));
+
+  if (withoutTime.length > 0) {
+    chapters.push(buildUnknownChapter(chapters.length, withoutTime));
+  }
+
+  return chapters;
 }
 
 /**
@@ -136,8 +297,137 @@ export function scoreShots(
   dossiers: ClipDossier[],
   config: SelectorConfig = DEFAULT_SELECTOR_CONFIG,
 ): ShotScore[] {
-  void dossiers; void config;
-  throw new Error("not implemented");
+  const entries: { dossier: ClipDossier; shot: Shot }[] = [];
+  for (const dossier of dossiers) {
+    for (const shot of dossier.shots) entries.push({ dossier, shot });
+  }
+
+  const motionP95 = percentile(
+    entries.map((e) => e.shot.motion.score),
+    0.95,
+  );
+  const sharpnessP95 = percentile(
+    entries.map((e) => e.shot.quality.sharpness),
+    0.95,
+  );
+  const allIntensities: number[] = [];
+  for (const dossier of dossiers) {
+    if (dossier.audioEvents) {
+      for (const event of dossier.audioEvents) allIntensities.push(event.intensity);
+    }
+  }
+  const intensityP95 = percentile(allIntensities, 0.95);
+
+  const { weights, gate } = config;
+  const weightsSum = weights.motion + weights.audio + weights.speech + weights.aesthetic;
+
+  return entries.map(({ dossier, shot }) => {
+    const duration = shot.tEnd - shot.tStart;
+    const components: ShotScoreComponents = {
+      motion: normalize(shot.motion.score, motionP95),
+      audio: computeAudioComponent(shot, dossier.audioEvents, intensityP95),
+      speech: computeSpeechComponent(shot, dossier.transcript, config.keywords),
+      aesthetic: normalize(shot.quality.sharpness, sharpnessP95),
+    };
+
+    const score =
+      weightsSum > 0
+        ? (components.motion * weights.motion +
+            components.audio * weights.audio +
+            components.speech * weights.speech +
+            components.aesthetic * weights.aesthetic) /
+          weightsSum
+        : 0;
+
+    const gateReasons: string[] = [];
+    if (shot.quality.sharpness < gate.minSharpness) {
+      gateReasons.push(
+        `blurry (sharpness ${Math.round(shot.quality.sharpness)} < ${Math.round(gate.minSharpness)})`,
+      );
+    }
+    if (duration < gate.minShotS) {
+      gateReasons.push(`too short (${duration.toFixed(1)}s < ${gate.minShotS.toFixed(1)}s)`);
+    }
+
+    return {
+      clipId: dossier.clipId,
+      fileName: dossier.fileName,
+      shotIndex: shot.index,
+      gated: gateReasons.length > 0,
+      gateReasons,
+      components,
+      score,
+    };
+  });
+}
+
+interface Candidate {
+  clipId: string;
+  fileName: string;
+  shotIndex: number;
+  score: number;
+  recordedAt: number | null;
+  embedding: Float32Array | null;
+  shot: Shot;
+  dossier: ClipDossier;
+  components: ShotScoreComponents;
+}
+
+type ReasonComponent = keyof ShotScoreComponents;
+const REASON_COMPONENT_ORDER: ReasonComponent[] = ["motion", "audio", "speech", "aesthetic"];
+/** A component earns a reason string when it supplies >= this share of the composite score. */
+const REASON_SHARE_THRESHOLD = 0.3;
+
+function componentReason(
+  component: ReasonComponent,
+  candidate: Candidate,
+  keywords: string[],
+): string {
+  switch (component) {
+    case "motion":
+      return `high motion (${Math.round(candidate.shot.motion.score)})`;
+    case "aesthetic":
+      return "sharp";
+    case "speech": {
+      const match = findKeywordMatch(candidate.shot, candidate.dossier.transcript, keywords);
+      return match ? `keyword "${match.keyword}"` : "speech";
+    }
+    case "audio": {
+      const found = findMaxAudioEvent(candidate.shot, candidate.dossier.audioEvents);
+      return found ? `loud moment (z ${found.event.intensity.toFixed(1)})` : "loud moment";
+    }
+  }
+}
+
+/** Dominant-component reasons for a pick, largest weighted share first. */
+function buildReasons(candidate: Candidate, weights: SelectorWeights, keywords: string[]): string[] {
+  const weighted: Record<ReasonComponent, number> = {
+    motion: candidate.components.motion * weights.motion,
+    audio: candidate.components.audio * weights.audio,
+    speech: candidate.components.speech * weights.speech,
+    aesthetic: candidate.components.aesthetic * weights.aesthetic,
+  };
+
+  let chosen = REASON_COMPONENT_ORDER.filter(
+    (c) => candidate.score > 0 && weighted[c] / candidate.score >= REASON_SHARE_THRESHOLD,
+  );
+  if (chosen.length === 0) {
+    let best = REASON_COMPONENT_ORDER[0];
+    for (const c of REASON_COMPONENT_ORDER) if (weighted[c] > weighted[best]) best = c;
+    chosen = [best];
+  } else {
+    chosen = [...chosen].sort((a, b) => weighted[b] - weighted[a]);
+  }
+
+  return chosen.map((c) => componentReason(c, candidate, keywords));
+}
+
+/** Earlier recordedAt (nulls last), then lower shotIndex — deterministic tie-break. */
+function tieBreakBetter(a: Candidate, b: Candidate): boolean {
+  const at = a.recordedAt ?? Infinity;
+  const bt = b.recordedAt ?? Infinity;
+  if (at !== bt) return at < bt;
+  return a.shotIndex < b.shotIndex;
 }
 
 /**
@@ -151,24 +441,95 @@ export function selectCandidates(
   dossiers: ClipDossier[],
   config: SelectorConfig = DEFAULT_SELECTOR_CONFIG,
 ): SelectionResult {
-  void dossiers; void config;
-  throw new Error("not implemented");
+  const chapters = segmentChapters(dossiers, config);
+  const scores = scoreShots(dossiers, config);
+
+  const dossierById = new Map(dossiers.map((d) => [d.clipId, d]));
+  const scoreByKey = new Map(scores.map((s) => [`${s.clipId}#${s.shotIndex}`, s]));
+
+  const picks: CandidatePick[] = [];
+  const pickedEmbeddings: Float32Array[] = [];
+
+  for (const chapter of chapters) {
+    const candidates: Candidate[] = [];
+    for (const clipId of chapter.clipIds) {
+      const dossier = dossierById.get(clipId);
+      if (!dossier) continue;
+      for (const shot of dossier.shots) {
+        const shotScore = scoreByKey.get(`${clipId}#${shot.index}`);
+        if (!shotScore || shotScore.gated) continue;
+        candidates.push({
+          clipId,
+          fileName: dossier.fileName,
+          shotIndex: shot.index,
+          score: shotScore.score,
+          recordedAt: dossier.recordedAt,
+          embedding: shot.embedding,
+          shot,
+          dossier,
+          components: shotScore.components,
+        });
+      }
+    }
+
+    const remaining = [...candidates];
+    let rank = 1;
+    while (remaining.length > 0 && rank <= config.topPerChapter) {
+      let bestIndex = 0;
+      let bestFinal = -Infinity;
+      let bestPenalty = 0;
+      for (let i = 0; i < remaining.length; i += 1) {
+        const candidate = remaining[i];
+        let penalty = 0;
+        if (candidate.embedding && pickedEmbeddings.length > 0) {
+          let maxCos = -Infinity;
+          for (const picked of pickedEmbeddings) {
+            const cos = dot(candidate.embedding, picked);
+            if (cos > maxCos) maxCos = cos;
+          }
+          penalty = config.uniquenessPenalty * maxCos;
+        }
+        const final = candidate.score - penalty;
+        if (
+          i === 0 ||
+          final > bestFinal ||
+          (final === bestFinal && tieBreakBetter(candidate, remaining[bestIndex]))
+        ) {
+          bestFinal = final;
+          bestIndex = i;
+          bestPenalty = penalty;
+        }
+      }
+
+      const [picked] = remaining.splice(bestIndex, 1);
+      picks.push({
+        clipId: picked.clipId,
+        fileName: picked.fileName,
+        shotIndex: picked.shotIndex,
+        chapterIndex: chapter.index,
+        rank,
+        finalScore: bestFinal,
+        uniquenessPenalty: bestPenalty,
+        reasons: buildReasons(picked, config.weights, config.keywords),
+      });
+      if (picked.embedding) pickedEmbeddings.push(picked.embedding);
+      rank += 1;
+    }
+  }
+
+  return { config, chapters, scores, picks };
 }
 
 /** Convenience: picks for one clip, sorted by shot index (filmstrip badges). */
-export function picksForClip(
-  selection: SelectionResult,
-  clipId: string,
-): CandidatePick[] {
-  void selection; void clipId;
-  throw new Error("not implemented");
+export function picksForClip(selection: SelectionResult, clipId: string): CandidatePick[] {
+  return selection.picks
+    .filter((p) => p.clipId === clipId)
+    .sort((a, b) => a.shotIndex - b.shotIndex);
 }
 
 /** The shot a pick refers to, or null when the dossier/shot is missing. */
-export function pickShot(
-  dossiers: ClipDossier[],
-  pick: CandidatePick,
-): Shot | null {
-  void dossiers; void pick;
-  throw new Error("not implemented");
+export function pickShot(dossiers: ClipDossier[], pick: CandidatePick): Shot | null {
+  const dossier = dossiers.find((d) => d.clipId === pick.clipId);
+  if (!dossier) return null;
+  return dossier.shots[pick.shotIndex] ?? null;
 }

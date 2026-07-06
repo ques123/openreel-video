@@ -18,6 +18,8 @@ import { DossierCache } from "./dossier-cache";
 import {
   DOSSIER_VERSION,
   FUNNEL_DEFAULTS,
+  type AudioEnvelope,
+  type AudioEvent,
   type ClipDossier,
   type DenseCaption,
   type DossierPerf,
@@ -63,6 +65,9 @@ interface ClipRun {
   audioDecodeMs: number;
   whisperMs: number;
   audioDurationS: number;
+  /** undefined = whisper response not yet received; null = no audio track. */
+  audioEnvelope: AudioEnvelope | null | undefined;
+  audioEvents: AudioEvent[] | undefined;
   ingestMs: number;
   usedOpfs: boolean;
   analyzedThroughS: number | null;
@@ -93,6 +98,15 @@ export class FunnelOrchestrator {
   private readonly pendingEmbeds = new Map<string, PendingEmbed>();
   private readonly pendingCaptions = new Map<string, PendingCaption>();
   private readonly runsByClipId = new Map<string, ClipRun>();
+  /**
+   * Cache-hit dossiers awaiting an envelopeOnly enrichment response, keyed
+   * by clipId. Separate from runsByClipId because a cache hit never creates
+   * a ClipRun (analyzeFile returns before the pipeline runs).
+   */
+  private readonly pendingAudioEnrichment = new Map<
+    string,
+    { file: File; dossier: ClipDossier }
+  >();
 
   private embedDevice: InferenceDevice | null = null;
   private whisperDevice: InferenceDevice | null = null;
@@ -137,6 +151,7 @@ export class FunnelOrchestrator {
       pending.reject(new Error("disposed"));
     }
     this.pendingCaptions.clear();
+    this.pendingAudioEnrichment.clear();
     for (const [, run] of this.runsByClipId) {
       if (!run.finished) run.reject(new Error("disposed"));
     }
@@ -170,6 +185,14 @@ export class FunnelOrchestrator {
       });
       for (const shot of dossier.shots) this.emit({ kind: "shot", clipId, shot });
       this.emit({ kind: "transcript", clipId, segments: dossier.transcript });
+      if (dossier.audioEnvelope) {
+        this.emit({
+          kind: "audio-signals",
+          clipId,
+          envelope: dossier.audioEnvelope,
+          events: dossier.audioEvents ?? [],
+        });
+      }
       this.emit({ kind: "clip-done", clipId, dossier });
       // Dense frames persist in the dossier, so an interrupted caption pass
       // resumes from where it stopped — no re-decode.
@@ -178,6 +201,9 @@ export class FunnelOrchestrator {
       } else {
         this.enrichCaptions(file, dossier, device);
       }
+      // Cached dossiers may predate audio signals entirely (undefined ==
+      // never computed) — backfill them without re-running ASR.
+      this.enrichAudioSignals(file, dossier, device);
       return dossier;
     }
 
@@ -199,6 +225,8 @@ export class FunnelOrchestrator {
       audioDecodeMs: 0,
       whisperMs: 0,
       audioDurationS: 0,
+      audioEnvelope: undefined,
+      audioEvents: undefined,
       visualDone: false,
       audioDone: false,
       embedsInFlight: 0,
@@ -464,6 +492,8 @@ export class FunnelOrchestrator {
       cloudVision: null,
       localCaptionPerf: null,
       transcript: run.transcript,
+      audioEnvelope: run.audioEnvelope,
+      audioEvents: run.audioEvents,
       perf,
     };
 
@@ -592,6 +622,36 @@ export class FunnelOrchestrator {
         }
       }
       if (updated) await this.cache.save(file, dossier).catch(() => undefined);
+    });
+  }
+
+  /**
+   * Backfill audioEnvelope/audioEvents for a cache-hit dossier that predates
+   * these fields (or never got a response), without re-running ASR. Fires a
+   * single envelopeOnly transcribe request; the whisper worker serializes
+   * ALL "transcribe" messages itself (a promise chain in its onmessage
+   * handler), so this never interleaves mid-decode with a live
+   * transcription or another enrichment pass — no extra queue needed here.
+   */
+  private enrichAudioSignals(
+    file: File,
+    dossier: ClipDossier,
+    device: "auto" | InferenceDevice = "auto",
+  ) {
+    // undefined = never computed; null = computed, no audio track (skip).
+    if (dossier.audioEnvelope !== undefined) return;
+    if (this.pendingAudioEnrichment.has(dossier.clipId)) return;
+    this.ensureWhisperWorker(device);
+    this.pendingAudioEnrichment.set(dossier.clipId, { file, dossier });
+    this.whisperWorker!.postMessage({
+      type: "transcribe",
+      requestId: uid("whisper-env"),
+      clipId: dossier.clipId,
+      blob: file,
+      opfsKey: null,
+      partial: null,
+      capS: dossier.analyzedThroughS,
+      envelopeOnly: true,
     });
   }
 
@@ -775,14 +835,47 @@ export class FunnelOrchestrator {
         });
         break;
       case "segments": {
+        if (msg.envelopeOnly) {
+          // Retroactive enrichment response for a cache-hit dossier — NOT a
+          // live pipeline run. Only set audio fields; never touch
+          // transcript/whisper perf (segments is always [] here).
+          const pending = this.pendingAudioEnrichment.get(msg.clipId);
+          if (pending) {
+            this.pendingAudioEnrichment.delete(msg.clipId);
+            const { file, dossier } = pending;
+            dossier.audioEnvelope = msg.audioEnvelope ?? null;
+            dossier.audioEvents = msg.audioEvents ?? [];
+            if (dossier.audioEnvelope) {
+              this.emit({
+                kind: "audio-signals",
+                clipId: dossier.clipId,
+                envelope: dossier.audioEnvelope,
+                events: dossier.audioEvents,
+              });
+            }
+            void this.cache.save(file, dossier).catch(() => undefined);
+          }
+          break;
+        }
+
         const run = msg.clipId ? this.runsByClipId.get(msg.clipId) : undefined;
         if (run) {
           run.transcript = msg.segments;
           run.audioDecodeMs = msg.perf.audioDecodeMs;
           run.whisperMs = msg.perf.whisperMs;
           run.audioDurationS = msg.perf.audioDurationS;
+          run.audioEnvelope = msg.audioEnvelope ?? null;
+          run.audioEvents = msg.audioEvents ?? [];
           run.audioDone = true;
           this.emit({ kind: "transcript", clipId: run.clipId, segments: msg.segments });
+          if (run.audioEnvelope) {
+            this.emit({
+              kind: "audio-signals",
+              clipId: run.clipId,
+              envelope: run.audioEnvelope,
+              events: run.audioEvents,
+            });
+          }
           this.maybeFinish(run);
         }
         break;
@@ -795,6 +888,7 @@ export class FunnelOrchestrator {
           run.audioDone = true;
           this.maybeFinish(run);
         }
+        if (msg.clipId) this.pendingAudioEnrichment.delete(msg.clipId);
         break;
       }
     }

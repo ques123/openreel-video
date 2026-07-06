@@ -11,6 +11,7 @@ import { pipeline, type AutomaticSpeechRecognitionPipeline } from "@huggingface/
 import type { InferenceDevice, TranscriptSegment } from "../types";
 import type { WhisperRequest, WhisperResponse } from "../worker-protocol";
 import { StreamingResampler } from "../audio-resample";
+import { computeAudioEnvelope, detectAudioEvents } from "../audio-signal";
 
 const MODEL_ID = "onnx-community/whisper-base";
 const TARGET_SAMPLE_RATE = 16000;
@@ -155,10 +156,13 @@ interface WhisperChunk {
 }
 
 async function transcribe(req: Extract<WhisperRequest, { type: "transcribe" }>) {
-  const { requestId, clipId, blob, opfsKey, partial, capS } = req;
+  const { requestId, clipId, blob, opfsKey, partial, capS, envelopeOnly } = req;
   let scratchClose: (() => void) | null = null;
   try {
-    const asr = transcriber ?? (await ensureInit("auto"));
+    // envelopeOnly requests never touch the ASR pipeline, so they don't wait
+    // on (or trigger) model init — a cache backfill pass can complete before
+    // whisper has finished downloading, and doesn't require it at all.
+    const asr = envelopeOnly ? null : (transcriber ?? (await ensureInit("auto")));
 
     const decodeStart = performance.now();
     // Prefer the OPFS scratch copy (sync-access reads, no blob machinery);
@@ -182,19 +186,44 @@ async function transcribe(req: Extract<WhisperRequest, { type: "transcribe" }>) 
     const audioDecodeMs = performance.now() - decodeStart;
 
     if (!decoded) {
-      // No audio track (or empty) — a valid outcome, not an error.
+      // No audio track (or empty) — a valid outcome, not an error. Envelope
+      // is explicitly null (computed, no audio) rather than omitted, so the
+      // orchestrator can tell "no audio" apart from "never computed".
       post({
         type: "segments",
         requestId,
         clipId,
         segments: [],
         perf: { audioDecodeMs, whisperMs: 0, audioDurationS: 0 },
+        audioEnvelope: null,
+        audioEvents: [],
+        envelopeOnly,
+      });
+      return;
+    }
+
+    // Always compute the loudness envelope + events — it's microseconds of
+    // work on the same samples the ASR pass (or nothing, for envelopeOnly)
+    // is about to consume.
+    const audioEnvelope = computeAudioEnvelope(decoded.audio, TARGET_SAMPLE_RATE);
+    const audioEvents = detectAudioEvents(audioEnvelope);
+
+    if (envelopeOnly) {
+      post({
+        type: "segments",
+        requestId,
+        clipId,
+        segments: [],
+        perf: { audioDecodeMs, whisperMs: 0, audioDurationS: decoded.durationS },
+        audioEnvelope,
+        audioEvents,
+        envelopeOnly: true,
       });
       return;
     }
 
     const whisperStart = performance.now();
-    const result = (await asr(decoded.audio, {
+    const result = (await asr!(decoded.audio, {
       chunk_length_s: 30,
       stride_length_s: 5,
       return_timestamps: true,
@@ -215,6 +244,8 @@ async function transcribe(req: Extract<WhisperRequest, { type: "transcribe" }>) 
       clipId,
       segments,
       perf: { audioDecodeMs, whisperMs, audioDurationS: decoded.durationS },
+      audioEnvelope,
+      audioEvents,
     });
   } catch (err) {
     const message =

@@ -29,6 +29,8 @@ interface DirectorPanelProps {
   /** Locked style preset id (or null = unlocked) — lifted to the page so director + music can share it. */
   styleId: string | null;
   onStyleIdChange: (id: string | null) => void;
+  /** Selector summary for the footage mixer's candidates hint/gate; null = no candidates computed yet. */
+  selectionSummary: { picks: number; chapters: number; totalShots: number } | null;
 }
 
 /** "Xs" elapsed since a music generation started, ticking once a second while it's in flight. */
@@ -78,11 +80,18 @@ export function DirectorPanel({
   requestBriefSuggestions,
   styleId,
   onStyleIdChange,
+  selectionSummary,
 }: DirectorPanelProps) {
   const { state, start, refine, cancel, reset } = director;
   const [brief, setBrief] = useState("");
   const [target, setTarget] = useState("60");
-  const [sources, setSources] = useState<PromptSources>(DEFAULT_PROMPT_SOURCES);
+  // promptMode is always set explicitly (never left undefined) so the footage
+  // chips' selected state is unambiguous; DEFAULT_PROMPT_SOURCES omits it
+  // (undefined means "full" everywhere else), so we pin it here.
+  const [sources, setSources] = useState<PromptSources>({
+    ...DEFAULT_PROMPT_SOURCES,
+    promptMode: "full",
+  });
   const [feedback, setFeedback] = useState("");
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [suggestions, setSuggestions] = useState<BriefSuggestion[]>([]);
@@ -253,6 +262,51 @@ export function DirectorPanel({
             })}
           </div>
         )}
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-text-secondary">
+          <span
+            className="font-medium"
+            title="How footage reaches the director: every clip's full scene timeline, or the signal-stack selector's scored top-picks"
+          >
+            footage:
+          </span>
+          <div className="flex gap-1">
+            <button
+              type="button"
+              disabled={running}
+              onClick={() => setSources((s) => ({ ...s, promptMode: "full" }))}
+              className={`px-1.5 py-0.5 text-[11px] rounded-md border disabled:opacity-40 ${
+                (sources.promptMode ?? "full") === "full"
+                  ? "border-primary bg-primary/10 text-text-primary"
+                  : "border-border text-text-secondary hover:text-text-primary"
+              }`}
+            >
+              full timeline
+            </button>
+            <button
+              type="button"
+              disabled={running || !selectionSummary || selectionSummary.picks === 0}
+              title={
+                !selectionSummary || selectionSummary.picks === 0
+                  ? "no candidates yet — analyze clips first"
+                  : undefined
+              }
+              onClick={() => setSources((s) => ({ ...s, promptMode: "candidates" }))}
+              className={`px-1.5 py-0.5 text-[11px] rounded-md border disabled:opacity-40 ${
+                sources.promptMode === "candidates"
+                  ? "border-amber-500 bg-amber-500/10 text-amber-500"
+                  : "border-border text-text-secondary hover:text-text-primary"
+              }`}
+            >
+              ★ candidates
+            </button>
+          </div>
+          {sources.promptMode === "candidates" && selectionSummary && (
+            <span className="text-text-secondary/80">
+              {selectionSummary.picks} candidates · {selectionSummary.chapters} chapters · of{" "}
+              {selectionSummary.totalShots} shots
+            </span>
+          )}
+        </div>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-text-secondary">
           <span className="font-medium" title="Which perception sources the director gets — for A/B testing input combinations">
             send:

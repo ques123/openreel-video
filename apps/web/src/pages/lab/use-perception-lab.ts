@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useRef } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import {
   applyCloudResults,
   blurryAnnotations,
@@ -6,12 +6,16 @@ import {
   FunnelOrchestrator,
   planCloudFrames,
   searchShots,
+  selectCandidates,
   templateQuery,
+  type AudioEnvelope,
+  type AudioEvent,
   type ClipDossier,
   type CloudScope,
   type FunnelProgressEvent,
   type InferenceDevice,
   type SearchHit,
+  type SelectionResult,
   type Shot,
   type TranscriptSegment,
 } from "@openreel/core";
@@ -39,9 +43,29 @@ export interface LabClip {
   captionsDone: number;
   captionsTotal: number;
   /** Cloud enhance run state (null = never started this session). */
-  cloud: { busy: boolean; done: number; total: number; error: string | null } | null;
+  cloud: {
+    busy: boolean;
+    done: number;
+    total: number;
+    error: string | null;
+    /**
+     * Timeline frames skipped by a candidates-only enhance because they fell
+     * outside every candidate shot's range (set at cloud-start; unset for a
+     * normal, non-candidate-scoped run).
+     */
+    outOfCandidateRanges?: number;
+  } | null;
   transcript: TranscriptSegment[];
   dossier: ClipDossier | null;
+  /**
+   * Loudness envelope/events from the audio pass. May arrive via a dedicated
+   * "audio-signals" event OR already be present on the dossier at clip-done
+   * (enrichment can fire either before or after the clip finishes). Absent
+   * (undefined) = no signal has arrived yet; present-but-empty events = the
+   * clip is quiet.
+   */
+  audioEnvelope?: AudioEnvelope | null;
+  audioEvents?: AudioEvent[];
 }
 
 export interface ModelStatus {
@@ -85,7 +109,7 @@ type Action =
   | { type: "search-start"; query: string }
   | { type: "search-done"; query: string; hits: SearchHit[] }
   | { type: "search-clear" }
-  | { type: "cloud-start"; clipId: string; total: number }
+  | { type: "cloud-start"; clipId: string; total: number; outOfCandidateRanges?: number }
   | { type: "cloud-progress"; clipId: string; done: number; total: number }
   | { type: "cloud-done"; clipId: string }
   | { type: "cloud-error"; clipId: string; message: string };
@@ -126,6 +150,8 @@ function reducer(state: LabState, action: Action): LabState {
             cloud: null,
             transcript: [],
             dossier: null,
+            audioEnvelope: undefined,
+            audioEvents: undefined,
           },
         ],
       };
@@ -133,19 +159,37 @@ function reducer(state: LabState, action: Action): LabState {
     case "cloud-start":
       return updateClip(state, action.clipId, (c) => ({
         ...c,
-        cloud: { busy: true, done: 0, total: action.total, error: null },
+        cloud: {
+          busy: true,
+          done: 0,
+          total: action.total,
+          error: null,
+          outOfCandidateRanges: action.outOfCandidateRanges,
+        },
       }));
 
     case "cloud-progress":
       return updateClip(state, action.clipId, (c) => ({
         ...c,
-        cloud: { busy: true, done: action.done, total: action.total, error: null },
+        cloud: {
+          busy: true,
+          done: action.done,
+          total: action.total,
+          error: null,
+          outOfCandidateRanges: c.cloud?.outOfCandidateRanges,
+        },
       }));
 
     case "cloud-done":
       return updateClip(state, action.clipId, (c) => ({
         ...c,
-        cloud: { busy: false, done: 0, total: 0, error: null },
+        cloud: {
+          busy: false,
+          done: 0,
+          total: 0,
+          error: null,
+          outOfCandidateRanges: c.cloud?.outOfCandidateRanges,
+        },
         // cloud captions were written into the dossier in place; new shot
         // array reference triggers re-render of captions everywhere.
         shots: [...c.shots],
@@ -154,7 +198,13 @@ function reducer(state: LabState, action: Action): LabState {
     case "cloud-error":
       return updateClip(state, action.clipId, (c) => ({
         ...c,
-        cloud: { busy: false, done: 0, total: 0, error: action.message },
+        cloud: {
+          busy: false,
+          done: 0,
+          total: 0,
+          error: action.message,
+          outOfCandidateRanges: c.cloud?.outOfCandidateRanges,
+        },
       }));
 
     case "search-start":
@@ -214,6 +264,12 @@ function reducer(state: LabState, action: Action): LabState {
           }));
         case "transcript":
           return updateClip(state, e.clipId, (c) => ({ ...c, transcript: e.segments }));
+        case "audio-signals":
+          return updateClip(state, e.clipId, (c) => ({
+            ...c,
+            audioEnvelope: e.envelope,
+            audioEvents: e.events,
+          }));
         case "clip-done":
           return updateClip(state, e.clipId, (c) => ({
             ...c,
@@ -227,6 +283,11 @@ function reducer(state: LabState, action: Action): LabState {
             shots: e.dossier.shots,
             transcript: e.dossier.transcript,
             embeddedCount: e.dossier.shots.filter((s) => s.embedding).length,
+            // audio enrichment can land before or after clip-done — prefer
+            // whatever the dossier itself carries, falling back to whatever
+            // an earlier "audio-signals" event already set on this clip.
+            audioEnvelope: e.dossier.audioEnvelope ?? c.audioEnvelope ?? null,
+            audioEvents: e.dossier.audioEvents ?? c.audioEvents,
           }));
         case "clip-error":
           return updateClip(state, e.clipId, (c) => ({
@@ -287,6 +348,18 @@ export function usePerceptionLab(forceDevice: "auto" | InferenceDevice = "auto")
       orchestrator.onProgress((event) => {
         if (event.kind === "clip-done") {
           dossiersRef.current.set(event.clipId, event.dossier);
+        }
+        if (event.kind === "audio-signals") {
+          // The orchestrator's own dossier object is usually the SAME
+          // reference stashed here at clip-done, so it already carries this
+          // data by the time the event fires. Only clip-done races it (an
+          // enrichment pass finishing before the funnel does) — top up the
+          // ref's object in that case so getDossiers()/selection reflect it.
+          const dossier = dossiersRef.current.get(event.clipId);
+          if (dossier && (!dossier.audioEnvelope || !dossier.audioEvents)) {
+            dossier.audioEnvelope = event.envelope;
+            dossier.audioEvents = event.events;
+          }
         }
         dispatch({ type: "event", event });
       });
@@ -358,16 +431,26 @@ export function usePerceptionLab(forceDevice: "auto" | InferenceDevice = "auto")
    * leave the device — reachable only from the explicit Enhance button.
    */
   const enhanceClip = useCallback(
-    async (clipId: string, scope: CloudScope, model?: string) => {
+    async (
+      clipId: string,
+      scope: CloudScope,
+      model?: string,
+      opts?: { candidateShotIndexes?: Set<number> },
+    ) => {
       const dossier = dossiersRef.current.get(clipId);
       const file = filesRef.current.get(clipId);
       if (!dossier || !file) return;
-      const { frames, blurrySkipped } = planCloudFrames(dossier, scope);
+      const { frames, blurrySkipped, outOfCandidateRanges } = planCloudFrames(dossier, scope, opts);
       if (frames.length === 0) {
         dispatch({ type: "cloud-error", clipId, message: "no frames available yet" });
         return;
       }
-      dispatch({ type: "cloud-start", clipId, total: frames.length });
+      dispatch({
+        type: "cloud-start",
+        clipId,
+        total: frames.length,
+        outOfCandidateRanges: outOfCandidateRanges > 0 ? outOfCandidateRanges : undefined,
+      });
       try {
         const run = await describeFramesCloud(
           frames,
@@ -403,5 +486,27 @@ export function usePerceptionLab(forceDevice: "auto" | InferenceDevice = "auto")
     [getOrchestrator],
   );
 
-  return { state, addFiles, runSearch, getFile, getDossiers, embedQuery, enhanceClip };
+  /**
+   * The signal-stack selector's scoring/candidates over every completed
+   * dossier — the ground truth the Signals panel, filmstrip badges, director
+   * candidates-mode, and candidates-only enhance all read from. Recomputed
+   * whenever the clips array is replaced (the reducer does this on every
+   * event, including in-place mutations like shot-embedded/shot-captioned/
+   * audio-signals that matter to scoring). Swallows core errors so a
+   * mid-flight core implementation can't crash the lab UI — callers treat
+   * null as "not ready yet".
+   */
+  const selection = useMemo<SelectionResult | null>(() => {
+    const dossiers = state.clips
+      .filter((c) => c.status === "done" && c.dossier)
+      .map((c) => c.dossier as ClipDossier);
+    if (dossiers.length === 0) return null;
+    try {
+      return selectCandidates(dossiers);
+    } catch {
+      return null;
+    }
+  }, [state.clips]);
+
+  return { state, addFiles, runSearch, getFile, getDossiers, embedQuery, enhanceClip, selection };
 }

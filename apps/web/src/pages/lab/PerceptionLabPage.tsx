@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
+  CandidatePick,
   CloudScope,
   DenseCaption,
   SearchHit,
@@ -30,6 +31,7 @@ import { PerfPanel } from "./components/PerfPanel";
 import { SceneTimelinePanel } from "./components/SceneTimelinePanel";
 import { SearchPanel } from "./components/SearchPanel";
 import { ShotFilmstrip } from "./components/ShotFilmstrip";
+import { SignalsPanel } from "./components/SignalsPanel";
 import { ShotPreviewModal, type ShotPreview } from "./components/ShotPreviewModal";
 import { StoryboardList } from "./components/StoryboardList";
 import { StoryboardPreviewModal } from "./components/StoryboardPreviewModal";
@@ -78,7 +80,7 @@ function formatDurationCompact(seconds: number): string {
 export function PerceptionLabPage() {
   const { params, navigate } = useRouter();
   const forceDevice = params.device === "wasm" ? "wasm" : "auto";
-  const { state, addFiles, runSearch, getFile, getDossiers, embedQuery, enhanceClip } =
+  const { state, addFiles, runSearch, getFile, getDossiers, embedQuery, enhanceClip, selection } =
     usePerceptionLab(forceDevice);
   const director = useDirector({ getDossiers, embedQuery });
   const music = useMusic();
@@ -135,6 +137,12 @@ export function PerceptionLabPage() {
    */
   const [selectedOverride, setSelectedOverride] = useState<Record<string, boolean>>({});
   const [bulkRunning, setBulkRunning] = useState(false);
+  /**
+   * Candidates-only cloud enhance: restrict frame plans to the selector's
+   * candidate shots. Default (no override) is checked as soon as candidates
+   * exist — the whole point of the selector is to stop sending everything.
+   */
+  const [candidatesOnlyOverride, setCandidatesOnlyOverride] = useState<boolean | null>(null);
 
   const isSelected = useCallback(
     (clip: LabClip) => selectedOverride[clip.clipId] ?? !clip.dossier?.cloudRuns?.[cloudScope],
@@ -144,6 +152,47 @@ export function PerceptionLabPage() {
   const selectedClips = state.clips.filter(
     (c) => c.status === "done" && !c.cloud?.busy && isSelected(c),
   );
+
+  // clipId -> (shotIndex -> pick) for filmstrip badges, the Signals panel,
+  // and candidates-only enhance scoping.
+  const picksByClip = useMemo(() => {
+    const map = new Map<string, Map<number, CandidatePick>>();
+    if (!selection) return map;
+    for (const pick of selection.picks) {
+      let clipMap = map.get(pick.clipId);
+      if (!clipMap) {
+        clipMap = new Map();
+        map.set(pick.clipId, clipMap);
+      }
+      clipMap.set(pick.shotIndex, pick);
+    }
+    return map;
+  }, [selection]);
+
+  const selectionSummary = useMemo(
+    () =>
+      selection
+        ? {
+            picks: selection.picks.length,
+            chapters: selection.chapters.length,
+            totalShots: selection.scores.length,
+          }
+        : null,
+    [selection],
+  );
+
+  const hasCandidates = (selectionSummary?.picks ?? 0) > 0;
+  const candidatesOnly = candidatesOnlyOverride ?? hasCandidates;
+
+  // Bulk enhance excludes clips with zero candidate shots when scoped to
+  // candidates-only — sending nothing costs nothing, so they're dropped
+  // before the count/label, not sent with an empty frame plan.
+  const candidateFilteredClips = candidatesOnly
+    ? selectedClips.filter((c) => (picksByClip.get(c.clipId)?.size ?? 0) > 0)
+    : selectedClips;
+  const skippedForNoCandidates = candidatesOnly
+    ? selectedClips.length - candidateFilteredClips.length
+    : 0;
 
   /** Master selection: explicit all/none, from which any subset is a few clicks. */
   const setAllSelected = useCallback(
@@ -480,7 +529,7 @@ export function PerceptionLabPage() {
    * bulk wall-clock ~2-3x at identical token cost.
    */
   const enhanceSelected = useCallback(async () => {
-    const ids = selectedClips.map((c) => c.clipId);
+    const ids = candidateFilteredClips.map((c) => c.clipId);
     if (ids.length === 0) return;
     setBulkRunning(true);
     try {
@@ -489,7 +538,15 @@ export function PerceptionLabPage() {
         while (next < ids.length) {
           const clipId = ids[next];
           next += 1;
-          await enhanceClip(clipId, cloudScope, cloudModel);
+          const candidateShotIndexes = candidatesOnly
+            ? new Set(picksByClip.get(clipId)?.keys() ?? [])
+            : undefined;
+          await enhanceClip(
+            clipId,
+            cloudScope,
+            cloudModel,
+            candidateShotIndexes ? { candidateShotIndexes } : undefined,
+          );
         }
       };
       await Promise.all(
@@ -498,7 +555,7 @@ export function PerceptionLabPage() {
     } finally {
       setBulkRunning(false);
     }
-  }, [selectedClips, enhanceClip, cloudScope, cloudModel]);
+  }, [candidateFilteredClips, enhanceClip, cloudScope, cloudModel, candidatesOnly, picksByClip]);
 
   /** Digest the analyzed footage and ask for grounded brief-angle suggestions. */
   const requestBriefSuggestions = useCallback(
@@ -590,6 +647,19 @@ export function PerceptionLabPage() {
                 ))}
               </select>
             )}
+            {cloudEnabled && hasCandidates && (
+              <label
+                className="flex items-center gap-1 cursor-pointer select-none text-amber-500"
+                title="Restrict cloud enhance to the signal-stack selector's candidate shots — cheaper, focused on what the director will actually see highlighted"
+              >
+                <input
+                  type="checkbox"
+                  checked={candidatesOnly}
+                  onChange={(e) => setCandidatesOnlyOverride(e.target.checked)}
+                />
+                ★ candidates only
+              </label>
+            )}
             {cloudEnabled && state.clips.some((c) => c.status === "done") && (
               <>
                 <span className="inline-flex rounded border border-border overflow-hidden">
@@ -610,13 +680,17 @@ export function PerceptionLabPage() {
                 </span>
                 <button
                   className="px-2 py-0.5 rounded border border-sky-500/50 text-sky-600 hover:bg-sky-500/10 disabled:opacity-40 disabled:cursor-default"
-                  disabled={bulkRunning || selectedClips.length === 0}
+                  disabled={bulkRunning || candidateFilteredClips.length === 0}
                   onClick={() => void enhanceSelected()}
-                  title="Send the checked clips' frames to the cloud vision model, one clip at a time"
+                  title={
+                    skippedForNoCandidates > 0
+                      ? `Send the checked clips' candidate frames to the cloud vision model (skipping ${skippedForNoCandidates} clip${skippedForNoCandidates === 1 ? "" : "s"} with no candidate shots)`
+                      : "Send the checked clips' frames to the cloud vision model, one clip at a time"
+                  }
                 >
                   {bulkRunning
                     ? "enhancing…"
-                    : `enhance ${selectedClips.length} selected`}
+                    : `enhance ${candidateFilteredClips.length} selected`}
                 </button>
               </>
             )}
@@ -637,22 +711,41 @@ export function PerceptionLabPage() {
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
             <div className="lg:col-span-2 space-y-3">
-              {state.clips.map((clip) => (
-                <ShotFilmstrip
-                  key={clip.clipId}
-                  clip={clip}
-                  highlights={highlightsByClip.get(clip.clipId) ?? new Map()}
-                  onShotClick={(shot) => openPreview(clip.clipId, clip.fileName, shot)}
-                  onEnhance={
-                    cloudEnabled ? () => void enhanceClip(clip.clipId, cloudScope, cloudModel) : null
-                  }
-                  onCompare={() => setCompareClip(clip)}
-                  selected={cloudEnabled ? isSelected(clip) : null}
-                  onSelectChange={(checked) =>
-                    setSelectedOverride((m) => ({ ...m, [clip.clipId]: checked }))
-                  }
-                />
-              ))}
+              {state.clips.map((clip) => {
+                const clipPicks = picksByClip.get(clip.clipId);
+                const noCandidatesForClip =
+                  candidatesOnly && clip.status === "done" && (clipPicks?.size ?? 0) === 0;
+                return (
+                  <ShotFilmstrip
+                    key={clip.clipId}
+                    clip={clip}
+                    highlights={highlightsByClip.get(clip.clipId) ?? new Map()}
+                    picks={clipPicks}
+                    onShotClick={(shot) => openPreview(clip.clipId, clip.fileName, shot)}
+                    onEnhance={
+                      cloudEnabled
+                        ? () =>
+                            void enhanceClip(
+                              clip.clipId,
+                              cloudScope,
+                              cloudModel,
+                              candidatesOnly && clipPicks
+                                ? { candidateShotIndexes: new Set(clipPicks.keys()) }
+                                : undefined,
+                            )
+                        : null
+                    }
+                    enhanceDisabledReason={
+                      noCandidatesForClip ? "no candidate shots in this clip" : null
+                    }
+                    onCompare={() => setCompareClip(clip)}
+                    selected={cloudEnabled ? isSelected(clip) : null}
+                    onSelectChange={(checked) =>
+                      setSelectedOverride((m) => ({ ...m, [clip.clipId]: checked }))
+                    }
+                  />
+                );
+              })}
               <ClipDropZone onFiles={addFiles} compact />
             </div>
 
@@ -670,6 +763,7 @@ export function PerceptionLabPage() {
                 requestBriefSuggestions={requestBriefSuggestions}
                 styleId={styleId}
                 onStyleIdChange={setStyleId}
+                selectionSummary={selectionSummary}
               />
               {director.state.storyboard && (
                 <StoryboardList
@@ -697,6 +791,11 @@ export function PerceptionLabPage() {
                 ready={searchReady}
                 onSearch={runSearch}
                 onHitClick={handleHitClick}
+              />
+              <SignalsPanel
+                clips={state.clips}
+                selection={selection}
+                onShotClick={(clip, shot) => openPreview(clip.clipId, clip.fileName, shot)}
               />
               <SceneTimelinePanel
                 clips={state.clips}

@@ -10,7 +10,7 @@
 import { mergeDenseCaptions } from "./caption-text";
 import type { SearchResult } from "./retrieval";
 import type { SelectionResult } from "./signal-score";
-import type { ClipDossier, DenseCaption } from "./types";
+import type { ClipDossier, CloudRunArchiveEntry, DenseCaption, Shot } from "./types";
 import { storyboardDurationS, type Storyboard } from "./director-types";
 
 /** Per-clip transcript budget; talky clips get truncated, not dropped. */
@@ -57,51 +57,107 @@ export const DEFAULT_PROMPT_SOURCES: PromptSources = {
   transcript: true,
 };
 
-export function dossierToPromptText(
-  dossier: ClipDossier,
-  opts: { maxTranscriptChars?: number; sources?: PromptSources } = {},
-): string {
-  const maxTranscriptChars = opts.maxTranscriptChars ?? DEFAULT_MAX_TRANSCRIPT_CHARS;
-  const sources = opts.sources ?? DEFAULT_PROMPT_SOURCES;
-  const lines: string[] = [];
-
-  lines.push(
+/** CLIP header line + (when applicable) the PARTIAL-analysis warning. */
+function renderClipHeader(dossier: ClipDossier): string[] {
+  const lines: string[] = [
     `CLIP ${dossier.clipId} "${dossier.fileName}"  duration ${fmtS(dossier.durationS)}s  ${dossier.width}x${dossier.height}` +
       (dossier.recordedAt !== null ? `  recorded ${fmtRecordedAt(dossier.recordedAt)}` : ""),
-  );
+  ];
   if (dossier.analyzedThroughS !== null) {
     lines.push(
       `  !! PARTIAL: analyzed only through ${fmtS(dossier.analyzedThroughS)}s — ` +
         `shots/transcript below cover [0, ${fmtS(dossier.analyzedThroughS)}s]; do not reference later times.`,
     );
   }
+  return lines;
+}
+
+/** The archived (scope, model) run to pin to, or undefined for "use latest". */
+function findPinnedRun(
+  dossier: ClipDossier,
+  scope: "shots" | "timeline",
+  model: string | undefined,
+): CloudRunArchiveEntry | undefined {
+  return model
+    ? dossier.cloudRunArchive.find((e) => e.scope === scope && e.model === model)
+    : undefined;
+}
+
+/** Nearest pinned-run caption to a shot's rep frame, or null when none overlaps. */
+function pinnedCaptionForShot(
+  run: CloudRunArchiveEntry | undefined,
+  shot: Pick<Shot, "tStart" | "tEnd" | "repFrameTime">,
+): string | null {
+  if (!run) return null;
+  let best: DenseCaption | null = null;
+  for (const c of run.captions) {
+    if (c.t < shot.tStart - 1 || c.t > shot.tEnd + 1) continue;
+    if (!best || Math.abs(c.t - shot.repFrameTime) < Math.abs(best.t - shot.repFrameTime)) {
+      best = c;
+    }
+  }
+  return best?.text ?? null;
+}
+
+/**
+ * Caption-preference logic shared by every renderer: cloud pin > cloudCaption
+ * > local caption, honoring the source mixer's on/off toggles.
+ */
+function shotCaptionText(
+  shot: Shot,
+  sources: PromptSources,
+  pinnedShotsRun: CloudRunArchiveEntry | undefined,
+): string | null {
+  return (
+    (sources.cloudShots ? (pinnedCaptionForShot(pinnedShotsRun, shot) ?? shot.cloudCaption) : null) ??
+    (sources.localCaptions ? shot.caption : null)
+  );
+}
+
+/** Transcript section: withheld / no-speech / timecoded lines, budget-capped. */
+function renderTranscript(
+  dossier: ClipDossier,
+  sources: PromptSources,
+  maxTranscriptChars: number,
+): string[] {
+  const lines: string[] = [];
+  if (!sources.transcript) {
+    lines.push("  TRANSCRIPT: (withheld for this run — work from the visuals)");
+  } else if (dossier.transcript.length === 0) {
+    lines.push("  TRANSCRIPT: (no speech detected)");
+  } else {
+    lines.push("  TRANSCRIPT:");
+    let used = 0;
+    for (const seg of dossier.transcript) {
+      const line = `    [${fmtS(seg.t0)}-${fmtS(seg.t1)}] ${seg.text.trim()}`;
+      if (used + line.length > maxTranscriptChars) {
+        lines.push("    [transcript truncated]");
+        break;
+      }
+      lines.push(line);
+      used += line.length;
+    }
+  }
+  return lines;
+}
+
+export function dossierToPromptText(
+  dossier: ClipDossier,
+  opts: { maxTranscriptChars?: number; sources?: PromptSources } = {},
+): string {
+  const maxTranscriptChars = opts.maxTranscriptChars ?? DEFAULT_MAX_TRANSCRIPT_CHARS;
+  const sources = opts.sources ?? DEFAULT_PROMPT_SOURCES;
+  const lines: string[] = [...renderClipHeader(dossier)];
 
   lines.push(
     "  SHOTS (index  start-end  len  motion(0-255, <40 typical)  peak@  sharpness(~200+ = sharp)  scene description):",
   );
-  const pinnedShots = sources.cloudShotsModel
-    ? dossier.cloudRunArchive.find(
-        (e) => e.scope === "shots" && e.model === sources.cloudShotsModel,
-      )
-    : undefined;
-  const pinnedShotCaption = (shot: { tStart: number; tEnd: number; repFrameTime: number }) => {
-    if (!pinnedShots) return null;
-    let best: DenseCaption | null = null;
-    for (const c of pinnedShots.captions) {
-      if (c.t < shot.tStart - 1 || c.t > shot.tEnd + 1) continue;
-      if (!best || Math.abs(c.t - shot.repFrameTime) < Math.abs(best.t - shot.repFrameTime)) {
-        best = c;
-      }
-    }
-    return best?.text ?? null;
-  };
+  const pinnedShots = findPinnedRun(dossier, "shots", sources.cloudShotsModel);
   for (const shot of dossier.shots) {
     const len = shot.tEnd - shot.tStart;
     // Cloud descriptions (opt-in enhance, large model) trump local ones —
     // subject to the source mixer (and its model pin, when set).
-    const text =
-      (sources.cloudShots ? (pinnedShotCaption(shot) ?? shot.cloudCaption) : null) ??
-      (sources.localCaptions ? shot.caption : null);
+    const text = shotCaptionText(shot, sources, pinnedShots);
     const maxLen = 240;
     const caption = text
       ? `  "${text.length > maxLen ? text.slice(0, maxLen - 3) + "..." : text}"`
@@ -148,23 +204,7 @@ export function dossierToPromptText(
     }
   }
 
-  if (!sources.transcript) {
-    lines.push("  TRANSCRIPT: (withheld for this run — work from the visuals)");
-  } else if (dossier.transcript.length === 0) {
-    lines.push("  TRANSCRIPT: (no speech detected)");
-  } else {
-    lines.push("  TRANSCRIPT:");
-    let used = 0;
-    for (const seg of dossier.transcript) {
-      const line = `    [${fmtS(seg.t0)}-${fmtS(seg.t1)}] ${seg.text.trim()}`;
-      if (used + line.length > maxTranscriptChars) {
-        lines.push("    [transcript truncated]");
-        break;
-      }
-      lines.push(line);
-      used += line.length;
-    }
-  }
+  lines.push(...renderTranscript(dossier, sources, maxTranscriptChars));
 
   return lines.join("\n");
 }
@@ -239,13 +279,108 @@ export function buildDossierMessage(
  * explains to the model that picks are heuristic suggestions, not commands,
  * and any gist shot may be pulled instead.
  */
+/** Per-clip gist budget; talky/busy clips get truncated, not dropped. */
+const DEFAULT_MAX_GIST_CHARS = 4000;
+
 export function buildCandidatesMessage(
   dossiers: ClipDossier[],
   selection: SelectionResult,
   sources?: PromptSources,
 ): string {
-  void dossiers; void selection; void sources;
-  throw new Error("not implemented");
+  const src = sources ?? DEFAULT_PROMPT_SOURCES;
+  const sorted = sortByRecordedAt(dossiers);
+  const dossierById = new Map(sorted.map((d) => [d.clipId, d]));
+  const key = (clipId: string, shotIndex: number) => `${clipId}#${shotIndex}`;
+  const pickedKeys = new Set(selection.picks.map((p) => key(p.clipId, p.shotIndex)));
+  const scoreByKey = new Map(selection.scores.map((s) => [key(s.clipId, s.shotIndex), s]));
+
+  const lines: string[] = [];
+  lines.push(
+    `FOOTAGE: ${dossiers.length} analyzed clip${dossiers.length === 1 ? "" : "s"} — listed in ` +
+      `RECORDING ORDER (oldest first). A signal-stack selector (motion, loudness events, speech, ` +
+      `sharpness, visual uniqueness) scored every shot and picked the strongest candidates per ` +
+      `chapter (a chapter = a stretch of recording time). Candidate picks are HEURISTIC ` +
+      `suggestions — strong hooks/peaks the metrics can see. The GIST lists cover every remaining ` +
+      `shot; quiet-but-meaningful moments live there. You may build your cut from ANY shot in ` +
+      `either list.`,
+  );
+
+  for (const chapter of selection.chapters) {
+    lines.push("");
+    lines.push(`CHAPTER ${chapter.index}: ${chapter.label}`);
+    lines.push("  CANDIDATES:");
+    const picks = selection.picks
+      .filter((p) => p.chapterIndex === chapter.index)
+      .sort((a, b) => a.rank - b.rank);
+    if (picks.length === 0) {
+      lines.push("    (none — every shot in this chapter was gated out)");
+    }
+    for (const pick of picks) {
+      const dossier = dossierById.get(pick.clipId);
+      const shot = dossier?.shots.find((s) => s.index === pick.shotIndex);
+      if (!dossier || !shot) continue;
+      const len = shot.tEnd - shot.tStart;
+      const uniqueness =
+        pick.uniquenessPenalty > 0 ? `  (uniqueness −${pick.uniquenessPenalty.toFixed(2)})` : "";
+      lines.push(
+        `  ★C${pick.chapterIndex}.${pick.rank}  CLIP ${pick.clipId} "${dossier.fileName}" shot #${shot.index}  ` +
+          `${fmtS(shot.tStart)}-${fmtS(shot.tEnd)}s  ${fmtS(len)}s  motion ${Math.round(shot.motion.score)} ` +
+          `peak@${fmtS(shot.motion.peakTime)}  sharp ${Math.round(shot.quality.sharpness)}  ` +
+          `score ${pick.finalScore.toFixed(2)}${uniqueness}  why: ${pick.reasons.join(", ")}`,
+      );
+      const pinnedShots = findPinnedRun(dossier, "shots", src.cloudShotsModel);
+      const captionText = shotCaptionText(shot, src, pinnedShots);
+      if (captionText) {
+        lines.push(`    "${captionText}"`);
+      }
+      if (src.transcript && dossier.transcript.length > 0) {
+        const overlapping = dossier.transcript.filter(
+          (seg) => seg.t0 < shot.tEnd && seg.t1 > shot.tStart,
+        );
+        for (const seg of overlapping.slice(0, 2)) {
+          lines.push(`    [${fmtS(seg.t0)}-${fmtS(seg.t1)}] ${seg.text.trim()}`);
+        }
+      }
+    }
+  }
+
+  lines.push("");
+  lines.push("ALL SHOTS (gist):");
+  for (const dossier of sorted) {
+    lines.push("");
+    lines.push(...renderClipHeader(dossier));
+    const pinnedShots = findPinnedRun(dossier, "shots", src.cloudShotsModel);
+    let used = 0;
+    for (const shot of dossier.shots) {
+      const captionText = shotCaptionText(shot, src, pinnedShots);
+      const maxLen = 100;
+      const caption = captionText
+        ? `  "${captionText.length > maxLen ? captionText.slice(0, maxLen - 3) + "..." : captionText}"`
+        : "";
+      const score = scoreByKey.get(key(dossier.clipId, shot.index));
+      const gatedSuffix = score?.gated ? `  [gated: ${score.gateReasons.join("; ")}]` : "";
+      const star = pickedKeys.has(key(dossier.clipId, shot.index)) ? "★" : " ";
+      const line =
+        `  ${star}#${shot.index}  ${fmtS(shot.tStart)}-${fmtS(shot.tEnd)}s  ` +
+        `motion ${Math.round(shot.motion.score)} sharp ${Math.round(shot.quality.sharpness)}${caption}${gatedSuffix}`;
+      if (used + line.length > DEFAULT_MAX_GIST_CHARS) {
+        lines.push("  [gist truncated]");
+        break;
+      }
+      lines.push(line);
+      used += line.length;
+    }
+  }
+
+  lines.push("");
+  lines.push("TRANSCRIPTS:");
+  for (const dossier of sorted) {
+    lines.push("");
+    lines.push(...renderClipHeader(dossier));
+    lines.push(...renderTranscript(dossier, src, DEFAULT_MAX_TRANSCRIPT_CHARS));
+  }
+
+  return lines.join("\n");
 }
 
 export function formatSearchResults(query: string, result: SearchResult): string {

@@ -254,6 +254,11 @@ function chipsFor(exp: ExperimentSummary, all: ExperimentSummary[]): SettingChip
     { label: "c·timeline", value: String(s.cloudTimeline), common: uniform((e) => e.promptSources.cloudTimeline) },
     { label: "script", value: String(s.transcript), common: uniform((e) => e.promptSources.transcript) },
     {
+      label: "mode",
+      value: s.promptMode ?? "full",
+      common: uniform((e) => e.promptSources.promptMode ?? "full"),
+    },
+    {
       label: "target",
       value: exp.targetDurationS ? `${exp.targetDurationS}s` : "—",
       common: uniform((e) => e.targetDurationS ?? null),
