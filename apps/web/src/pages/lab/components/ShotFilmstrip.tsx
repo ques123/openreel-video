@@ -49,6 +49,10 @@ export function ShotFilmstrip({
 }: ShotFilmstripProps) {
   const analysisSpanS = clip.analyzedThroughS ?? clip.durationS;
   const progress = analysisSpanS > 0 ? Math.min(1, clip.decodeT / analysisSpanS) : 0;
+  // A cache hit only carries proxyName via the dossier (re-dropping just the
+  // original this session never repopulates clip.proxyName, which is set at
+  // drop-time pairing only) — check both.
+  const proxyName = clip.proxyName ?? clip.dossier?.analyzedFromProxy ?? null;
 
   return (
     <div className="bg-background-secondary border border-border rounded-lg p-3">
@@ -64,6 +68,14 @@ export function ShotFilmstrip({
             />
           )}
           <span className="font-medium text-text-primary truncate">{clip.fileName}</span>
+          {proxyName && (
+            <span
+              className="text-[10px] px-1 rounded border border-sky-500/60 text-sky-500 shrink-0"
+              title={`analyzed from ${proxyName} (720p sidecar) — playback & export use the original file`}
+            >
+              via proxy
+            </span>
+          )}
           <span className="text-xs text-text-secondary shrink-0">
             {clip.width > 0 && `${clip.width}×${clip.height} · `}
             {clip.durationS > 0 && `${fmtTime(clip.durationS)} · `}
@@ -135,6 +147,15 @@ export function ShotFilmstrip({
               {clip.ingestProgress !== null
                 ? `ingesting… ${Math.round(clip.ingestProgress * 100)}%`
                 : `analyzing… ${Math.round(progress * 100)}%`}
+            </span>
+          )}
+          {clip.status === "analyzing" && clip.ingestWindow && clip.ingestWindow.windows > 1 && (
+            <span
+              className="text-xs font-mono text-text-secondary"
+              title="long clip — analyzed in storage-sized passes; nothing is skipped"
+            >
+              pass {clip.ingestWindow.window}/{clip.ingestWindow.windows} ·{" "}
+              {fmtTime(clip.ingestWindow.analyzedThroughS)} covered
             </span>
           )}
           {clip.status === "error" && (

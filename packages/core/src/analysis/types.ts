@@ -142,6 +142,11 @@ export interface DossierPerf {
   totalMs: number;
   device: { embed: InferenceDevice | null; whisper: InferenceDevice | null };
   cacheHit: boolean;
+  /**
+   * How many OPFS ingest windows the visual pass used. 1 = whole file fit
+   * in one scratch copy (the pre-window behavior). Absent on old dossiers.
+   */
+  ingestWindows?: number;
 }
 
 export interface ClipDossier {
@@ -151,6 +156,14 @@ export interface ClipDossier {
   /** Stable cache key: perception:v1:${name}:${size}:${lastModified}. */
   cacheKey: string;
   fileName: string;
+  /**
+   * Set when analysis ran on a small stand-in of the real footage (a DJI
+   * .LRF proxy dropped alongside the original): the PROXY's file name.
+   * Identity (cacheKey, fileName, recordedAt) always belongs to the
+   * ORIGINAL; playback/export use the original file. Absent = analyzed
+   * from the original pixels.
+   */
+  analyzedFromProxy?: string | null;
   /**
    * When the clip was recorded (epoch ms), from the file's mtime — for camera
    * files that is the moment recording STOPPED. Null when unknown. Used by
@@ -247,6 +260,18 @@ export type FunnelProgressEvent =
       analyzedThroughS: number | null;
     }
   | { kind: "ingest-progress"; clipId: string; bytesDone: number; bytesTotal: number }
+  | {
+      /**
+       * A rolling-window analysis moved to its next OPFS window. window is
+       * 1-based; analyzedThroughS = source seconds fully covered so far.
+       * Single-window clips never emit this.
+       */
+      kind: "ingest-window";
+      clipId: string;
+      window: number;
+      windows: number;
+      analyzedThroughS: number;
+    }
   | { kind: "decode-progress"; clipId: string; t: number; framesDone: number }
   | {
       kind: "shot";

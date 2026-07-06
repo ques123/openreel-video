@@ -12,7 +12,13 @@ export function ClipDropZone({ onFiles, compact }: ClipDropZoneProps) {
   const handleFiles = useCallback(
     (list: FileList | null) => {
       if (!list) return;
-      const files = Array.from(list).filter((f) => f.type.startsWith("video/"));
+      // .lrf (DJI low-res proxy) sidecars have no registered video/* MIME
+      // type in any browser, so file.type comes back "" for them — allow by
+      // extension too. use-perception-lab's addFiles pairs a .lrf with its
+      // same-basename original (or analyzes it standalone if unpaired).
+      const files = Array.from(list).filter(
+        (f) => f.type.startsWith("video/") || f.name.toLowerCase().endsWith(".lrf"),
+      );
       if (files.length > 0) onFiles(files);
     },
     [onFiles],
@@ -40,7 +46,7 @@ export function ClipDropZone({ onFiles, compact }: ClipDropZoneProps) {
       <input
         ref={inputRef}
         type="file"
-        accept="video/*"
+        accept="video/*,.lrf"
         multiple
         className="hidden"
         onChange={(e) => {

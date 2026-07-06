@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
   applyCloudResults,
   blurryAnnotations,
@@ -27,6 +27,13 @@ export interface LabClip {
   clipId: string;
   fileName: string;
   fileSize: number;
+  /**
+   * Proxy's file name when this clip was PAIRED at drop time (a DJI .LRF
+   * sidecar dropped alongside its original video — see addFiles). Absent for
+   * normal clips and ALSO for cache hits where only the original was
+   * re-dropped this session — check dossier.analyzedFromProxy too.
+   */
+  proxyName?: string;
   status: ClipStatus;
   error?: string;
   durationS: number;
@@ -37,6 +44,12 @@ export interface LabClip {
   decodeT: number; // current decode position, seconds
   /** OPFS ingest progress 0..1, or null once decoding starts. */
   ingestProgress: number | null;
+  /**
+   * Rolling-window ingest progress for long clips whose analysis needed more
+   * than one OPFS scratch window. Undefined until the first "ingest-window"
+   * event; cleared at clip-done.
+   */
+  ingestWindow?: { window: number; windows: number; analyzedThroughS: number };
   shots: Shot[];
   embeddedCount: number;
   /** Dense caption pass progress (0/0 until the pass starts). */
@@ -86,6 +99,16 @@ export interface LabState {
   };
 }
 
+/**
+ * OPFS scratch quota telemetry (navigator.storage). Null until the first
+ * estimate resolves, or permanently on browsers lacking the API (Safari).
+ */
+export interface StorageStatus {
+  quotaBytes: number;
+  usageBytes: number;
+  persisted: boolean;
+}
+
 const initialModelStatus: ModelStatus = {
   state: "idle",
   device: null,
@@ -104,7 +127,14 @@ const initialState: LabState = {
 };
 
 type Action =
-  | { type: "clip-added"; clipId: string; fileName: string; fileSize: number }
+  | {
+      type: "clip-added";
+      clipId: string;
+      fileName: string;
+      fileSize: number;
+      /** Set when this clip is a DJI .LRF proxy pair (see addFiles). */
+      proxyName?: string;
+    }
   | { type: "event"; event: FunnelProgressEvent }
   | { type: "search-start"; query: string }
   | { type: "search-done"; query: string; hits: SearchHit[] }
@@ -136,6 +166,7 @@ function reducer(state: LabState, action: Action): LabState {
             clipId: action.clipId,
             fileName: action.fileName,
             fileSize: action.fileSize,
+            proxyName: action.proxyName,
             status: "analyzing",
             durationS: 0,
             analyzedThroughS: null,
@@ -143,6 +174,7 @@ function reducer(state: LabState, action: Action): LabState {
             height: 0,
             decodeT: 0,
             ingestProgress: null,
+            ingestWindow: undefined,
             shots: [],
             embeddedCount: 0,
             captionsDone: 0,
@@ -233,6 +265,15 @@ function reducer(state: LabState, action: Action): LabState {
             ...c,
             ingestProgress: e.bytesTotal > 0 ? e.bytesDone / e.bytesTotal : 0,
           }));
+        case "ingest-window":
+          return updateClip(state, e.clipId, (c) => ({
+            ...c,
+            ingestWindow: {
+              window: e.window,
+              windows: e.windows,
+              analyzedThroughS: e.analyzedThroughS,
+            },
+          }));
         case "decode-progress":
           return updateClip(state, e.clipId, (c) => ({
             ...c,
@@ -288,6 +329,8 @@ function reducer(state: LabState, action: Action): LabState {
             // an earlier "audio-signals" event already set on this clip.
             audioEnvelope: e.dossier.audioEnvelope ?? c.audioEnvelope ?? null,
             audioEvents: e.dossier.audioEvents ?? c.audioEvents,
+            // Rolling-window ingest is over — the clip is fully analyzed.
+            ingestWindow: undefined,
           }));
         case "clip-error":
           return updateClip(state, e.clipId, (c) => ({
@@ -335,12 +378,45 @@ function reducer(state: LabState, action: Action): LabState {
 
 let clipCounter = 0;
 
+/**
+ * TEST HOOK: pretend the OPFS quota budget is this many bytes, forcing the
+ * rolling-window ingest path on small fixtures. Never set this in production
+ * — it's a manual localStorage flag for exercising long-clip passes without
+ * an actually-huge file. Forwarded verbatim to analyzeFile's opts.
+ */
+function readDebugIngestBudgetBytes(): number | undefined {
+  try {
+    const raw = localStorage.getItem("openreel:debug:ingest-budget");
+    if (!raw) return undefined;
+    const n = parseInt(raw, 10);
+    return Number.isFinite(n) && n > 0 ? n : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function usePerceptionLab(forceDevice: "auto" | InferenceDevice = "auto") {
   const [state, dispatch] = useReducer(reducer, initialState);
   const orchestratorRef = useRef<FunnelOrchestrator | null>(null);
   const dossiersRef = useRef<Map<string, ClipDossier>>(new Map());
   /** clipId -> original File, for shot preview playback. */
   const filesRef = useRef<Map<string, File>>(new Map());
+  const [storage, setStorage] = useState<StorageStatus | null>(null);
+
+  /** Re-read the OPFS scratch quota estimate. Guarded — absent on Safari. */
+  const refreshStorage = useCallback(() => {
+    const estimate = navigator.storage?.estimate?.();
+    if (!estimate) return;
+    estimate
+      .then((result) => {
+        setStorage((prev) => ({
+          quotaBytes: result.quota ?? 0,
+          usageBytes: result.usage ?? 0,
+          persisted: prev?.persisted ?? false,
+        }));
+      })
+      .catch(() => undefined);
+  }, []);
 
   const getOrchestrator = useCallback((): FunnelOrchestrator => {
     if (!orchestratorRef.current) {
@@ -361,12 +437,17 @@ export function usePerceptionLab(forceDevice: "auto" | InferenceDevice = "auto")
             dossier.audioEvents = event.events;
           }
         }
+        if (event.kind === "clip-done" || event.kind === "clip-error") {
+          // Scratch usage just changed materially (cleanup freed a window, or
+          // an error aborted mid-ingest) — refresh the quota telemetry.
+          refreshStorage();
+        }
         dispatch({ type: "event", event });
       });
       orchestratorRef.current = orchestrator;
     }
     return orchestratorRef.current;
-  }, []);
+  }, [refreshStorage]);
 
   useEffect(() => {
     // Kick model downloads on mount so they overlap with the first decode.
@@ -377,17 +458,92 @@ export function usePerceptionLab(forceDevice: "auto" | InferenceDevice = "auto")
     };
   }, [getOrchestrator, forceDevice]);
 
+  useEffect(() => {
+    // Best-effort request for persistent storage — many browsers grant it
+    // silently based on site engagement (some prompt); Safari lacks the API
+    // entirely. Fire-and-forget: the quota estimate below doesn't wait on it.
+    const persisting = navigator.storage?.persist?.();
+    if (persisting) {
+      persisting
+        .then((persisted) => {
+          setStorage((prev) =>
+            prev ? { ...prev, persisted } : { quotaBytes: 0, usageBytes: 0, persisted },
+          );
+        })
+        .catch(() => undefined);
+    }
+    refreshStorage();
+  }, [refreshStorage]);
+
+  // Keep the quota estimate fresh while a clip is actively consuming scratch
+  // space (rolling-window ingest can eat into it fast); idle otherwise.
+  const anyAnalyzing = state.clips.some((c) => c.status === "analyzing");
+  useEffect(() => {
+    if (!anyAnalyzing) return;
+    const id = setInterval(refreshStorage, 15_000);
+    return () => clearInterval(id);
+  }, [anyAnalyzing, refreshStorage]);
+
   const addFiles = useCallback(
     (files: File[]) => {
       const orchestrator = getOrchestrator();
+      const debugIngestBudgetBytes = readDebugIngestBudgetBytes();
+
+      // Pair DJI .LRF proxies with their original video by basename (case-
+      // insensitive, final extension stripped) — WITHIN THIS DROP ONLY (no
+      // cross-session or cross-drop matching). A pair becomes ONE clip: the
+      // small .lrf is what gets decoded/analyzed, the original stays the
+      // identity/playback/export source (see analyzeFile's identityFile
+      // opt). An .lrf with no matching original in this drop is a valid
+      // small video in its own right and analyzes normally, standing in for
+      // itself.
+      const basenameOf = (name: string) => {
+        const dot = name.lastIndexOf(".");
+        return (dot > 0 ? name.slice(0, dot) : name).toLowerCase();
+      };
+      const isLrf = (f: File) => f.name.toLowerCase().endsWith(".lrf");
+      const originalByBasename = new Map<string, File>();
+      for (const f of files) {
+        if (!isLrf(f)) originalByBasename.set(basenameOf(f.name), f);
+      }
+      const proxyForOriginal = new Map<File, File>();
+      for (const f of files) {
+        if (!isLrf(f)) continue;
+        const original = originalByBasename.get(basenameOf(f.name));
+        if (original) proxyForOriginal.set(original, f);
+      }
+      const pairedProxies = new Set(proxyForOriginal.values());
+
       for (const file of files) {
+        // A proxy consumed by the pairing below is emitted alongside its
+        // original, not as its own clip.
+        if (isLrf(file) && pairedProxies.has(file)) continue;
+
         clipCounter += 1;
         const clipId = `lab-clip-${Date.now().toString(36)}-${clipCounter}`;
-        filesRef.current.set(clipId, file);
-        dispatch({ type: "clip-added", clipId, fileName: file.name, fileSize: file.size });
-        orchestrator.analyzeFile(file, forceDevice, clipId).catch(() => {
-          // clip-error event already updated the row; swallow the rejection.
-        });
+        const proxy = proxyForOriginal.get(file);
+
+        if (proxy) {
+          filesRef.current.set(clipId, file);
+          dispatch({
+            type: "clip-added",
+            clipId,
+            fileName: file.name,
+            fileSize: file.size,
+            proxyName: proxy.name,
+          });
+          orchestrator
+            .analyzeFile(proxy, forceDevice, clipId, { identityFile: file, debugIngestBudgetBytes })
+            .catch(() => {
+              // clip-error event already updated the row; swallow the rejection.
+            });
+        } else {
+          filesRef.current.set(clipId, file);
+          dispatch({ type: "clip-added", clipId, fileName: file.name, fileSize: file.size });
+          orchestrator.analyzeFile(file, forceDevice, clipId, { debugIngestBudgetBytes }).catch(() => {
+            // clip-error event already updated the row; swallow the rejection.
+          });
+        }
       }
     },
     [getOrchestrator, forceDevice],
@@ -508,5 +664,15 @@ export function usePerceptionLab(forceDevice: "auto" | InferenceDevice = "auto")
     }
   }, [state.clips]);
 
-  return { state, addFiles, runSearch, getFile, getDossiers, embedQuery, enhanceClip, selection };
+  return {
+    state,
+    addFiles,
+    runSearch,
+    getFile,
+    getDossiers,
+    embedQuery,
+    enhanceClip,
+    selection,
+    storage,
+  };
 }

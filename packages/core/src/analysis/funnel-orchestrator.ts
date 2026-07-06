@@ -31,6 +31,7 @@ import {
 import type {
   CaptionWorkerResponse,
   EmbedResponse,
+  FunnelDoneResponse,
   FunnelResponse,
   WhisperResponse,
 } from "./worker-protocol";
@@ -52,7 +53,10 @@ interface PendingCaption {
 
 interface ClipRun {
   clipId: string;
+  /** The file workers DECODE (the .LRF proxy, for proxy pairs). */
   file: File;
+  /** The file the dossier is keyed/named by (== file except proxy pairs). */
+  identityFile: File;
   shots: Shot[];
   denseFrames: Array<{ t: number; dataUrl: string; sharpness?: number }>;
   transcript: TranscriptSegment[];
@@ -71,6 +75,12 @@ interface ClipRun {
   ingestMs: number;
   usedOpfs: boolean;
   analyzedThroughS: number | null;
+  /** How many OPFS ingest windows the visual pass used. 1 = single copy. */
+  ingestWindows: number;
+  /** 16k mono PCM sidecar the visual pass extracted; null = no audio track or legacy container path. */
+  audioPcm: FunnelDoneResponse["audioPcm"];
+  /** TEST HOOK forwarded to the funnel worker's "analyze" request (forces the rolling-window path on small fixtures). */
+  debugIngestBudgetBytes?: number;
   visualDone: boolean;
   audioDone: boolean;
   embedsInFlight: number;
@@ -167,8 +177,24 @@ export class FunnelOrchestrator {
     file: File,
     device: "auto" | InferenceDevice = "auto",
     clipId: string = uid("clip"),
+    opts: {
+      /**
+       * The clip's IDENTITY file when `file` is a small analysis stand-in
+       * (DJI .LRF proxy): cacheKey, fileName and recordedAt come from this;
+       * decode reads `file`. Omit for normal clips.
+       */
+      identityFile?: File;
+      /**
+       * TEST HOOK: pretend OPFS quota is capped at this many bytes, forcing
+       * the rolling-window ingest path on small fixtures. The web layer
+       * reads this from localStorage; never set it in production. Forwarded
+       * verbatim to the funnel worker's "analyze" request.
+       */
+      debugIngestBudgetBytes?: number;
+    } = {},
   ): Promise<ClipDossier> {
-    const cached = await this.cache.load(file);
+    const identity = opts.identityFile ?? file;
+    const cached = await this.cache.load(identity);
     if (cached) {
       const dossier: ClipDossier = {
         ...cached,
@@ -197,19 +223,21 @@ export class FunnelOrchestrator {
       // Dense frames persist in the dossier, so an interrupted caption pass
       // resumes from where it stopped — no re-decode.
       if (dossier.denseFrames.length > 0) {
-        this.captionDense(file, dossier, device);
+        this.captionDense(identity, dossier, device);
       } else {
-        this.enrichCaptions(file, dossier, device);
+        this.enrichCaptions(identity, dossier, device);
       }
       // Cached dossiers may predate audio signals entirely (undefined ==
-      // never computed) — backfill them without re-running ASR.
-      this.enrichAudioSignals(file, dossier, device);
+      // never computed) — backfill them without re-running ASR. Decode the
+      // file we were handed (the small proxy, for pairs); save under identity.
+      this.enrichAudioSignals(file, dossier, device, identity);
       return dossier;
     }
 
     const run: ClipRun = {
       clipId,
       file,
+      identityFile: identity,
       shots: [],
       denseFrames: [],
       transcript: [],
@@ -219,6 +247,9 @@ export class FunnelOrchestrator {
       ingestMs: 0,
       usedOpfs: false,
       analyzedThroughS: null,
+      ingestWindows: 1,
+      audioPcm: null,
+      debugIngestBudgetBytes: opts.debugIngestBudgetBytes,
       framesDecoded: 0,
       embedMsTotal: 0,
       embedCount: 0,
@@ -330,25 +361,65 @@ export class FunnelOrchestrator {
             });
             break;
 
+          case "window":
+            run.ingestWindows = msg.windows;
+            this.emit({
+              kind: "ingest-window",
+              clipId: run.clipId,
+              window: msg.window,
+              windows: msg.windows,
+              analyzedThroughS: msg.analyzedThroughS,
+            });
+            break;
+
           case "done":
             run.decodeMs = msg.perf.decodeMs;
             run.ingestMs = msg.perf.ingestMs;
             run.usedOpfs = msg.usedOpfs;
             run.framesDecoded = msg.perf.framesDecoded;
+            run.ingestWindows = msg.ingestWindows;
+            run.audioPcm = msg.audioPcm;
             run.visualDone = true;
             worker.removeEventListener("message", handler);
             resolveVisual();
             // Start the audio pass now that the funnel worker is done reading
             // this file (whisper worker serializes its own queue).
-            this.whisperWorker?.postMessage({
-              type: "transcribe",
-              requestId: uid("whisper"),
-              clipId: run.clipId,
-              blob: run.file,
-              opfsKey: msg.usedOpfs ? run.clipId : null,
-              partial: msg.partial,
-              capS: msg.analyzedThroughS,
-            });
+            if (msg.audioPcm) {
+              // Rolling-window clip: the video scratch windows are long gone
+              // by now, but the visual pass extracted a 16k mono PCM sidecar
+              // for exactly this reason — read that instead of the container.
+              this.whisperWorker?.postMessage({
+                type: "transcribe",
+                requestId: uid("whisper"),
+                clipId: run.clipId,
+                blob: run.file,
+                opfsKey: null,
+                partial: null,
+                capS: null,
+                pcmKey: msg.audioPcm.key,
+              });
+            } else if (msg.ingestWindows > 1) {
+              // Multi-window clip WITHOUT a PCM sidecar = the funnel already
+              // proved there is no audio track (or extraction failed). The
+              // scratch file now holds only the LAST window's bytes — a
+              // container parse of that fragment would be garbage, so send
+              // whisper nothing: complete the audio pass as "no audio".
+              run.transcript = [];
+              run.audioEnvelope = null;
+              run.audioEvents = [];
+              run.audioDone = true;
+              this.emit({ kind: "transcript", clipId: run.clipId, segments: [] });
+            } else {
+              this.whisperWorker?.postMessage({
+                type: "transcribe",
+                requestId: uid("whisper"),
+                clipId: run.clipId,
+                blob: run.file,
+                opfsKey: msg.usedOpfs ? run.clipId : null,
+                partial: msg.partial,
+                capS: msg.analyzedThroughS,
+              });
+            }
             this.maybeFinish(run);
             break;
 
@@ -368,6 +439,7 @@ export class FunnelOrchestrator {
         blob: run.file,
         sampleFps: FUNNEL_DEFAULTS.sampleFps,
         targetWidth: FUNNEL_DEFAULTS.targetWidth,
+        debugIngestBudgetBytes: run.debugIngestBudgetBytes,
       });
     });
   }
@@ -470,14 +542,17 @@ export class FunnelOrchestrator {
       totalMs,
       device: { embed: this.embedDevice, whisper: this.whisperDevice },
       cacheHit: false,
+      ingestWindows: run.ingestWindows,
     };
 
     const dossier: ClipDossier = {
       version: DOSSIER_VERSION,
       clipId: run.clipId,
       cacheKey: "", // filled by DossierCache on save (derived from file)
-      fileName: run.file.name,
-      recordedAt: run.file.lastModified ?? null,
+      fileName: run.identityFile.name,
+      analyzedFromProxy:
+        run.identityFile !== run.file ? run.file.name : undefined,
+      recordedAt: run.identityFile.lastModified ?? null,
       durationS,
       analyzedThroughS: run.analyzedThroughS,
       width: run.meta?.width ?? 0,
@@ -497,15 +572,15 @@ export class FunnelOrchestrator {
       perf,
     };
 
-    void this.cache.save(run.file, dossier);
+    void this.cache.save(run.identityFile, dossier);
     this.emit({ kind: "clip-done", clipId: run.clipId, dossier });
     run.resolve(dossier);
     // Scene descriptions are background enrichment: the dossier is already
     // cached and usable; captions land frame by frame and re-save as they go.
     if (dossier.denseFrames.length > 0) {
-      this.captionDense(run.file, dossier);
+      this.captionDense(run.identityFile, dossier);
     } else {
-      this.enrichCaptions(run.file, dossier);
+      this.enrichCaptions(run.identityFile, dossier);
     }
   }
 
@@ -637,12 +712,17 @@ export class FunnelOrchestrator {
     file: File,
     dossier: ClipDossier,
     device: "auto" | InferenceDevice = "auto",
+    /**
+     * File the enriched dossier is SAVED under. Differs from `file` for
+     * proxy pairs: decode the small proxy, key the cache on the original.
+     */
+    saveFile: File = file,
   ) {
     // undefined = never computed; null = computed, no audio track (skip).
     if (dossier.audioEnvelope !== undefined) return;
     if (this.pendingAudioEnrichment.has(dossier.clipId)) return;
     this.ensureWhisperWorker(device);
-    this.pendingAudioEnrichment.set(dossier.clipId, { file, dossier });
+    this.pendingAudioEnrichment.set(dossier.clipId, { file: saveFile, dossier });
     this.whisperWorker!.postMessage({
       type: "transcribe",
       requestId: uid("whisper-env"),

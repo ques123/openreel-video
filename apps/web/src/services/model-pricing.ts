@@ -11,6 +11,10 @@ export const MODEL_PRICING: Record<string, { inPerMTok: number; outPerMTok: numb
   "gpt-5.2": { inPerMTok: 1.75, outPerMTok: 14 },
   "gpt-5.4-mini": { inPerMTok: 0.75, outPerMTok: 4.5 },
   "gpt-5.4-nano": { inPerMTok: 0.2, outPerMTok: 1.25 },
+  // OpenRouter list prices, 2026-07-06 (openrouter.ai/api/v1/models).
+  "qwen/qwen3.7-max": { inPerMTok: 1.25, outPerMTok: 3.75 },
+  "qwen/qwen3-vl-235b-a22b-instruct": { inPerMTok: 0.2, outPerMTok: 0.88 },
+  "qwen/qwen3-vl-30b-a3b-instruct": { inPerMTok: 0.13, outPerMTok: 0.52 },
 };
 
 /** USD cost for a token count against a known model; null for unknown models — never guess. */

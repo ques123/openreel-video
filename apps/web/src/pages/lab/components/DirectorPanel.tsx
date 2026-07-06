@@ -7,9 +7,28 @@ import {
   type PromptSources,
 } from "@openreel/core";
 import type { BriefSuggestion } from "../../../services/brief-suggestions";
+import {
+  DIRECTOR_MODEL,
+  DIRECTOR_MODELS,
+  shortModelLabel,
+} from "../../../services/openai-proxy";
 import type { UseDirectorReturn } from "../use-director";
 import type { MusicState } from "../use-music";
 import { PromptInspectorModal } from "./PromptInspectorModal";
+
+const DIRECTOR_MODEL_STORAGE_KEY = "openreel:director-model";
+
+/** Last-picked director model, validated against the known list (falls back on stale/foreign values). */
+function loadStoredDirectorModel(): string {
+  try {
+    const stored = localStorage.getItem(DIRECTOR_MODEL_STORAGE_KEY);
+    return stored && (DIRECTOR_MODELS as readonly string[]).includes(stored)
+      ? stored
+      : DIRECTOR_MODEL;
+  } catch {
+    return DIRECTOR_MODEL;
+  }
+}
 
 interface DirectorPanelProps {
   director: UseDirectorReturn;
@@ -85,6 +104,7 @@ export function DirectorPanel({
   const { state, start, refine, cancel, reset } = director;
   const [brief, setBrief] = useState("");
   const [target, setTarget] = useState("60");
+  const [model, setModel] = useState<string>(() => loadStoredDirectorModel());
   // promptMode is always set explicitly (never left undefined) so the footage
   // chips' selected state is unambiguous; DEFAULT_PROMPT_SOURCES omits it
   // (undefined means "full" everywhere else), so we pin it here.
@@ -167,7 +187,14 @@ export function DirectorPanel({
         onSubmit={(e) => {
           e.preventDefault();
           if (brief.trim() && !running)
-            start(brief.trim(), targetS, sources, appliedLabel ?? undefined, styleId ?? undefined);
+            start(
+              brief.trim(),
+              targetS,
+              sources,
+              appliedLabel ?? undefined,
+              styleId ?? undefined,
+              model,
+            );
         }}
         className="space-y-2"
       >
@@ -385,6 +412,30 @@ export function DirectorPanel({
             />
             s
           </label>
+          <label className="text-xs text-text-secondary flex items-center gap-1.5">
+            model:
+            <select
+              value={model}
+              disabled={running}
+              onChange={(e) => {
+                const next = e.target.value;
+                setModel(next);
+                try {
+                  localStorage.setItem(DIRECTOR_MODEL_STORAGE_KEY, next);
+                } catch {
+                  // private browsing / quota — the picker still works this session.
+                }
+              }}
+              title="Director LLM — reads the analysis text, never pixels"
+              className="bg-background border border-border rounded-md px-1.5 py-1 text-xs text-text-primary outline-none focus:border-primary disabled:opacity-40"
+            >
+              {DIRECTOR_MODELS.map((m) => (
+                <option key={m} value={m}>
+                  {shortModelLabel(m)}
+                </option>
+              ))}
+            </select>
+          </label>
           <div className="flex-1" />
           {running ? (
             <button
@@ -494,6 +545,7 @@ export function DirectorPanel({
       {inspectorOpen && (
         <PromptInspectorModal
           messages={state.messages}
+          model={state.model}
           onClose={() => setInspectorOpen(false)}
         />
       )}

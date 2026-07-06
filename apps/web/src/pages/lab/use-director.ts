@@ -47,6 +47,8 @@ export interface DirectorState {
   promptSources: PromptSources;
   /** Persisted experiment id for the current conversation. */
   experimentId: string | null;
+  /** Director LLM model for the current conversation (locked at start; refine reuses it). */
+  model: string;
 }
 
 export interface UseDirectorDeps {
@@ -65,6 +67,7 @@ const initialState: DirectorState = {
   messages: [],
   promptSources: DEFAULT_PROMPT_SOURCES,
   experimentId: null,
+  model: DIRECTOR_MODEL,
 };
 
 type Action =
@@ -75,6 +78,7 @@ type Action =
       messages: ChatMessage[];
       promptSources: PromptSources;
       experimentId: string;
+      model: string;
     }
   | { type: "activity"; activity: DirectorActivity }
   | { type: "success"; storyboard: Storyboard; warnings: string[]; messages: ChatMessage[] }
@@ -97,6 +101,7 @@ function reducer(state: DirectorState, action: Action): DirectorState {
         messages: action.messages,
         promptSources: action.promptSources,
         experimentId: action.experimentId,
+        model: action.model,
       };
     case "activity":
       return { ...state, activity: [...state.activity, action.activity] };
@@ -153,14 +158,14 @@ function resolveCloudRun(
   return dossier.cloudRuns[scope];
 }
 
-function friendlyError(err: unknown): string {
+function friendlyError(err: unknown, model: string): string {
   if (err instanceof DirectorLoopError) {
     if (err.code === "no-storyboard") {
       return "The director couldn't produce a valid storyboard — try a simpler brief.";
     }
     if (err.code === "api") {
       if (err.message.includes("404") && err.message.includes("model")) {
-        return `Model "${DIRECTOR_MODEL}" not available through the proxy (${err.message}).`;
+        return `Model "${model}" not available through the proxy (${err.message}).`;
       }
       if (err.message.includes("Failed to fetch") || err.message.includes("502")) {
         return "OpenAI proxy unreachable — is /api/proxy/openai configured (abacus nginx / vite proxy)?";
@@ -187,6 +192,12 @@ export function useDirector(deps: UseDirectorDeps) {
   /** The persisted record of the current conversation, updated as it grows. */
   const experimentRef = useRef<DirectorExperiment | null>(null);
   const activityLogRef = useRef<DirectorActivity[]>([]);
+  /**
+   * Director model locked for the current conversation. Set by start();
+   * refine() reuses whatever is already here so a mid-conversation model
+   * change (a fresh Direct run) never bleeds into an in-flight refine.
+   */
+  const modelRef = useRef<string>(DIRECTOR_MODEL);
   const { getDossiers, embedQuery } = deps;
 
   const persistExperiment = useCallback(
@@ -219,6 +230,7 @@ export function useDirector(deps: UseDirectorDeps) {
         messages,
         promptSources: exp?.promptSources ?? DEFAULT_PROMPT_SOURCES,
         experimentId: exp?.id ?? "",
+        model: modelRef.current,
       });
       if (initialActivity) {
         activityLogRef.current.push(initialActivity);
@@ -229,7 +241,7 @@ export function useDirector(deps: UseDirectorDeps) {
           complete: (msgs, tools, toolChoice) =>
             chatComplete(
               {
-                model: DIRECTOR_MODEL,
+                model: modelRef.current,
                 messages: msgs,
                 tools,
                 tool_choice:
@@ -273,7 +285,7 @@ export function useDirector(deps: UseDirectorDeps) {
         if (err instanceof DirectorLoopError && err.code === "aborted") {
           dispatch({ type: "aborted" });
         } else {
-          dispatch({ type: "failure", error: friendlyError(err) });
+          dispatch({ type: "failure", error: friendlyError(err, modelRef.current) });
         }
       } finally {
         abortRef.current = null;
@@ -289,6 +301,7 @@ export function useDirector(deps: UseDirectorDeps) {
       sources?: PromptSources,
       briefAngle?: string,
       styleId?: string,
+      model?: string,
     ) => {
       const dossiers = getDossiers();
       if (dossiers.length === 0) {
@@ -300,6 +313,10 @@ export function useDirector(deps: UseDirectorDeps) {
       // persisted, never appended to the seed message.
       const stylePreset = stylePresetById(styleId);
       dossiersRef.current = dossiers;
+      // Lock the model for this whole conversation — refine() reuses it by
+      // leaving modelRef untouched (see the ref's doc comment above).
+      const directorModel = model ?? DIRECTOR_MODEL;
+      modelRef.current = directorModel;
 
       // Candidates mode: the footage message is the selector's scored
       // top-picks per chapter (plus gist of everything else) instead of every
@@ -402,7 +419,7 @@ export function useDirector(deps: UseDirectorDeps) {
         targetDurationS,
         promptSources,
         captionModels,
-        model: DIRECTOR_MODEL,
+        model: directorModel,
         clips: dossiers.map((d) => ({
           clipId: d.clipId,
           cacheKey: d.cacheKey,
