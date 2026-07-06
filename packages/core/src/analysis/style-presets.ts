@@ -51,7 +51,7 @@ export const STYLE_PRESETS: readonly StylePreset[] = [
     label: "Neistat style",
     tagline: "Casey Neistat school — relentless momentum, jump cuts, abrupt ends",
     directorNote:
-      "Cut this like a Casey Neistat vlog. Cold-open on the most kinetic moment we have, then keep relentless forward momentum: jump cuts that skip the boring middle of everything, time-lapse energy to eat the transitions, and quick asides on small human details that make it personal. Story beats polish — and the second the story is told, end. Abruptly.",
+      "Cut this like a Casey Neistat vlog. Cold-open on the most kinetic moment we have, then keep relentless forward momentum: jump cuts that skip the boring middle of everything, time-lapse energy to eat the transitions, and quick asides on small human details that make it personal. Story beats polish — and the second the story is told, end. Abruptly. The music is added after the cut is locked, so carry the momentum in the cutting itself and the track will be made to match.",
     musicHint: "cool driving NYC-vlog energy, indie rock or electronic, momentum, confident",
   },
   {
@@ -73,11 +73,16 @@ export const STYLE_PRESETS: readonly StylePreset[] = [
     allowSoftFocus: true,
   },
   {
+    // Copy honesty: music is generated AFTER the storyboard is locked (beat
+    // markers exist only in the manual editor), so nothing here may promise
+    // cuts landing ON musical beats — sell the rhythm of the cutting itself
+    // and let the generated track match it. The musicHint is exempt: it
+    // instructs the music generator, which CAN deliver a clear beat.
     id: "beat-montage",
-    label: "Beat montage",
-    tagline: "Cut to the rhythm — the music leads",
+    label: "Rhythm montage",
+    tagline: "Fast rhythmic cuts, music-video energy",
     directorNote:
-      "The music drives everything: cut on the beat, let the energy of the track decide the pacing, and treat the visuals like verses and choruses — patterns, repetitions, payoffs. No moment should outstay its bar.",
+      "Cut it like a music video: fast, rhythmic, relentless. Keep a driving pulse of short shots — patterns, repetitions, payoffs — and build and release energy like verses and choruses. The track is written after the cut is locked, so bake the rhythm into the editing itself and the music will be made to match. No moment outstays its welcome.",
     musicHint: "strong rhythmic pulse, clear beat, builds and drops, punchy",
   },
   {

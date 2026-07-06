@@ -13,6 +13,26 @@ export function dossierCacheKey(file: File): string {
   return `${KEY_PREFIX}:${file.name}:${file.size}:${file.lastModified}`;
 }
 
+/**
+ * The cache keys this file's dossier would live under for every OLDER
+ * DOSSIER_VERSION, newest first. The version is baked into the key, so after
+ * a bump a plain load() misses without ever seeing the old record — these
+ * keys are how "cached but version-invalidated" is told apart from "brand
+ * new clip". Pure; exported for unit tests.
+ */
+export function staleDossierCacheKeys(
+  file: File,
+): Array<{ version: number; key: string }> {
+  const keys: Array<{ version: number; key: string }> = [];
+  for (let v = DOSSIER_VERSION - 1; v >= 1; v -= 1) {
+    keys.push({
+      version: v,
+      key: `perception:v${v}:${file.name}:${file.size}:${file.lastModified}`,
+    });
+  }
+  return keys;
+}
+
 interface SerializedShot extends Omit<Shot, "embedding" | "frameEmbeddings"> {
   embeddingB64: string | null;
   frameEmbeddingsB64: string[];
@@ -206,6 +226,24 @@ export class DossierCache {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * The newest OLD-version dossier cached for this file, or null when none
+   * exists (a genuinely new clip). Only the version number is reported —
+   * the stale record's schema is arbitrary, so its data is never
+   * deserialized. The record itself is left in place (the storage panel's
+   * clear tools own cache eviction).
+   */
+  async findStaleVersion(file: File): Promise<number | null> {
+    for (const { version, key } of staleDossierCacheKeys(file)) {
+      try {
+        if (await this.storage.loadCache(key)) return version;
+      } catch {
+        // Unreadable record = treat as absent; this is best-effort labeling.
+      }
+    }
+    return null;
   }
 
   async save(file: File, dossier: ClipDossier): Promise<void> {

@@ -305,8 +305,31 @@ export type FunnelProgressEvent =
       device: InferenceDevice;
       loadMs: number;
     }
+  | {
+      /**
+       * A cached dossier for this file EXISTS but was invalidated by a
+       * DOSSIER_VERSION bump (the version is part of the cache key, so a
+       * plain load() just misses). Emitted before the fresh pipeline starts
+       * so the UI can label the run "re-analyzing (pipeline updated)"
+       * instead of it looking like a brand-new clip.
+       */
+      kind: "cache-invalidated";
+      clipId: string;
+      /** DOSSIER_VERSION the stale record was cached under. */
+      previousVersion: number;
+    }
   | { kind: "clip-done"; clipId: string; dossier: ClipDossier }
-  | { kind: "clip-error"; clipId: string; message: string };
+  | {
+      kind: "clip-error";
+      clipId: string;
+      message: string;
+      /**
+       * True when the failure is a deliberate cancelClip() (message is
+       * "cancelled"), so the UI can show a distinct cancelled state instead
+       * of an error. Absent on real failures.
+       */
+      cancelled?: boolean;
+    };
 
 export const DOSSIER_VERSION = 4 as const;
 

@@ -26,6 +26,27 @@ describe("STYLE_PRESETS", () => {
     }
   });
 
+  it("never promises beat-synced cuts (music is generated after storyboard lock)", () => {
+    // The pipeline can't align cuts to musical beats — the track is written
+    // AFTER the storyboard is locked and beat markers exist only in the
+    // manual editor. Copy may sell rhythm/energy, never beat alignment.
+    // musicHint is deliberately exempt: it instructs the music generator,
+    // which CAN deliver a clear beat.
+    const beatSyncPromises = [
+      /on the beat/i,
+      /beat[- ]sync/i,
+      /music leads/i,
+      /music drives/i,
+      /cut to the (?:beat|rhythm|music)/i,
+    ];
+    for (const preset of STYLE_PRESETS) {
+      const copy = `${preset.label} ${preset.tagline} ${preset.directorNote}`;
+      for (const promise of beatSyncPromises) {
+        expect(copy).not.toMatch(promise);
+      }
+    }
+  });
+
   it("marks exactly the soft-friendly presets allowSoftFocus", () => {
     const soft = STYLE_PRESETS.filter((p) => p.allowSoftFocus).map((p) => p.id);
     expect(soft).toEqual(["atmospheric", "cinematic", "memory-film", "visual-poem"]);
