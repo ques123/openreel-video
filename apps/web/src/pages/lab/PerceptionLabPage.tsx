@@ -55,6 +55,13 @@ function committedMusicMeta(exp: DirectorExperiment): DebugExportMeta["music"] {
   };
 }
 
+/**
+ * Clips enhanced concurrently in a bulk run. Each clip already runs 5
+ * concurrent batches internally, so 3 clips = up to 15 in-flight requests —
+ * fine for the proxy, and each batch still has its own retry.
+ */
+const BULK_CLIP_CONCURRENCY = 3;
+
 /** Format seconds as "Xh YYm" (≥1h), "YYm", or "<1m". */
 function formatDurationCompact(seconds: number): string {
   if (seconds < 1) return "<1m";
@@ -386,15 +393,27 @@ export function PerceptionLabPage() {
     }
   }, [director, runDebugExport]);
 
-  /** Enhance every selected clip, one at a time (per-clip progress shows in each row). */
+  /**
+   * Enhance every selected clip, a few at a time (per-clip progress shows in
+   * each row). Small clips are tail-latency bound, so overlapping them cuts
+   * bulk wall-clock ~2-3x at identical token cost.
+   */
   const enhanceSelected = useCallback(async () => {
     const ids = selectedClips.map((c) => c.clipId);
     if (ids.length === 0) return;
     setBulkRunning(true);
     try {
-      for (const clipId of ids) {
-        await enhanceClip(clipId, cloudScope, cloudModel);
-      }
+      let next = 0;
+      const worker = async () => {
+        while (next < ids.length) {
+          const clipId = ids[next];
+          next += 1;
+          await enhanceClip(clipId, cloudScope, cloudModel);
+        }
+      };
+      await Promise.all(
+        Array.from({ length: Math.min(BULK_CLIP_CONCURRENCY, ids.length) }, () => worker()),
+      );
     } finally {
       setBulkRunning(false);
     }

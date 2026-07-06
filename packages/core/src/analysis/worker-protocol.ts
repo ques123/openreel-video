@@ -98,6 +98,8 @@ export interface FunnelDenseFrameResponse {
   clipId: string;
   t: number;
   jpeg: ArrayBuffer;
+  /** Laplacian variance at scan resolution (blur gate for cloud captioning). */
+  sharpness: number;
 }
 
 export interface FunnelDoneResponse {

@@ -4,12 +4,111 @@
  * which frames to send for a scope, and how results land back in the dossier.
  */
 
+import { similarCaptions } from "./caption-text";
 import type { ClipDossier, CloudRunMeta, DenseCaption, DenseFrame } from "./types";
 
 export type CloudScope = "shots" | "timeline";
 
 /** Hard ceiling on frames per enhance run (cost/latency sanity, ~pennies). */
 export const MAX_CLOUD_FRAMES = 600;
+
+/**
+ * Dense frames below this laplacian variance (at scan resolution) are too
+ * blurry to be worth a cloud call; they get a local "unusable" annotation
+ * instead. ~50 separates motion smear from usable handheld footage.
+ */
+export const BLUR_SHARPNESS_THRESHOLD = 50;
+
+/** Timeline annotation for frames skipped by the blur gate (director-visible). */
+export const BLURRY_FRAME_CAPTION =
+  "unusable: frame too blurry / motion-smeared to describe";
+
+/**
+ * A frame to send to the cloud captioner. When `t1` is set the frame is the
+ * representative of a visually static span [t, t1] — near-identical
+ * neighbors were merged away and its caption applies to the whole span.
+ */
+export interface CloudFrame extends DenseFrame {
+  t1?: number;
+}
+
+export interface CloudFramePlan {
+  frames: CloudFrame[];
+  /** Timeline frames the blur gate dropped (annotate locally, send nothing). */
+  blurrySkipped: DenseFrame[];
+}
+
+/**
+ * Cost-aware frame plan for an enhance run. Shots scope is unchanged (one
+ * frame per shot; reps were already sharpness-picked, and skipping one would
+ * leave its shot undescribed). Timeline scope drops blurry frames, then
+ * merges runs of consecutive frames whose LOCAL captions are near-identical
+ * (word-Jaccard, same gate the prompt timeline uses) into one representative
+ * frame + time span. Frames the local caption pass hasn't reached never
+ * merge — there is nothing to judge similarity with.
+ */
+export function planCloudFrames(dossier: ClipDossier, scope: CloudScope): CloudFramePlan {
+  if (scope === "shots") {
+    return { frames: selectCloudFrames(dossier, scope), blurrySkipped: [] };
+  }
+
+  const blurrySkipped: DenseFrame[] = [];
+  const sharp: DenseFrame[] = [];
+  for (const f of dossier.denseFrames) {
+    if (f.sharpness !== undefined && f.sharpness < BLUR_SHARPNESS_THRESHOLD) {
+      blurrySkipped.push(f);
+    } else {
+      sharp.push(f);
+    }
+  }
+
+  const localByT = new Map(dossier.denseCaptions.map((c) => [c.t, c.text]));
+  const frames: CloudFrame[] = [];
+  // Similarity is judged against the run's FIRST caption (like
+  // mergeDenseCaptions), so a chain of pairwise-similar captions can't
+  // drift arbitrarily far from the representative actually sent.
+  let repText: string | null = null;
+  for (const f of sharp) {
+    const text = localByT.get(f.t) ?? null;
+    const rep = frames[frames.length - 1];
+    // A blurry frame between two similar sharp frames doesn't break a run —
+    // the scene is static, the middle frame was just smeared.
+    if (rep && text !== null && repText !== null && similarCaptions(repText, text)) {
+      rep.t1 = f.t;
+    } else {
+      frames.push({ ...f });
+      repText = text;
+    }
+  }
+  return { frames: frames.slice(0, MAX_CLOUD_FRAMES), blurrySkipped };
+}
+
+/**
+ * Re-expand span captions after the cloud run: a caption whose frame
+ * represented [t, t1] is duplicated at t1, so the prompt's run-length merge
+ * (identical text) renders the full range instead of a point in time.
+ */
+export function expandSpanCaptions(
+  captions: DenseCaption[],
+  frames: CloudFrame[],
+): DenseCaption[] {
+  const spanEnd = new Map<number, number>();
+  for (const f of frames) {
+    if (f.t1 !== undefined && f.t1 > f.t) spanEnd.set(f.t, f.t1);
+  }
+  const out: DenseCaption[] = [];
+  for (const c of captions) {
+    out.push(c);
+    const t1 = spanEnd.get(c.t);
+    if (t1 !== undefined) out.push({ t: t1, text: c.text });
+  }
+  return out;
+}
+
+/** Director-visible annotations for frames the blur gate skipped. */
+export function blurryAnnotations(blurrySkipped: DenseFrame[]): DenseCaption[] {
+  return blurrySkipped.map((f) => ({ t: f.t, text: BLURRY_FRAME_CAPTION }));
+}
 
 /**
  * Frames to send for a scope:

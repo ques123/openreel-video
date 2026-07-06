@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
 import {
   applyCloudResults,
+  blurryAnnotations,
+  expandSpanCaptions,
   FunnelOrchestrator,
+  planCloudFrames,
   searchShots,
-  selectCloudFrames,
   templateQuery,
   type ClipDossier,
   type CloudScope,
@@ -360,7 +362,7 @@ export function usePerceptionLab(forceDevice: "auto" | InferenceDevice = "auto")
       const dossier = dossiersRef.current.get(clipId);
       const file = filesRef.current.get(clipId);
       if (!dossier || !file) return;
-      const frames = selectCloudFrames(dossier, scope);
+      const { frames, blurrySkipped } = planCloudFrames(dossier, scope);
       if (frames.length === 0) {
         dispatch({ type: "cloud-error", clipId, message: "no frames available yet" });
         return;
@@ -373,7 +375,13 @@ export function usePerceptionLab(forceDevice: "auto" | InferenceDevice = "auto")
           undefined,
           model,
         );
-        applyCloudResults(dossier, scope, run.captions, {
+        // Span reps duplicate at their span end (so the prompt merge renders
+        // the range); blur-gated frames get a free local annotation.
+        const captions = [
+          ...expandSpanCaptions(run.captions, frames),
+          ...blurryAnnotations(blurrySkipped),
+        ];
+        applyCloudResults(dossier, scope, captions, {
           model: run.model,
           enhancedAt: Date.now(),
           framesSent: run.framesSent,
