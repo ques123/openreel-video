@@ -154,6 +154,111 @@ export interface ScratchReader {
   close: () => void;
 }
 
+// ---------------------------------------------------------------------------
+// Rolling-window ingest: analyze clips of ANY length inside a bounded OPFS
+// footprint. The visual scan is a single sequential pass, so the file is
+// ingested one byte-window at a time; each window is deleted before the next
+// is copied. Three scratch files cooperate per clip:
+//   <key>       — the CURRENT window's bytes [windowStart, windowStart+windowBytes)
+//   <key>.head  — the first HEAD_BYTES of the file (ftyp/moov-at-front), kept
+//                 for the whole run so every window's Input can parse the container
+//   <key>.tail  — the last TAIL_BYTES (moov-at-end index), ditto
+// ---------------------------------------------------------------------------
+
+/** Bytes of file head kept for all windows (container boxes before mdat). */
+export const WINDOW_HEAD_BYTES = 64 * 2 ** 20;
+/** Bytes of file tail kept for all windows (moov index usually lives there). */
+export const WINDOW_TAIL_BYTES = 64 * 2 ** 20;
+/**
+ * Consecutive windows overlap by this many bytes so the keyframe preceding a
+ * window's first requested timestamp is always readable (seeks land on the
+ * sync frame BEFORE the resume point). 128MB ≈ 10s of 100Mbps footage —
+ * comfortably more than any consumer GOP.
+ */
+export const WINDOW_OVERLAP_BYTES = 128 * 2 ** 20;
+/** Smallest useful window; below this a clear quota error beats thrashing. */
+export const MIN_WINDOW_BYTES = 1 * 2 ** 30;
+
+/** Byte layout of one rolling-window scratch state. */
+export interface WindowScratchMeta {
+  totalSize: number;
+  /** Bytes [0, headBytes) live in "<key>.head". */
+  headBytes: number;
+  /** Bytes [windowStart, windowStart + windowBytes) live in the main "<key>" file. */
+  windowStart: number;
+  windowBytes: number;
+  /** Bytes [tailStart, totalSize) live in "<key>.tail". */
+  tailStart: number;
+}
+
+export interface IngestWindowPlan {
+  /** Byte ranges to ingest, in order. windows[i+1] overlaps windows[i]'s end. */
+  windows: Array<{ startByte: number; endByte: number }>;
+  headBytes: number;
+  tailBytes: number;
+}
+
+/**
+ * Plan the rolling windows for a file of totalSize bytes under budgetBytes
+ * of usable quota (already safety-margined by the caller). Pure.
+ * Whole file fits → single window [0, totalSize) with headBytes/tailBytes 0
+ * (plain copyBlobToScratch territory). Otherwise a multi-window plan where
+ * every window after the first starts WINDOW_OVERLAP_BYTES before the
+ * previous window's end and the last window ends at totalSize. Returns null
+ * when the budget can't hold MIN_WINDOW_BYTES + head + tail.
+ */
+export function planIngestWindows(
+  totalSize: number,
+  budgetBytes: number,
+): IngestWindowPlan | null {
+  void totalSize; void budgetBytes;
+  throw new Error("not implemented");
+}
+
+/**
+ * Open a rolling-window layout as a mediabunny StreamSource. Reads are
+ * served from whichever of window/head/tail covers the range (window wins
+ * on overlap); a read outside all three throws a descriptive error naming
+ * the byte range — the funnel treats that as a bug surface, not a signal
+ * (windowed scans request only timestamps the window covers). Caller MUST
+ * close() (sync handles are exclusive).
+ */
+export async function openWindowScratchSource(
+  key: string,
+  meta: WindowScratchMeta,
+): Promise<ScratchReader> {
+  void key; void meta;
+  throw new Error("not implemented");
+}
+
+// ---------------------------------------------------------------------------
+// PCM sidecar: 16k mono f32le audio extracted during the visual pass, so the
+// whisper pass never needs the (long-deleted) video windows.
+// ---------------------------------------------------------------------------
+
+/** Append raw f32 samples to the "<key>" scratch file (creates on first call). */
+export async function appendPcmToScratch(
+  key: string,
+  samples: Float32Array,
+): Promise<void> {
+  void key; void samples;
+  throw new Error("not implemented");
+}
+
+export interface PcmScratchReader {
+  /** Total sample count in the file. */
+  sampleCount: number;
+  /** Read [offsetSamples, offsetSamples + samples) — clamped at EOF. */
+  read: (offsetSamples: number, samples: number) => Float32Array;
+  close: () => void;
+}
+
+/** Open a PCM sidecar for chunked reads. Caller MUST close(). */
+export async function openPcmScratch(key: string): Promise<PcmScratchReader> {
+  void key;
+  throw new Error("not implemented");
+}
+
 /**
  * Open a scratch file as a mediabunny StreamSource backed by a sync access
  * handle. Caller MUST call close() (the handle holds an exclusive lock).
@@ -245,6 +350,8 @@ export async function deleteScratch(key: string): Promise<void> {
     const dir = await getScratchDir();
     await dir.removeEntry(key).catch(() => undefined);
     await dir.removeEntry(`${key}.tail`).catch(() => undefined);
+    await dir.removeEntry(`${key}.head`).catch(() => undefined);
+    await dir.removeEntry(`${key}.audio`).catch(() => undefined);
   } catch {
     // already gone / never created
   }

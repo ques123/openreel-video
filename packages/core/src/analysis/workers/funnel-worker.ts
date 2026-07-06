@@ -381,6 +381,8 @@ async function analyze(req: Extract<FunnelRequest, { type: "analyze" }>) {
       usedOpfs,
       partial,
       analyzedThroughS,
+      ingestWindows: 1, // interim: rolling windows land with the window loop
+      audioPcm: null, // interim: PCM sidecar lands with the window loop
       perf: {
         decodeMs: performance.now() - startMs - ingestMs,
         framesDecoded: framesDone,

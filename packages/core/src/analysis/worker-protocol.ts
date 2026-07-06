@@ -24,6 +24,11 @@ export interface FunnelAnalyzeRequest {
   blob: Blob;
   sampleFps: number;
   targetWidth: number;
+  /**
+   * TEST HOOK: pretend the OPFS quota budget is this many bytes, forcing the
+   * rolling-window path on small fixtures. Never set in production code.
+   */
+  debugIngestBudgetBytes?: number;
 }
 
 export interface FunnelCancelRequest {
@@ -110,10 +115,38 @@ export interface FunnelDoneResponse {
   clipId: string;
   /** True when the clip was ingested to OPFS scratch (whisper should read it from there). */
   usedOpfs: boolean;
-  /** Non-null when the scratch ingest is partial (prefix + tail). */
+  /**
+   * Non-null when the scratch ingest is partial (prefix + tail) AND the clip
+   * finished single-window (legacy shape, whisper container path reads it).
+   * Rolling-window clips report null here — their audio travels via audioPcm.
+   */
   partial: PartialScratchMeta | null;
   analyzedThroughS: number | null;
   perf: { decodeMs: number; framesDecoded: number; ingestMs: number };
+  /** How many OPFS ingest windows the visual pass used (1 = single copy). */
+  ingestWindows: number;
+  /**
+   * The 16k mono f32le PCM sidecar extracted during the visual pass (scratch
+   * key `<clipId>.audio`), or null when the clip has no audio track or
+   * extraction failed. When set, the whisper pass reads THIS instead of
+   * decoding the container — for windowed clips the video scratch windows
+   * are long gone by transcription time.
+   */
+  audioPcm: { key: string; sampleRate: 16000; durationS: number } | null;
+}
+
+/**
+ * A rolling-window analysis is moving to its next OPFS window (1-based;
+ * emitted at each window START, including the first when windows > 1).
+ * analyzedThroughS = source seconds fully covered by completed windows.
+ */
+export interface FunnelWindowResponse {
+  type: "window";
+  requestId: string;
+  clipId: string;
+  window: number;
+  windows: number;
+  analyzedThroughS: number;
 }
 
 export interface FunnelErrorResponse {
@@ -127,6 +160,7 @@ export type FunnelResponse =
   | FunnelMetaResponse
   | FunnelProgressResponse
   | FunnelIngestProgressResponse
+  | FunnelWindowResponse
   | FunnelShotResponse
   | FunnelDenseFrameResponse
   | FunnelDoneResponse
@@ -266,6 +300,14 @@ export interface WhisperTranscribeRequest {
    * cached before audio signals existed without re-running whisper.
    */
   envelopeOnly?: boolean;
+  /**
+   * When set, the audio is ALREADY 16k mono f32le PCM in this scratch key
+   * (extracted by the funnel pass) — read it directly, in bounded chunks,
+   * and ignore blob/opfsKey/partial entirely. Long transcriptions MUST NOT
+   * materialize the whole clip in one Float32Array: run the ASR in macro
+   * chunks (~600s) and offset segment timestamps by each chunk's start.
+   */
+  pcmKey?: string | null;
 }
 
 export type WhisperRequest = WhisperInitRequest | WhisperTranscribeRequest;
