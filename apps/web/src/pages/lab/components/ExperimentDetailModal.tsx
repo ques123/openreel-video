@@ -20,6 +20,11 @@ interface ExperimentDetailModalProps {
   onWatch: (exp: DirectorExperiment) => void;
   onExportDebug: (exp: DirectorExperiment) => void;
   exportProgress: string | null;
+  /** Compile this cut into a real editable timeline (#/editor). */
+  onCompile: (exp: DirectorExperiment) => void;
+  compiling: boolean;
+  /** Progress (or blocking-error) line for a compile ("importing 2/5…"). */
+  compileProgress: string | null;
   onDeleted: () => void;
   /** A field on the stored record changed (e.g. committed music track). */
   onChanged?: () => void;
@@ -37,6 +42,9 @@ export function ExperimentDetailModal({
   onWatch,
   onExportDebug,
   exportProgress,
+  onCompile,
+  compiling,
+  compileProgress,
   onDeleted,
   onChanged,
   onClose,
@@ -233,7 +241,7 @@ export function ExperimentDetailModal({
 
           {missing.length > 0 && (
             <p className="text-amber-500">
-              Re-add these files to watch/export with real footage: {missing.join(", ")}
+              Re-add these files to watch/export/compile with real footage: {missing.join(", ")}
             </p>
           )}
         </div>
@@ -253,6 +261,24 @@ export function ExperimentDetailModal({
             onClick={() => onExportDebug(exp)}
           >
             {exportProgress ?? "⬇ debug video"}
+          </button>
+          <button
+            className="px-2 py-1 text-xs rounded-md border border-border text-text-secondary hover:text-text-primary disabled:opacity-40"
+            disabled={
+              !exp.storyboard ||
+              exp.storyboard.items.length === 0 ||
+              compiling ||
+              exportProgress !== null ||
+              missing.length > 0
+            }
+            onClick={() => onCompile(exp)}
+            title={
+              missing.length > 0
+                ? `Missing from this session, re-drop: ${missing.join(", ")}`
+                : "Compile this cut into a real editable timeline in the editor"
+            }
+          >
+            {compileProgress ?? "⧉ open in editor"}
           </button>
           <button
             className="px-2 py-1 text-xs rounded-md border border-border text-text-secondary hover:text-text-primary"

@@ -413,43 +413,66 @@ export function PerceptionLabPage() {
     }
   }, [director, runDebugExport]);
 
-  /** Compile the current storyboard into a real project and jump to #/editor. */
-  const compileCurrentRun = useCallback(async () => {
-    const storyboard = director.state.storyboard;
-    if (!storyboard || compiling) return;
-    setCompiling(true);
-    setCompileProgress("starting…");
-    try {
-      // Committed music only — an A/B'd-but-unpicked session compiles dry.
-      const m = director.getExperiment()?.music;
-      const track = m?.committedTrackId
-        ? m.tracks.find((t) => t.id === m.committedTrackId)
-        : undefined;
-      const audioUrl = track ? proxiedMusicUrl(track.audioUrl || track.streamAudioUrl) : "";
-      const result = await compileStoryboardToProject({
-        storyboard,
-        getFile,
-        music: track && audioUrl ? { audioUrl, durationS: track.durationS } : null,
-        onProgress: setCompileProgress,
-      });
-      if (result.ok) {
-        // Keep a music-skipped warning visible (shows if the user returns here).
-        setCompileProgress(result.warning ?? null);
-        navigate("editor");
-      } else if (result.missing.length > 0) {
-        setCompileProgress(
-          `missing ${result.missing.length} file(s), re-drop: ${result.missing.join(", ")}`,
-        );
-      } else {
-        setCompileProgress(result.error ?? "compile failed");
+  /** Compile a storyboard into a real project and jump to #/editor (shared by
+   * the live run and stored experiments — only the file resolver and music
+   * record differ). */
+  const runCompileStoryboard = useCallback(
+    async (
+      storyboard: Storyboard,
+      resolveFile: (clipId: string) => File | null,
+      musicRecord: DirectorExperiment["music"] | undefined,
+    ) => {
+      if (compiling || exportProgress !== null) return;
+      setCompiling(true);
+      setCompileProgress("starting…");
+      try {
+        // Committed music only — an A/B'd-but-unpicked session compiles dry.
+        const track = musicRecord?.committedTrackId
+          ? musicRecord.tracks.find((t) => t.id === musicRecord.committedTrackId)
+          : undefined;
+        const audioUrl = track ? proxiedMusicUrl(track.audioUrl || track.streamAudioUrl) : "";
+        const result = await compileStoryboardToProject({
+          storyboard,
+          getFile: resolveFile,
+          music: track && audioUrl ? { audioUrl, durationS: track.durationS } : null,
+          onProgress: setCompileProgress,
+        });
+        if (result.ok) {
+          // Keep a music-skipped warning visible (shows if the user returns here).
+          setCompileProgress(result.warning ?? null);
+          navigate("editor");
+        } else if (result.missing.length > 0) {
+          setCompileProgress(
+            `missing ${result.missing.length} file(s), re-drop: ${result.missing.join(", ")}`,
+          );
+        } else {
+          setCompileProgress(result.error ?? "compile failed");
+        }
+      } catch (err) {
+        console.error("[compile-storyboard]", err);
+        setCompileProgress(err instanceof Error ? err.message : String(err));
+      } finally {
+        setCompiling(false);
       }
-    } catch (err) {
-      console.error("[compile-storyboard]", err);
-      setCompileProgress(err instanceof Error ? err.message : String(err));
-    } finally {
-      setCompiling(false);
-    }
-  }, [director, compiling, getFile, navigate]);
+    },
+    [compiling, exportProgress, navigate],
+  );
+
+  /** Compile the current storyboard into a real project and jump to #/editor. */
+  const compileCurrentRun = useCallback(() => {
+    const storyboard = director.state.storyboard;
+    if (!storyboard) return;
+    return runCompileStoryboard(storyboard, getFile, director.getExperiment()?.music);
+  }, [director, getFile, runCompileStoryboard]);
+
+  /** Compile a STORED experiment's cut (old clip ids remapped via cacheKey). */
+  const runCompile = useCallback(
+    (exp: DirectorExperiment) => {
+      if (!exp.storyboard) return;
+      return runCompileStoryboard(exp.storyboard, experimentGetFile(exp), exp.music);
+    },
+    [experimentGetFile, runCompileStoryboard],
+  );
 
   /**
    * Enhance every selected clip, a few at a time (per-clip progress shows in
@@ -715,6 +738,9 @@ export function PerceptionLabPage() {
           onExportDebug={(exp) => {
             if (exp.storyboard) void runDebugExport(exp, exp.storyboard);
           }}
+          onCompile={(exp) => void runCompile(exp)}
+          compiling={compiling}
+          compileProgress={compileProgress}
           onChanged={() => setExperimentsRefresh((n) => n + 1)}
           onDeleted={() => {
             setExperimentOpen(null);
