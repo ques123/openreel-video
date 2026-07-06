@@ -36,6 +36,13 @@ export interface CloudFramePlan {
   frames: CloudFrame[];
   /** Timeline frames the blur gate dropped (annotate locally, send nothing). */
   blurrySkipped: DenseFrame[];
+  /**
+   * Timeline frames dropped because they fell outside every candidate shot's
+   * [tStart-0.5, tEnd+0.5] range (candidate-mode only; not blurry, just out
+   * of scope — dropped silently, not annotated). 0 when
+   * candidateShotIndexes is unset.
+   */
+  outOfCandidateRanges: number;
 }
 
 /**
@@ -47,14 +54,51 @@ export interface CloudFramePlan {
  * frame + time span. Frames the local caption pass hasn't reached never
  * merge — there is nothing to judge similarity with.
  */
-export function planCloudFrames(dossier: ClipDossier, scope: CloudScope): CloudFramePlan {
+export interface PlanCloudFramesOpts {
+  /**
+   * When set, restrict the plan to the selector's candidate shots: shots
+   * scope sends only these shots' rep frames; timeline scope keeps only
+   * dense frames inside these shots' [tStart, tEnd] ranges (then blur-gates
+   * and merges as usual). Unset = current behavior (all shots/frames).
+   */
+  candidateShotIndexes?: Set<number>;
+}
+
+export function planCloudFrames(
+  dossier: ClipDossier,
+  scope: CloudScope,
+  opts: PlanCloudFramesOpts = {},
+): CloudFramePlan {
   if (scope === "shots") {
-    return { frames: selectCloudFrames(dossier, scope), blurrySkipped: [] };
+    return {
+      frames: selectCloudFrames(dossier, scope, opts.candidateShotIndexes),
+      blurrySkipped: [],
+      outOfCandidateRanges: 0,
+    };
+  }
+
+  let denseFrames = dossier.denseFrames;
+  let outOfCandidateRanges = 0;
+  if (opts.candidateShotIndexes) {
+    const candidateShotIndexes = opts.candidateShotIndexes;
+    const ranges = dossier.shots
+      .filter((s) => candidateShotIndexes.has(s.index))
+      .map((s) => ({ t0: s.tStart - 0.5, t1: s.tEnd + 0.5 }));
+    const inRange = (t: number) => ranges.some((r) => t >= r.t0 && t <= r.t1);
+    const kept: DenseFrame[] = [];
+    for (const f of dossier.denseFrames) {
+      if (inRange(f.t)) {
+        kept.push(f);
+      } else {
+        outOfCandidateRanges += 1;
+      }
+    }
+    denseFrames = kept;
   }
 
   const blurrySkipped: DenseFrame[] = [];
   const sharp: DenseFrame[] = [];
-  for (const f of dossier.denseFrames) {
+  for (const f of denseFrames) {
     if (f.sharpness !== undefined && f.sharpness < BLUR_SHARPNESS_THRESHOLD) {
       blurrySkipped.push(f);
     } else {
@@ -80,7 +124,7 @@ export function planCloudFrames(dossier: ClipDossier, scope: CloudScope): CloudF
       repText = text;
     }
   }
-  return { frames: frames.slice(0, MAX_CLOUD_FRAMES), blurrySkipped };
+  return { frames: frames.slice(0, MAX_CLOUD_FRAMES), blurrySkipped, outOfCandidateRanges };
 }
 
 /**
@@ -116,14 +160,24 @@ export function blurryAnnotations(blurrySkipped: DenseFrame[]): DenseCaption[] {
  *    good frame per shot (falls back to the shot thumbnail when no dense
  *    frame landed within the shot).
  *  - "timeline": every dense frame the adaptive sampler kept.
- * Deduplicated and time-ordered.
+ * Deduplicated and time-ordered. `candidateShotIndexes`, when set, restricts
+ * "shots" scope to only those shot indexes (unused for "timeline" scope,
+ * which has no per-shot notion — candidate filtering there is time-range
+ * based and lives in planCloudFrames).
  */
-export function selectCloudFrames(dossier: ClipDossier, scope: CloudScope): DenseFrame[] {
+export function selectCloudFrames(
+  dossier: ClipDossier,
+  scope: CloudScope,
+  candidateShotIndexes?: Set<number>,
+): DenseFrame[] {
   if (scope === "timeline") {
     return dossier.denseFrames.slice(0, MAX_CLOUD_FRAMES);
   }
   const picked = new Map<number, DenseFrame>(); // keyed by t (dedup)
-  for (const shot of dossier.shots) {
+  const shots = candidateShotIndexes
+    ? dossier.shots.filter((s) => candidateShotIndexes.has(s.index))
+    : dossier.shots;
+  for (const shot of shots) {
     let best: DenseFrame | null = null;
     for (const f of dossier.denseFrames) {
       if (f.t < shot.tStart - 1 || f.t > shot.tEnd + 1) continue;

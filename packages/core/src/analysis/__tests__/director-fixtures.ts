@@ -1,5 +1,6 @@
 import type { ClipDossier, DossierPerf, Shot, TranscriptSegment } from "../types";
 import { DOSSIER_VERSION } from "../types";
+import type { CandidatePick, Chapter, ShotScore } from "../signal-score";
 
 export function makeShot(
   index: number,
@@ -81,5 +82,48 @@ export function makeDossier(
     localCaptionPerf: null,
     transcript: opts.transcript ?? [],
     perf,
+  };
+}
+
+/**
+ * Hand-built SelectionResult pieces for buildCandidatesMessage /
+ * cloud-vision-plan tests — signal-score.ts's scoring/selection functions
+ * are still stubs, so tests construct these directly rather than calling
+ * selectCandidates.
+ */
+export function makeChapter(overrides: Partial<Chapter> = {}): Chapter {
+  return {
+    index: 0,
+    clipIds: ["clip-a"],
+    startedAt: null,
+    label: "ch 0",
+    ...overrides,
+  };
+}
+
+export function makeShotScore(overrides: Partial<ShotScore> = {}): ShotScore {
+  return {
+    clipId: "clip-a",
+    fileName: "test.mp4",
+    shotIndex: 0,
+    gated: false,
+    gateReasons: [],
+    components: { motion: 0, audio: 0, speech: 0, aesthetic: 0 },
+    score: 0,
+    ...overrides,
+  };
+}
+
+export function makePick(overrides: Partial<CandidatePick> = {}): CandidatePick {
+  return {
+    clipId: "clip-a",
+    fileName: "test.mp4",
+    shotIndex: 0,
+    chapterIndex: 0,
+    rank: 1,
+    finalScore: 0.5,
+    uniquenessPenalty: 0,
+    reasons: ["reason"],
+    ...overrides,
   };
 }

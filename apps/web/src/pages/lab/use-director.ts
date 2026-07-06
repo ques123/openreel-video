@@ -3,11 +3,13 @@ import {
   DEFAULT_PROMPT_SOURCES,
   DirectorLoopError,
   buildBriefMessage,
+  buildCandidatesMessage,
   buildDossierMessage,
   buildRefineMessage,
   buildSystemPrompt,
   runDirectorLoop,
   searchShots,
+  selectCandidates,
   stylePresetById,
   type ChatMessage,
   type ClipDossier,
@@ -198,7 +200,13 @@ export function useDirector(deps: UseDirectorDeps) {
   );
 
   const runLoop = useCallback(
-    async (messages: ChatMessage[], targetDurationS: number | null) => {
+    async (
+      messages: ChatMessage[],
+      targetDurationS: number | null,
+      /** Pushed right after run-start (which resets the activity log) — used
+       *  for the candidates-mode summary note so it survives the reset. */
+      initialActivity?: DirectorActivity,
+    ) => {
       const dossiers = dossiersRef.current;
       const exp = experimentRef.current;
       const controller = new AbortController();
@@ -212,6 +220,10 @@ export function useDirector(deps: UseDirectorDeps) {
         promptSources: exp?.promptSources ?? DEFAULT_PROMPT_SOURCES,
         experimentId: exp?.id ?? "",
       });
+      if (initialActivity) {
+        activityLogRef.current.push(initialActivity);
+        dispatch({ type: "activity", activity: initialActivity });
+      }
       try {
         const result = await runDirectorLoop(messages, {
           complete: (msgs, tools, toolChoice) =>
@@ -288,12 +300,31 @@ export function useDirector(deps: UseDirectorDeps) {
       // persisted, never appended to the seed message.
       const stylePreset = stylePresetById(styleId);
       dossiersRef.current = dossiers;
+
+      // Candidates mode: the footage message is the selector's scored
+      // top-picks per chapter (plus gist of everything else) instead of every
+      // clip's full scene timeline. Undefined promptMode behaves as "full".
+      let footageMessage: string;
+      let candidatesNote: DirectorActivity | undefined;
+      if (promptSources.promptMode === "candidates") {
+        const selection = selectCandidates(dossiers);
+        footageMessage = buildCandidatesMessage(dossiers, selection, promptSources);
+        candidatesNote = {
+          kind: "note",
+          text:
+            `candidates mode: ${selection.picks.length} picks across ` +
+            `${selection.chapters.length} chapters (of ${selection.scores.length} shots)`,
+        };
+      } else {
+        footageMessage = buildDossierMessage(dossiers, promptSources);
+      }
+
       const seed: ChatMessage[] = [
         { role: "system", content: buildSystemPrompt() },
         {
           role: "user",
           content:
-            buildDossierMessage(dossiers, promptSources) +
+            footageMessage +
             "\n\n" +
             buildBriefMessage(
               stylePreset
@@ -385,7 +416,7 @@ export function useDirector(deps: UseDirectorDeps) {
         durationMs: 0,
         captionStats,
       };
-      void runLoop(seed, targetDurationS);
+      void runLoop(seed, targetDurationS, candidatesNote);
     },
     [getDossiers, runLoop],
   );

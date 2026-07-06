@@ -4,6 +4,8 @@
  */
 
 import type {
+  AudioEnvelope,
+  AudioEvent,
   InferenceDevice,
   RepFramePixels,
   Shot,
@@ -259,6 +261,11 @@ export interface WhisperTranscribeRequest {
   partial: PartialScratchMeta | null;
   /** Cap transcription to this many seconds (partial ingest). */
   capS: number | null;
+  /**
+   * Decode + loudness envelope ONLY, skip ASR. Used to enrich dossiers
+   * cached before audio signals existed without re-running whisper.
+   */
+  envelopeOnly?: boolean;
 }
 
 export type WhisperRequest = WhisperInitRequest | WhisperTranscribeRequest;
@@ -282,6 +289,12 @@ export interface WhisperSegmentsResponse {
   clipId: string;
   segments: TranscriptSegment[];
   perf: { audioDecodeMs: number; whisperMs: number; audioDurationS: number };
+  /** Loudness envelope of the decoded audio (always computed — it's ~free). */
+  audioEnvelope?: AudioEnvelope | null;
+  /** Loudness events detected from the envelope. */
+  audioEvents?: AudioEvent[];
+  /** Echoes the request flag; segments are [] and must NOT overwrite transcript. */
+  envelopeOnly?: boolean;
 }
 
 export interface WhisperErrorResponse {

@@ -166,7 +166,8 @@ export function ExperimentDetailModal({
             <span>target: {exp.targetDurationS ? fmtS(exp.targetDurationS) : "none"}</span>
             <span>
               sources: local={String(src.localCaptions)} cloudShots={String(src.cloudShots)}{" "}
-              cloudTimeline={String(src.cloudTimeline)} transcript={String(src.transcript)}
+              cloudTimeline={String(src.cloudTimeline)} transcript={String(src.transcript)}{" "}
+              mode={src.promptMode ?? "full"}
             </span>
             <span>
               clips: {exp.clips.map((c) => c.fileName).join(", ")}

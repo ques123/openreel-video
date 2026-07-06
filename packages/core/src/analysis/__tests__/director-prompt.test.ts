@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildBriefMessage,
+  buildCandidatesMessage,
   buildDossierMessage,
   buildRefineMessage,
   dossierToPromptText,
@@ -9,7 +10,9 @@ import {
 } from "../director-prompt";
 import type { SearchResult } from "../retrieval";
 import type { Storyboard } from "../director-types";
-import { makeDossier, makeShot } from "./director-fixtures";
+import { DEFAULT_SELECTOR_CONFIG } from "../signal-score";
+import type { SelectionResult } from "../signal-score";
+import { makeChapter, makeDossier, makePick, makeShot, makeShotScore } from "./director-fixtures";
 
 describe("dossierToPromptText", () => {
   it("renders header, shots table and rounds times to 0.1s", () => {
@@ -271,5 +274,125 @@ describe("feedback + refine messages", () => {
     expect(buildRefineMessage("shorter", storyboard, 12)).toContain(
       "TARGET DURATION is now 12.0s",
     );
+  });
+});
+
+describe("buildCandidatesMessage", () => {
+  // clip-b recorded earlier than clip-a; its lone ungated shot is the ch-0
+  // pick. clip-a has a gated (blurry) shot and a picked, cloud-captioned,
+  // speech-overlapping shot.
+  const clipB = makeDossier({
+    clipId: "clip-b",
+    recordedAt: 1000,
+    shots: [
+      makeShot(0, 0, 8, { motion: 3, caption: "local b0" }),
+      makeShot(1, 8, 16, { motion: 4, sharpness: 10, caption: "local b1" }),
+    ],
+  });
+  const clipA = makeDossier({
+    clipId: "clip-a",
+    recordedAt: 2000,
+    shots: [
+      makeShot(0, 0, 10, { motion: 6, caption: "local a0" }),
+      makeShot(1, 10, 20, {
+        motion: 50,
+        caption: "local a1",
+        cloudCaption: "cloud a1",
+      }),
+    ],
+    transcript: [{ t0: 11, t1: 14, text: "hello there" }],
+  });
+
+  function makeSelection(): SelectionResult {
+    return {
+      config: DEFAULT_SELECTOR_CONFIG,
+      chapters: [
+        makeChapter({ index: 0, clipIds: ["clip-b"], startedAt: 1000, label: "ch 0 · clip-b" }),
+        makeChapter({ index: 1, clipIds: ["clip-a"], startedAt: 2000, label: "ch 1 · clip-a" }),
+      ],
+      scores: [
+        makeShotScore({ clipId: "clip-b", shotIndex: 0, gated: false }),
+        makeShotScore({
+          clipId: "clip-b",
+          shotIndex: 1,
+          gated: true,
+          gateReasons: ["blurry (sharpness 10 < 40)"],
+        }),
+        makeShotScore({ clipId: "clip-a", shotIndex: 0, gated: false }),
+        makeShotScore({ clipId: "clip-a", shotIndex: 1, gated: false }),
+      ],
+      picks: [
+        makePick({
+          clipId: "clip-b",
+          shotIndex: 0,
+          chapterIndex: 0,
+          rank: 1,
+          finalScore: 0.61,
+          uniquenessPenalty: 0,
+          reasons: ["steady establishing shot"],
+        }),
+        makePick({
+          clipId: "clip-a",
+          shotIndex: 1,
+          chapterIndex: 1,
+          rank: 1,
+          finalScore: 0.82,
+          uniquenessPenalty: 0.12,
+          reasons: ["high motion", "loud moment"],
+        }),
+      ],
+    };
+  }
+
+  it("renders chapter headers, ranked picks with why-reasons and uniqueness penalty", () => {
+    const text = buildCandidatesMessage([clipA, clipB], makeSelection());
+    expect(text).toContain("FOOTAGE: 2 analyzed clips");
+    expect(text).toContain("RECORDING ORDER");
+    expect(text).toContain("HEURISTIC");
+    expect(text).toContain("CHAPTER 0: ch 0 · clip-b");
+    expect(text).toContain("CHAPTER 1: ch 1 · clip-a");
+    expect(text).toContain("★C0.1");
+    expect(text).toContain("why: steady establishing shot");
+    expect(text).toContain("★C1.1");
+    expect(text).toContain("why: high motion, loud moment");
+    expect(text).toContain("(uniqueness −0.12)");
+  });
+
+  it("prefers the cloud caption on a pick and includes overlapping transcript lines", () => {
+    const text = buildCandidatesMessage([clipA, clipB], makeSelection());
+    expect(text).toContain('"cloud a1"');
+    expect(text).not.toContain('"local a1"');
+    expect(text).toContain("[11.0-14.0] hello there");
+  });
+
+  it("gist covers every non-picked shot and flags gated shots", () => {
+    const text = buildCandidatesMessage([clipA, clipB], makeSelection());
+    expect(text).toContain("ALL SHOTS (gist)");
+    // clip-a shot #0 was never picked: appears in the gist, un-starred.
+    expect(text).toContain('   #0  0.0-10.0s  motion 6 sharp 500  "local a0"');
+    // clip-a shot #1 WAS picked: starred in the gist too.
+    expect(text).toContain("★#1  10.0-20.0s");
+    // clip-b shot #1 is gated (blurry) — flagged, not starred.
+    expect(text).toContain("[gated: blurry (sharpness 10 < 40)]");
+  });
+
+  it("lists clips in recording order (clip-b before clip-a) in the gist and transcripts", () => {
+    const text = buildCandidatesMessage([clipA, clipB], makeSelection());
+    const gistB = text.indexOf('CLIP clip-b "test.mp4"');
+    const gistA = text.indexOf('CLIP clip-a "test.mp4"');
+    expect(gistB).toBeGreaterThan(-1);
+    expect(gistA).toBeGreaterThan(gistB);
+  });
+
+  it("withholds transcripts for every clip when sources.transcript is false", () => {
+    const text = buildCandidatesMessage([clipA, clipB], makeSelection(), {
+      localCaptions: true,
+      cloudShots: true,
+      cloudTimeline: true,
+      transcript: false,
+    });
+    expect(text).not.toContain("hello there");
+    const withheldCount = text.split("withheld for this run").length - 1;
+    expect(withheldCount).toBe(2);
   });
 });

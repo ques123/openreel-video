@@ -1,4 +1,4 @@
-import type { Shot } from "@openreel/core";
+import type { CandidatePick, Shot } from "@openreel/core";
 import type { LabClip } from "../use-perception-lab";
 
 function fmtTime(s: number): string {
@@ -18,9 +18,17 @@ interface ShotFilmstripProps {
   clip: LabClip;
   /** shot indices highlighted by search, mapped to score. */
   highlights: Map<number, number>;
+  /** Selector candidate picks for this clip's shots, keyed by shot index. */
+  picks?: Map<number, CandidatePick>;
   onShotClick?: (shot: Shot) => void;
   /** Non-null when the cloud-vision toggle is on: clicking sends frames. */
   onEnhance?: (() => void) | null;
+  /**
+   * When set, the Enhance button still renders (cloud vision is on) but is
+   * disabled with this as the tooltip — e.g. candidates-only mode and this
+   * clip has no candidate shots to send.
+   */
+  enhanceDisabledReason?: string | null;
   /** Open the side-by-side frame/local/cloud caption comparison. */
   onCompare?: () => void;
   /** Non-null when bulk-enhance selection is active: this clip's checkbox state. */
@@ -31,8 +39,10 @@ interface ShotFilmstripProps {
 export function ShotFilmstrip({
   clip,
   highlights,
+  picks,
   onShotClick,
   onEnhance,
+  enhanceDisabledReason,
   onCompare,
   selected = null,
   onSelectChange,
@@ -81,6 +91,12 @@ export function ShotFilmstrip({
           {clip.cloud?.busy && (
             <span className="text-xs text-sky-600">
               enhancing… {clip.cloud.done}/{clip.cloud.total} frames
+              {clip.cloud.outOfCandidateRanges ? (
+                <span className="text-text-secondary">
+                  {" "}
+                  · {clip.cloud.outOfCandidateRanges} frames outside candidates skipped
+                </span>
+              ) : null}
             </span>
           )}
           {clip.cloud?.error && (
@@ -90,9 +106,13 @@ export function ShotFilmstrip({
           )}
           {onEnhance && clip.status === "done" && !clip.cloud?.busy && (
             <button
-              className="text-xs px-1.5 py-0.5 rounded border border-sky-500/50 text-sky-600 hover:bg-sky-500/10"
-              onClick={onEnhance}
-              title="Send this clip's sampled frames to the cloud vision model for much better descriptions"
+              className="text-xs px-1.5 py-0.5 rounded border border-sky-500/50 text-sky-600 hover:bg-sky-500/10 disabled:opacity-40 disabled:cursor-default"
+              onClick={enhanceDisabledReason ? undefined : onEnhance}
+              disabled={!!enhanceDisabledReason}
+              title={
+                enhanceDisabledReason ??
+                "Send this clip's sampled frames to the cloud vision model for much better descriptions"
+              }
             >
               {clip.dossier?.cloudVision ? "re-enhance" : "enhance"}
             </button>
@@ -149,6 +169,7 @@ export function ShotFilmstrip({
       <div className="flex gap-2 overflow-x-auto pb-1">
         {clip.shots.map((shot) => {
           const hitScore = highlights.get(shot.index);
+          const pick = picks?.get(shot.index);
           return (
             <div
               key={shot.index}
@@ -177,6 +198,19 @@ export function ShotFilmstrip({
                 {hitScore !== undefined && (
                   <span className="absolute top-1 right-1 text-[10px] font-mono px-1 rounded bg-primary text-white">
                     {hitScore.toFixed(2)}
+                  </span>
+                )}
+                {pick && (
+                  <span
+                    className="absolute top-1 left-1 text-[10px] font-mono px-1 rounded bg-amber-500/90 text-black"
+                    title={
+                      pick.reasons.join(", ") +
+                      (pick.uniquenessPenalty > 0
+                        ? ` (uniqueness −${pick.uniquenessPenalty.toFixed(2)})`
+                        : "")
+                    }
+                  >
+                    ★{pick.rank}
                   </span>
                 )}
                 {!shot.embedding && clip.status !== "error" && (

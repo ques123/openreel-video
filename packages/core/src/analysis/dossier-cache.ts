@@ -111,6 +111,15 @@ export function deserializeDossier(data: ArrayBuffer): ClipDossier {
       ].filter(Boolean) as ClipDossier["cloudRunArchive"]),
     cloudVision: legacy,
     localCaptionPerf: parsed.localCaptionPerf ?? null,
+    // Audio signals: undefined = never computed (a pre-audio-signals cache,
+    // or a dossier saved before its envelope pass landed) — this is exactly
+    // the state FunnelOrchestrator.enrichAudioSignals() targets with a
+    // background envelopeOnly whisper pass. null means the pass ran and
+    // found no audio track. Passed through as-is rather than defaulted to
+    // null: collapsing "never computed" into "computed, no audio" would
+    // stop old caches from ever enriching.
+    audioEnvelope: parsed.audioEnvelope,
+    audioEvents: parsed.audioEvents,
     shots: parsed.shots.map((shot) => {
       const { embeddingB64, frameEmbeddingsB64, ...rest } = shot;
       return {

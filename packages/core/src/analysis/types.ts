@@ -193,7 +193,40 @@ export interface ClipDossier {
   /** Local caption pass timing; null until the pass finishes at least once. */
   localCaptionPerf: LocalCaptionPerf | null;
   transcript: TranscriptSegment[];
+  /**
+   * Loudness envelope from the audio pass. Optional: dossiers cached before
+   * this field existed lack it (no DOSSIER_VERSION bump — it enriches
+   * retroactively via an envelope-only audio pass, like captions did).
+   */
+  audioEnvelope?: AudioEnvelope | null;
+  /** Loudness events detected from the envelope. Optional, same reason. */
+  audioEvents?: AudioEvent[];
   perf: DossierPerf;
+}
+
+/**
+ * Coarse loudness envelope of the clip's audio (computed on the same 16k
+ * mono samples the whisper pass decodes — no extra decode). Drives the
+ * signals UI sparkline and audio-event detection.
+ */
+export interface AudioEnvelope {
+  /** RMS window size, seconds. */
+  windowS: number;
+  /** One RMS value (0..~1 for float samples) per window, t = index * windowS. */
+  rms: number[];
+}
+
+/**
+ * A loudness event: a run of windows well above the clip's baseline —
+ * cheering, laughter, applause, a bang. Selector signal + UI marker.
+ */
+export interface AudioEvent {
+  /** Event start, seconds. */
+  t: number;
+  /** Event duration, seconds (>= one envelope window). */
+  durS: number;
+  /** Peak robust z-score vs the clip's baseline loudness. Higher = louder. */
+  intensity: number;
 }
 
 /** Raw RGBA pixels of a representative frame, transferred worker -> main -> embed worker. */
@@ -224,6 +257,12 @@ export type FunnelProgressEvent =
   | { kind: "shot-captioned"; clipId: string; shotIndex: number; caption: string }
   | { kind: "dense-captions"; clipId: string; done: number; total: number }
   | { kind: "transcript"; clipId: string; segments: TranscriptSegment[] }
+  | {
+      kind: "audio-signals";
+      clipId: string;
+      envelope: AudioEnvelope;
+      events: AudioEvent[];
+    }
   | {
       kind: "model-progress";
       model: "embed" | "whisper" | "captioner";

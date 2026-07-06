@@ -239,3 +239,80 @@ describe("cloudRunArchive", () => {
     ).toBe("from 5.2 v2");
   });
 });
+
+describe("planCloudFrames candidateShotIndexes", () => {
+  const cap = (t: number, text: string) => ({ t, text });
+
+  it("shots scope: filters to only the candidate shots' rep frames", () => {
+    // Shots 0-10 (rep 5), 10-25 (rep 17.5), 25-60 (rep 42.5).
+    const dossier = makeDossier({ denseFrames: frames });
+    const full = planCloudFrames(dossier, "shots");
+    expect(full.frames.map((f) => f.t)).toEqual([5, 12, 30]);
+
+    const filtered = planCloudFrames(dossier, "shots", {
+      candidateShotIndexes: new Set([0, 2]),
+    });
+    expect(filtered.frames.map((f) => f.t)).toEqual([5, 30]);
+    expect(filtered.blurrySkipped).toEqual([]);
+    expect(filtered.outOfCandidateRanges).toBe(0);
+  });
+
+  it("timeline scope: drops dense frames outside every candidate shot's padded range, before the blur gate", () => {
+    // Shot 0 spans 0-10 -> padded range [-0.5, 10.5]. Frames at 1,5,9 fall
+    // inside; 12 and 30 (inside shots 1/2, not candidates) fall outside.
+    const dossier = makeDossier({ denseFrames: frames });
+    const plan = planCloudFrames(dossier, "timeline", {
+      candidateShotIndexes: new Set([0]),
+    });
+    expect(plan.frames.map((f) => f.t)).toEqual([1, 5, 9]);
+    expect(plan.outOfCandidateRanges).toBe(2); // 12 and 30 dropped silently
+    expect(plan.blurrySkipped).toEqual([]); // out-of-range frames are NOT blurry-skipped
+  });
+
+  it("blur gate still applies to frames that ARE inside a candidate range", () => {
+    const dossier = makeDossier({
+      denseFrames: [
+        { t: 1, dataUrl: "f1", sharpness: 400 },
+        { t: 5, dataUrl: "f5", sharpness: BLUR_SHARPNESS_THRESHOLD - 1 }, // inside shot 0, blurry
+        { t: 30, dataUrl: "f30", sharpness: 400 }, // outside shot 0 entirely
+      ],
+      denseCaptions: [cap(1, "temple gate"), cap(30, "market stall")],
+    });
+    const plan = planCloudFrames(dossier, "timeline", {
+      candidateShotIndexes: new Set([0]),
+    });
+    expect(plan.frames.map((f) => f.t)).toEqual([1]);
+    expect(plan.blurrySkipped.map((f) => f.t)).toEqual([5]);
+    expect(plan.outOfCandidateRanges).toBe(1); // the 30s frame
+  });
+
+  it("unset candidateShotIndexes leaves behavior identical to before (shots and timeline)", () => {
+    const dossier = makeDossier({
+      denseFrames: frames,
+      denseCaptions: [
+        cap(1, "road with trees and blue sky"),
+        cap(5, "road with trees and blue sky ahead"),
+        cap(9, "road with trees and sky"),
+        cap(12, "a market stall piled with durians"),
+        cap(30, "vendor weighing durians at a market stall"),
+      ],
+    });
+    const noOpts = planCloudFrames(dossier, "timeline");
+    const emptyOpts = planCloudFrames(dossier, "timeline", {});
+    expect(emptyOpts).toEqual(noOpts);
+    expect(noOpts.outOfCandidateRanges).toBe(0);
+
+    const noOptsShots = planCloudFrames(dossier, "shots");
+    const emptyOptsShots = planCloudFrames(dossier, "shots", {});
+    expect(emptyOptsShots).toEqual(noOptsShots);
+  });
+});
+
+describe("selectCloudFrames candidateShotIndexes", () => {
+  it("restricts shots scope to the given indexes; timeline scope ignores it", () => {
+    const dossier = makeDossier({ denseFrames: frames });
+    expect(selectCloudFrames(dossier, "shots", new Set([1])).map((f) => f.t)).toEqual([12]);
+    expect(selectCloudFrames(dossier, "shots")).toEqual(selectCloudFrames(dossier, "shots", undefined));
+    expect(selectCloudFrames(dossier, "timeline", new Set([0]))).toEqual(frames);
+  });
+});
