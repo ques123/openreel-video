@@ -5,14 +5,18 @@ import { DIRECTOR_MODEL } from "../../../services/openai-proxy";
 interface PromptInspectorModalProps {
   messages: ChatMessage[];
   onClose: () => void;
+  /** The model this conversation actually ran on (defaults to the flagship). */
+  model?: string;
 }
 
-const ROLE_STYLE: Record<string, { label: string; cls: string }> = {
-  system: { label: "system prompt", cls: "bg-purple-500/15 text-purple-400" },
-  user: { label: "sent to model", cls: "bg-primary/15 text-primary" },
-  assistant: { label: `${DIRECTOR_MODEL} replied`, cls: "bg-emerald-500/15 text-emerald-400" },
-  tool: { label: "local result → model", cls: "bg-amber-500/15 text-amber-500" },
-};
+function roleStyle(model: string): Record<string, { label: string; cls: string }> {
+  return {
+    system: { label: "system prompt", cls: "bg-purple-500/15 text-purple-400" },
+    user: { label: "sent to model", cls: "bg-primary/15 text-primary" },
+    assistant: { label: `${model} replied`, cls: "bg-emerald-500/15 text-emerald-400" },
+    tool: { label: "local result → model", cls: "bg-amber-500/15 text-amber-500" },
+  };
+}
 
 function prettyArgs(args: string): string {
   try {
@@ -27,7 +31,11 @@ function prettyArgs(args: string): string {
  * prompt, dossier text, brief, tool results) and what the model sent back.
  * This is the ENTIRE payload — no pixels, thumbnails, or embeddings.
  */
-export function PromptInspectorModal({ messages, onClose }: PromptInspectorModalProps) {
+export function PromptInspectorModal({
+  messages,
+  onClose,
+  model = DIRECTOR_MODEL,
+}: PromptInspectorModalProps) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -46,6 +54,7 @@ export function PromptInspectorModal({ messages, onClose }: PromptInspectorModal
     }
     return n + c;
   }, 0);
+  const roleStyles = roleStyle(model);
 
   return (
     <div
@@ -59,7 +68,7 @@ export function PromptInspectorModal({ messages, onClose }: PromptInspectorModal
         <div className="flex items-center justify-between px-4 py-2 border-b border-border shrink-0">
           <div className="min-w-0">
             <p className="text-sm font-medium text-text-primary">
-              What gets sent to {DIRECTOR_MODEL}
+              What gets sent to {model}
             </p>
             <p className="text-xs text-text-secondary">
               The complete conversation, verbatim — text only (~
@@ -78,7 +87,7 @@ export function PromptInspectorModal({ messages, onClose }: PromptInspectorModal
 
         <div className="overflow-y-auto p-4 space-y-3">
           {messages.map((m, i) => {
-            const style = ROLE_STYLE[m.role] ?? ROLE_STYLE.user;
+            const style = roleStyles[m.role] ?? roleStyles.user;
             return (
               <div key={i}>
                 <span

@@ -199,20 +199,178 @@ export interface IngestWindowPlan {
 }
 
 /**
+ * Geometry overrides for planIngestWindows. Production callers omit this
+ * (the exported constants apply); the debug-budget test hook scales the
+ * geometry down so small fixtures exercise the real multi-window path.
+ */
+export interface IngestWindowOpts {
+  headBytes?: number;
+  tailBytes?: number;
+  overlapBytes?: number;
+  minWindowBytes?: number;
+}
+
+/**
  * Plan the rolling windows for a file of totalSize bytes under budgetBytes
  * of usable quota (already safety-margined by the caller). Pure.
  * Whole file fits → single window [0, totalSize) with headBytes/tailBytes 0
  * (plain copyBlobToScratch territory). Otherwise a multi-window plan where
- * every window after the first starts WINDOW_OVERLAP_BYTES before the
- * previous window's end and the last window ends at totalSize. Returns null
- * when the budget can't hold MIN_WINDOW_BYTES + head + tail.
+ * every window after the first starts overlapBytes before the previous
+ * window's end and the last window ends at totalSize. Returns null when the
+ * budget can't hold minWindowBytes + head + tail.
  */
 export function planIngestWindows(
   totalSize: number,
   budgetBytes: number,
+  opts: IngestWindowOpts = {},
 ): IngestWindowPlan | null {
-  void totalSize; void budgetBytes;
-  throw new Error("not implemented");
+  const headLimit = opts.headBytes ?? WINDOW_HEAD_BYTES;
+  const tailLimit = opts.tailBytes ?? WINDOW_TAIL_BYTES;
+  const overlapBytes = opts.overlapBytes ?? WINDOW_OVERLAP_BYTES;
+  const minWindowBytes = opts.minWindowBytes ?? MIN_WINDOW_BYTES;
+
+  if (totalSize <= budgetBytes) {
+    return { windows: [{ startByte: 0, endByte: totalSize }], headBytes: 0, tailBytes: 0 };
+  }
+
+  const headBytes = Math.min(headLimit, totalSize);
+  const tailBytes = Math.min(tailLimit, totalSize);
+  const capacity = budgetBytes - headBytes - tailBytes;
+
+  // Below this a window is either uselessly small or too small relative to
+  // the overlap for the next window's start (prevEnd - OVERLAP) to clear
+  // the previous window's start — the loop below could stall or regress.
+  const minCapacity = Math.max(minWindowBytes, 2 * overlapBytes);
+  if (capacity < minCapacity) {
+    return null;
+  }
+
+  const windows: Array<{ startByte: number; endByte: number }> = [];
+  let endByte = Math.min(capacity, totalSize);
+  windows.push({ startByte: 0, endByte });
+
+  while (endByte < totalSize) {
+    const prevEnd = endByte;
+    const startByte = Math.max(0, prevEnd - overlapBytes);
+    endByte = Math.min(startByte + capacity, totalSize);
+    if (endByte <= prevEnd) {
+      // Should be unreachable given the capacity guard above; a hard throw
+      // beats an infinite loop if the invariant is ever violated.
+      throw new Error(
+        `planIngestWindows: no forward progress (prevEnd=${prevEnd}, nextEnd=${endByte})`,
+      );
+    }
+    windows.push({ startByte, endByte });
+  }
+
+  return { windows, headBytes, tailBytes };
+}
+
+/** One resolved piece of a scatter-gather read across window/head/tail files. */
+export interface WindowReadSegment {
+  file: "window" | "head" | "tail";
+  /** Offset to read from within `file`. */
+  srcOffset: number;
+  /** Offset within the caller's destination buffer to place the bytes at. */
+  dstOffset: number;
+  len: number;
+}
+
+/** Clip [start, end) to [rangeStart, rangeEnd); null when the overlap is empty. */
+function clampToRange(
+  start: number,
+  end: number,
+  rangeStart: number,
+  rangeEnd: number,
+): [number, number] | null {
+  const s = Math.max(start, rangeStart);
+  const e = Math.min(end, rangeEnd);
+  return e > s ? [s, e] : null;
+}
+
+/** Pieces of [start, end) NOT covered by [cutStart, cutEnd) (0, 1, or 2 pieces). */
+function subtractRange(
+  start: number,
+  end: number,
+  cutStart: number,
+  cutEnd: number,
+): Array<[number, number]> {
+  if (cutEnd <= start || cutStart >= end) return [[start, end]];
+  const pieces: Array<[number, number]> = [];
+  if (cutStart > start) pieces.push([start, cutStart]);
+  if (cutEnd < end) pieces.push([cutEnd, end]);
+  return pieces;
+}
+
+/**
+ * Resolve a byte range against the three cooperating scratch files, in
+ * precedence order window > head > tail — the window's copy of a byte is
+ * always the freshest, and can genuinely overlap head (first window starts
+ * at 0) or tail (last window ends at totalSize). Pure; exported for unit
+ * tests. Returns null when some subrange of [start, end) is covered by NONE
+ * of the three files (a read outside the current rolling window).
+ */
+export function mapWindowRead(
+  meta: WindowScratchMeta,
+  start: number,
+  end: number,
+): WindowReadSegment[] | null {
+  if (end <= start) return [];
+
+  const layers: Array<{
+    file: WindowReadSegment["file"];
+    rangeStart: number;
+    rangeEnd: number;
+    toSrcOffset: (byte: number) => number;
+  }> = [
+    {
+      file: "window",
+      rangeStart: meta.windowStart,
+      rangeEnd: meta.windowStart + meta.windowBytes,
+      toSrcOffset: (byte) => byte - meta.windowStart,
+    },
+    {
+      file: "head",
+      rangeStart: 0,
+      rangeEnd: meta.headBytes,
+      toSrcOffset: (byte) => byte,
+    },
+    {
+      file: "tail",
+      rangeStart: meta.tailStart,
+      rangeEnd: meta.totalSize,
+      toSrcOffset: (byte) => byte - meta.tailStart,
+    },
+  ];
+
+  const segments: WindowReadSegment[] = [];
+  let remaining: Array<[number, number]> = [[start, end]];
+
+  for (const layer of layers) {
+    if (layer.rangeEnd <= layer.rangeStart) continue; // e.g. headBytes === 0
+    const nextRemaining: Array<[number, number]> = [];
+    for (const [rStart, rEnd] of remaining) {
+      const covered = clampToRange(rStart, rEnd, layer.rangeStart, layer.rangeEnd);
+      if (!covered) {
+        nextRemaining.push([rStart, rEnd]);
+        continue;
+      }
+      const [cStart, cEnd] = covered;
+      segments.push({
+        file: layer.file,
+        srcOffset: layer.toSrcOffset(cStart),
+        dstOffset: cStart - start,
+        len: cEnd - cStart,
+      });
+      nextRemaining.push(...subtractRange(rStart, rEnd, cStart, cEnd));
+    }
+    remaining = nextRemaining;
+  }
+
+  if (remaining.length > 0) return null;
+
+  segments.sort((a, b) => a.dstOffset - b.dstOffset);
+  return segments;
 }
 
 /**
@@ -227,8 +385,74 @@ export async function openWindowScratchSource(
   key: string,
   meta: WindowScratchMeta,
 ): Promise<ScratchReader> {
-  void key; void meta;
-  throw new Error("not implemented");
+  const dir = await getScratchDir();
+
+  const windowHandle = (await dir.getFileHandle(key)) as SyncCapableFileHandle;
+  const windowAccess = await windowHandle.createSyncAccessHandle();
+
+  // Open head/tail handles ONLY when the meta actually references them — a
+  // small fully-ingested file (headBytes 0, tailStart === totalSize) never
+  // had ".head"/".tail" scratch files created for it.
+  let head: SyncAccessHandle | null = null;
+  if (meta.headBytes > 0) {
+    const headHandle = (await dir.getFileHandle(`${key}.head`)) as SyncCapableFileHandle;
+    head = await headHandle.createSyncAccessHandle();
+  }
+
+  let tail: SyncAccessHandle | null = null;
+  if (meta.tailStart < meta.totalSize) {
+    const tailHandle = (await dir.getFileHandle(`${key}.tail`)) as SyncCapableFileHandle;
+    tail = await tailHandle.createSyncAccessHandle();
+  }
+
+  let closed = false;
+
+  const source = new StreamSource({
+    getSize: () => meta.totalSize,
+    read: (start, end) => {
+      const segments = mapWindowRead(meta, start, end);
+      if (!segments) {
+        throw new Error(
+          `read at ${start}..${end} is outside the current ingest window (rolling-window analysis)`,
+        );
+      }
+      const buffer = new Uint8Array(end - start);
+      for (const segment of segments) {
+        const handle =
+          segment.file === "window" ? windowAccess : segment.file === "head" ? head : tail;
+        if (!handle) {
+          // mapWindowRead only emits a segment for a layer whose range is
+          // non-empty, which is exactly when we open that handle above —
+          // reaching here means the two have drifted out of sync.
+          throw new Error(
+            `opfs-scratch: no open handle for "${segment.file}" segment (internal error)`,
+          );
+        }
+        const view = buffer.subarray(segment.dstOffset, segment.dstOffset + segment.len);
+        const bytesRead = handle.read(view, { at: segment.srcOffset });
+        if (bytesRead !== view.byteLength) {
+          throw new Error(
+            `short read from "${segment.file}" at ${segment.srcOffset}: got ${bytesRead} of ${view.byteLength} bytes`,
+          );
+        }
+      }
+      return buffer;
+    },
+    maxCacheSize: 64 * 2 ** 20,
+    prefetchProfile: "fileSystem",
+  });
+
+  return {
+    source,
+    close: () => {
+      if (!closed) {
+        closed = true;
+        windowAccess.close();
+        head?.close();
+        tail?.close();
+      }
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -241,8 +465,16 @@ export async function appendPcmToScratch(
   key: string,
   samples: Float32Array,
 ): Promise<void> {
-  void key; void samples;
-  throw new Error("not implemented");
+  const dir = await getScratchDir();
+  const fileHandle = (await dir.getFileHandle(key, { create: true })) as SyncCapableFileHandle;
+  const access = await fileHandle.createSyncAccessHandle();
+  try {
+    const offset = access.getSize();
+    access.write(samples, { at: offset });
+    access.flush();
+  } finally {
+    access.close();
+  }
 }
 
 export interface PcmScratchReader {
@@ -255,8 +487,30 @@ export interface PcmScratchReader {
 
 /** Open a PCM sidecar for chunked reads. Caller MUST close(). */
 export async function openPcmScratch(key: string): Promise<PcmScratchReader> {
-  void key;
-  throw new Error("not implemented");
+  const dir = await getScratchDir();
+  const fileHandle = (await dir.getFileHandle(key)) as SyncCapableFileHandle;
+  const access = await fileHandle.createSyncAccessHandle();
+  const sampleCount = Math.floor(access.getSize() / 4);
+  let closed = false;
+
+  return {
+    sampleCount,
+    read: (offsetSamples, samples) => {
+      const count = Math.max(0, Math.min(samples, sampleCount - offsetSamples));
+      if (count === 0) return new Float32Array(0);
+      const bytes = new Uint8Array(count * 4);
+      const bytesRead = access.read(bytes, { at: offsetSamples * 4 });
+      // Fresh ArrayBuffer allocated on this call — never aliases a
+      // reused/shared buffer that a later read() would overwrite.
+      return new Float32Array(bytes.buffer, 0, Math.floor(bytesRead / 4));
+    },
+    close: () => {
+      if (!closed) {
+        closed = true;
+        access.close();
+      }
+    },
+  };
 }
 
 /**
@@ -265,8 +519,12 @@ export async function openPcmScratch(key: string): Promise<PcmScratchReader> {
  * `.audio` must live on.
  */
 export async function deleteScratchEntry(name: string): Promise<void> {
-  void name;
-  throw new Error("not implemented");
+  try {
+    const dir = await getScratchDir();
+    await dir.removeEntry(name).catch(() => undefined);
+  } catch {
+    // already gone / never created
+  }
 }
 
 /**

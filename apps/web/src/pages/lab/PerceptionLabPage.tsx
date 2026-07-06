@@ -80,8 +80,17 @@ function formatDurationCompact(seconds: number): string {
 export function PerceptionLabPage() {
   const { params, navigate } = useRouter();
   const forceDevice = params.device === "wasm" ? "wasm" : "auto";
-  const { state, addFiles, runSearch, getFile, getDossiers, embedQuery, enhanceClip, selection } =
-    usePerceptionLab(forceDevice);
+  const {
+    state,
+    addFiles,
+    runSearch,
+    getFile,
+    getDossiers,
+    embedQuery,
+    enhanceClip,
+    selection,
+    storage,
+  } = usePerceptionLab(forceDevice);
   const director = useDirector({ getDossiers, embedQuery });
   const music = useMusic();
   // Contextual background-music toggle; lives here (not in DirectorPanel) so
@@ -803,7 +812,7 @@ export function PerceptionLabPage() {
                 onCompare={setCompareClip}
               />
               <TranscriptPanel clips={state.clips} onSegmentClick={handleSegmentClick} />
-              <PerfPanel clips={state.clips} models={state.models} />
+              <PerfPanel clips={state.clips} models={state.models} storage={storage} />
               <ExperimentsPanel
                 refreshToken={experimentsRefresh}
                 onOpen={setExperimentOpen}

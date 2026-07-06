@@ -31,6 +31,7 @@ import {
 import type {
   CaptionWorkerResponse,
   EmbedResponse,
+  FunnelDoneResponse,
   FunnelResponse,
   WhisperResponse,
 } from "./worker-protocol";
@@ -74,6 +75,12 @@ interface ClipRun {
   ingestMs: number;
   usedOpfs: boolean;
   analyzedThroughS: number | null;
+  /** How many OPFS ingest windows the visual pass used. 1 = single copy. */
+  ingestWindows: number;
+  /** 16k mono PCM sidecar the visual pass extracted; null = no audio track or legacy container path. */
+  audioPcm: FunnelDoneResponse["audioPcm"];
+  /** TEST HOOK forwarded to the funnel worker's "analyze" request (forces the rolling-window path on small fixtures). */
+  debugIngestBudgetBytes?: number;
   visualDone: boolean;
   audioDone: boolean;
   embedsInFlight: number;
@@ -177,6 +184,13 @@ export class FunnelOrchestrator {
        * decode reads `file`. Omit for normal clips.
        */
       identityFile?: File;
+      /**
+       * TEST HOOK: pretend OPFS quota is capped at this many bytes, forcing
+       * the rolling-window ingest path on small fixtures. The web layer
+       * reads this from localStorage; never set it in production. Forwarded
+       * verbatim to the funnel worker's "analyze" request.
+       */
+      debugIngestBudgetBytes?: number;
     } = {},
   ): Promise<ClipDossier> {
     const identity = opts.identityFile ?? file;
@@ -233,6 +247,9 @@ export class FunnelOrchestrator {
       ingestMs: 0,
       usedOpfs: false,
       analyzedThroughS: null,
+      ingestWindows: 1,
+      audioPcm: null,
+      debugIngestBudgetBytes: opts.debugIngestBudgetBytes,
       framesDecoded: 0,
       embedMsTotal: 0,
       embedCount: 0,
@@ -344,25 +361,65 @@ export class FunnelOrchestrator {
             });
             break;
 
+          case "window":
+            run.ingestWindows = msg.windows;
+            this.emit({
+              kind: "ingest-window",
+              clipId: run.clipId,
+              window: msg.window,
+              windows: msg.windows,
+              analyzedThroughS: msg.analyzedThroughS,
+            });
+            break;
+
           case "done":
             run.decodeMs = msg.perf.decodeMs;
             run.ingestMs = msg.perf.ingestMs;
             run.usedOpfs = msg.usedOpfs;
             run.framesDecoded = msg.perf.framesDecoded;
+            run.ingestWindows = msg.ingestWindows;
+            run.audioPcm = msg.audioPcm;
             run.visualDone = true;
             worker.removeEventListener("message", handler);
             resolveVisual();
             // Start the audio pass now that the funnel worker is done reading
             // this file (whisper worker serializes its own queue).
-            this.whisperWorker?.postMessage({
-              type: "transcribe",
-              requestId: uid("whisper"),
-              clipId: run.clipId,
-              blob: run.file,
-              opfsKey: msg.usedOpfs ? run.clipId : null,
-              partial: msg.partial,
-              capS: msg.analyzedThroughS,
-            });
+            if (msg.audioPcm) {
+              // Rolling-window clip: the video scratch windows are long gone
+              // by now, but the visual pass extracted a 16k mono PCM sidecar
+              // for exactly this reason — read that instead of the container.
+              this.whisperWorker?.postMessage({
+                type: "transcribe",
+                requestId: uid("whisper"),
+                clipId: run.clipId,
+                blob: run.file,
+                opfsKey: null,
+                partial: null,
+                capS: null,
+                pcmKey: msg.audioPcm.key,
+              });
+            } else if (msg.ingestWindows > 1) {
+              // Multi-window clip WITHOUT a PCM sidecar = the funnel already
+              // proved there is no audio track (or extraction failed). The
+              // scratch file now holds only the LAST window's bytes — a
+              // container parse of that fragment would be garbage, so send
+              // whisper nothing: complete the audio pass as "no audio".
+              run.transcript = [];
+              run.audioEnvelope = null;
+              run.audioEvents = [];
+              run.audioDone = true;
+              this.emit({ kind: "transcript", clipId: run.clipId, segments: [] });
+            } else {
+              this.whisperWorker?.postMessage({
+                type: "transcribe",
+                requestId: uid("whisper"),
+                clipId: run.clipId,
+                blob: run.file,
+                opfsKey: msg.usedOpfs ? run.clipId : null,
+                partial: msg.partial,
+                capS: msg.analyzedThroughS,
+              });
+            }
             this.maybeFinish(run);
             break;
 
@@ -382,6 +439,7 @@ export class FunnelOrchestrator {
         blob: run.file,
         sampleFps: FUNNEL_DEFAULTS.sampleFps,
         targetWidth: FUNNEL_DEFAULTS.targetWidth,
+        debugIngestBudgetBytes: run.debugIngestBudgetBytes,
       });
     });
   }
@@ -484,6 +542,7 @@ export class FunnelOrchestrator {
       totalMs,
       device: { embed: this.embedDevice, whisper: this.whisperDevice },
       cacheHit: false,
+      ingestWindows: run.ingestWindows,
     };
 
     const dossier: ClipDossier = {

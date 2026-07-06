@@ -1,9 +1,15 @@
 import { estimateCostUSD, fmtUSD } from "../../../services/model-pricing";
-import type { LabClip, ModelStatus } from "../use-perception-lab";
+import type { LabClip, ModelStatus, StorageStatus } from "../use-perception-lab";
 
 interface PerfPanelProps {
   clips: LabClip[];
   models: { embed: ModelStatus; whisper: ModelStatus; captioner: ModelStatus };
+  storage: StorageStatus | null;
+}
+
+/** 5_400_000_000 -> "5.4GB". */
+function fmtGB(bytes: number): string {
+  return `${(bytes / 1e9).toFixed(1)}GB`;
 }
 
 function ModelRow({ name, status }: { name: string; status: ModelStatus }) {
@@ -25,7 +31,7 @@ function ModelRow({ name, status }: { name: string; status: ModelStatus }) {
   );
 }
 
-export function PerfPanel({ clips, models }: PerfPanelProps) {
+export function PerfPanel({ clips, models, storage }: PerfPanelProps) {
   const done = clips.filter((c) => c.dossier && !c.dossier.perf.cacheHit);
 
   // Aggregate cloud usage per (model, scope) across ALL loaded clips, plus
@@ -183,6 +189,22 @@ export function PerfPanel({ clips, models }: PerfPanelProps) {
         </div>
       )}
 
+      {storage && (
+        <div className="mb-3">
+          <p className="text-xs font-semibold text-text-primary mb-1">Storage</p>
+          <p className="text-[10px] font-mono text-text-secondary">
+            scratch: {fmtGB(Math.max(0, storage.quotaBytes - storage.usageBytes))} free of{" "}
+            {fmtGB(storage.quotaBytes)} ·{" "}
+            {storage.persisted ? "persistent ✓" : "best-effort"}
+          </p>
+          {storage.quotaBytes - storage.usageBytes < 20e9 && (
+            <p className="text-[10px] text-text-secondary/60">
+              long clips analyze in rolling passes sized to this budget
+            </p>
+          )}
+        </div>
+      )}
+
       {done.length > 0 && (
         <table className="w-full text-[10px] font-mono">
           <thead>
@@ -206,6 +228,15 @@ export function PerfPanel({ clips, models }: PerfPanelProps) {
                   </td>
                   <td className="pr-2 text-right" title={p.usedOpfs ? "OPFS scratch" : "direct blob reads"}>
                     {p.usedOpfs ? `${(p.ingestMs / 1000).toFixed(1)}s` : "—"}
+                    {p.ingestWindows !== undefined && p.ingestWindows > 1 && (
+                      <span
+                        className="opacity-70"
+                        title={`analyzed in ${p.ingestWindows} rolling storage windows`}
+                      >
+                        {" "}
+                        · {p.ingestWindows}w
+                      </span>
+                    )}
                   </td>
                   <td className="pr-2 text-right">{(p.decodeMs / 1000).toFixed(1)}s</td>
                   <td className="pr-2 text-right">{p.realtimeFactor.toFixed(1)}</td>

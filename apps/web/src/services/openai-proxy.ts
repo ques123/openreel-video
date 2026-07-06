@@ -11,6 +11,9 @@ import type { AssistantTurn, ChatMessage, ToolDef } from "@openreel/core";
 /** Confirmed available through the abacus proxy (GET /models). */
 export const DIRECTOR_MODEL = "gpt-5.2";
 
+/** Director models selectable from the UI (lever 8) — all confirmed available through the proxy. */
+export const DIRECTOR_MODELS = ["gpt-5.2", "gpt-5.4-mini", "gpt-5.4-nano"] as const;
+
 export const BASE = "/api/proxy/openai";
 
 export interface ChatCompleteRequest {
