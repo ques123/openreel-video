@@ -12,6 +12,10 @@ interface StoryboardListProps {
   onExportDebug: (() => void) | null;
   /** Progress line for a running export ("rendering segment 2/6…"). */
   exportProgress: string | null;
+  /** Compile into a real editor timeline; null while a compile/export runs. */
+  onCompile: (() => void) | null;
+  /** Progress (or blocking-error) line for a compile ("importing 2/5…"). */
+  compileProgress: string | null;
 }
 
 function fmtTime(s: number): string {
@@ -29,6 +33,8 @@ export function StoryboardList({
   onPlay,
   onExportDebug,
   exportProgress,
+  onCompile,
+  compileProgress,
 }: StoryboardListProps) {
   const total = storyboardDurationS(storyboard);
   const offTarget =
@@ -48,6 +54,14 @@ export function StoryboardList({
             title="Render the storyboard into one WebM with a burned-in debug overlay"
           >
             {exportProgress ? "rendering…" : "⬇ debug video"}
+          </button>
+          <button
+            onClick={onCompile ?? undefined}
+            disabled={!onCompile}
+            className="px-2 py-1 text-xs rounded-md border border-border text-text-secondary hover:text-text-primary disabled:opacity-40"
+            title="Compile the storyboard into a real editable timeline in the editor"
+          >
+            {compileProgress ?? "⧉ open in editor"}
           </button>
           <button
             onClick={() => onPlay(0)}

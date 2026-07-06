@@ -21,6 +21,7 @@ export * from "./director-types";
 export * from "./director-prompt";
 export * from "./storyboard";
 export * from "./director-loop";
+export * from "./compile-timeline";
 export { FunnelOrchestrator, type ProgressListener } from "./funnel-orchestrator";
 export {
   createFunnelWorker,

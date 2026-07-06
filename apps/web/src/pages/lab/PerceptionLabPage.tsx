@@ -9,6 +9,7 @@ import type {
 } from "@openreel/core";
 import { buildFootageDigest, stylePresetById } from "@openreel/core";
 import { suggestBriefs, type BriefSuggestion } from "../../services/brief-suggestions";
+import { compileStoryboardToProject } from "../../services/compile-storyboard";
 import { CAPTION_MODELS, type CaptionModel } from "../../services/cloud-vision";
 import { downloadBlob, exportDebugVideo, type DebugExportMeta } from "../../services/debug-export";
 import {
@@ -75,7 +76,7 @@ function formatDurationCompact(seconds: number): string {
 }
 
 export function PerceptionLabPage() {
-  const { params } = useRouter();
+  const { params, navigate } = useRouter();
   const forceDevice = params.device === "wasm" ? "wasm" : "auto";
   const { state, addFiles, runSearch, getFile, getDossiers, embedQuery, enhanceClip } =
     usePerceptionLab(forceDevice);
@@ -103,6 +104,14 @@ export function PerceptionLabPage() {
   const [experimentsRefresh, setExperimentsRefresh] = useState(0);
   /** Live progress line while a debug export renders; null = idle. */
   const [exportProgress, setExportProgress] = useState<string | null>(null);
+  /**
+   * Compile-to-editor status line: live progress while a compile runs, or
+   * the blocking error (missing files / import failure) after one fails —
+   * cleared on the next attempt. `compiling` gates the button separately so
+   * a lingering error line doesn't keep it disabled.
+   */
+  const [compileProgress, setCompileProgress] = useState<string | null>(null);
+  const [compiling, setCompiling] = useState(false);
   /**
    * Replay of a stored experiment's cut (storyboard + remapped files). Carries
    * the experiment so its generated music tracks stay A/B-able and committable
@@ -404,6 +413,44 @@ export function PerceptionLabPage() {
     }
   }, [director, runDebugExport]);
 
+  /** Compile the current storyboard into a real project and jump to #/editor. */
+  const compileCurrentRun = useCallback(async () => {
+    const storyboard = director.state.storyboard;
+    if (!storyboard || compiling) return;
+    setCompiling(true);
+    setCompileProgress("starting…");
+    try {
+      // Committed music only — an A/B'd-but-unpicked session compiles dry.
+      const m = director.getExperiment()?.music;
+      const track = m?.committedTrackId
+        ? m.tracks.find((t) => t.id === m.committedTrackId)
+        : undefined;
+      const audioUrl = track ? proxiedMusicUrl(track.audioUrl || track.streamAudioUrl) : "";
+      const result = await compileStoryboardToProject({
+        storyboard,
+        getFile,
+        music: track && audioUrl ? { audioUrl, durationS: track.durationS } : null,
+        onProgress: setCompileProgress,
+      });
+      if (result.ok) {
+        // Keep a music-skipped warning visible (shows if the user returns here).
+        setCompileProgress(result.warning ?? null);
+        navigate("editor");
+      } else if (result.missing.length > 0) {
+        setCompileProgress(
+          `missing ${result.missing.length} file(s), re-drop: ${result.missing.join(", ")}`,
+        );
+      } else {
+        setCompileProgress(result.error ?? "compile failed");
+      }
+    } catch (err) {
+      console.error("[compile-storyboard]", err);
+      setCompileProgress(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCompiling(false);
+    }
+  }, [director, compiling, getFile, navigate]);
+
   /**
    * Enhance every selected clip, a few at a time (per-clip progress shows in
    * each row). Small clips are tail-latency bound, so overlapping them cuts
@@ -611,6 +658,14 @@ export function PerceptionLabPage() {
                   onPlay={setStoryboardStart}
                   onExportDebug={exportProgress === null ? exportCurrentRun : null}
                   exportProgress={exportProgress}
+                  onCompile={
+                    !compiling &&
+                    exportProgress === null &&
+                    director.state.storyboard.items.length > 0
+                      ? () => void compileCurrentRun()
+                      : null
+                  }
+                  compileProgress={compileProgress}
                 />
               )}
               <SearchPanel
