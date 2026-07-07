@@ -63,3 +63,5 @@ CLAUDE.md
 
 
 mobile-mockup/
+# Claude Code agent worktrees (session-local)
+.claude/worktrees/
