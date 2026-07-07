@@ -8,6 +8,7 @@
  */
 
 import type { AudioEnvelope, AudioEvent } from "./types";
+import type { VadRegion } from "./vad-regions";
 
 /** Default RMS window, seconds. 0.25s ≈ syllable-scale; sparkline-friendly. */
 export const AUDIO_ENVELOPE_WINDOW_S = 0.25;
@@ -16,6 +17,16 @@ export const AUDIO_ENVELOPE_WINDOW_S = 0.25;
 export const AUDIO_EVENT_Z_THRESHOLD = 2.5;
 /** Default merge gap for `detectAudioEvents`, seconds. */
 export const AUDIO_EVENT_MAX_GAP_S = 0.5;
+
+/**
+ * Default robust z-score threshold for `computeEnergyGateRegions` (the
+ * no-model VAD fallback). Much lower than AUDIO_EVENT_Z_THRESHOLD: that one
+ * targets rare loud bursts (cheers, bangs) that stand out against a clip
+ * that's mostly quiet, whereas ordinary speech is often the NORM on footage
+ * with dialogue, not an outlier — the gate needs a gentler bar than
+ * "highlight-worthy loud", just "louder than ambient/room tone".
+ */
+export const VAD_ENERGY_Z_THRESHOLD = 1.0;
 
 /** MAD values below this are treated as "effectively zero" (guard against div-by-~0). */
 const MAD_EPS = 1e-6;
@@ -76,6 +87,44 @@ function median(values: number[]): number {
   return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
 }
 
+interface RobustBaseline {
+  med: number;
+  mad: number;
+  /** True when MAD collapsed to ~0 and callers must score against fallbackBaseline instead of median/MAD. */
+  useFallback: boolean;
+  /** max(rms) * 0.5 — the baseline used when useFallback is true. */
+  fallbackBaseline: number;
+}
+
+/**
+ * Shared median/MAD baseline for `detectAudioEvents` and
+ * `computeEnergyGateRegions`: both seed windows by a robust z-score against
+ * the clip's OWN loudness distribution, computed once over the whole
+ * envelope. Returns null when the envelope has nothing to stand out from
+ * (uniform, including near-silent) — see MAD guard below.
+ *
+ * MAD guard: MAD is robust to a *minority* of outliers, so a short loud
+ * burst in an otherwise quiet/uniform clip can leave MAD at ~0 (division
+ * would blow up). When that happens:
+ *  - if the loudest window is also indistinguishable from the median (a
+ *    genuinely constant or uniformly near-silent clip), there is nothing to
+ *    detect — return null.
+ *  - otherwise (the quiet-with-a-rare-burst case) fall back to a simple
+ *    baseline distance: seed windows louder than max(rms) * 0.5.
+ */
+function robustBaseline(rms: number[]): RobustBaseline | null {
+  const med = median(rms);
+  const mad = median(rms.map((x) => Math.abs(x - med)));
+  const max = Math.max(...rms);
+  const fallbackBaseline = max * 0.5;
+
+  if (mad < MAD_EPS) {
+    if (max - med < MAD_EPS) return null; // uniform (incl. near-silent): nothing stands out
+    return { med, mad, useFallback: true, fallbackBaseline };
+  }
+  return { med, mad, useFallback: false, fallbackBaseline };
+}
+
 /**
  * Detect loudness events: runs of envelope windows whose robust z-score
  * (median/MAD baseline over the whole clip) exceeds the threshold. Merges
@@ -111,16 +160,9 @@ export function detectAudioEvents(
 
   if (rms.length === 0 || windowS <= 0) return [];
 
-  const med = median(rms);
-  const mad = median(rms.map((x) => Math.abs(x - med)));
-  const max = Math.max(...rms);
-
-  let useFallback = false;
-  if (mad < MAD_EPS) {
-    if (max - med < MAD_EPS) return []; // uniform (incl. near-silent): nothing stands out
-    useFallback = true;
-  }
-  const fallbackBaseline = max * 0.5;
+  const baseline = robustBaseline(rms);
+  if (!baseline) return [];
+  const { med, mad, useFallback, fallbackBaseline } = baseline;
 
   const score = (x: number): number =>
     useFallback ? (fallbackBaseline > 0 ? x / fallbackBaseline : 0) : (0.6745 * (x - med)) / mad;
@@ -159,4 +201,48 @@ export function detectAudioEvents(
     events.push({ t: run.startIdx * windowS, durS, intensity: run.peakZ });
   }
   return events;
+}
+
+/**
+ * No-model VAD fallback: seeds a raw speech region wherever a window's
+ * robust z-score (same median/MAD transform as detectAudioEvents, over the
+ * WHOLE envelope) clears zThreshold, then groups adjacent seeded windows
+ * into regions. Cruder than a real VAD — a loud non-speech window (wind
+ * gust, engine noise) seeds it too — but the design goal is recall: it must
+ * never silently drop real speech, and a false positive just costs whisper
+ * a few extra non-speech windows instead of the whole clip.
+ *
+ * Deliberately does NOT bridge gaps between adjacent raw regions itself
+ * (unlike detectAudioEvents' maxGapS) — that smoothing, plus padding and the
+ * minimum-duration drop, is vad-regions.ts's job, shared with Silero's raw
+ * output so both backends feed the exact same post-processing.
+ */
+export function computeEnergyGateRegions(
+  envelope: AudioEnvelope,
+  zThreshold: number = VAD_ENERGY_Z_THRESHOLD,
+): VadRegion[] {
+  const { rms, windowS } = envelope;
+  if (rms.length === 0 || windowS <= 0) return [];
+
+  const baseline = robustBaseline(rms);
+  if (!baseline) return [];
+  const { med, mad, useFallback, fallbackBaseline } = baseline;
+
+  const seeded = (x: number): boolean =>
+    useFallback ? x > fallbackBaseline : (0.6745 * (x - med)) / mad > zThreshold;
+
+  const regions: VadRegion[] = [];
+  let runStartIdx = -1;
+  for (let i = 0; i < rms.length; i += 1) {
+    if (seeded(rms[i])) {
+      if (runStartIdx === -1) runStartIdx = i;
+    } else if (runStartIdx !== -1) {
+      regions.push({ start: runStartIdx * windowS, end: i * windowS });
+      runStartIdx = -1;
+    }
+  }
+  if (runStartIdx !== -1) {
+    regions.push({ start: runStartIdx * windowS, end: rms.length * windowS });
+  }
+  return regions;
 }

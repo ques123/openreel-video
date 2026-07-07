@@ -35,6 +35,7 @@ import type {
   EmbedResponse,
   FunnelDoneResponse,
   FunnelResponse,
+  WhisperModelId,
   WhisperResponse,
 } from "./worker-protocol";
 
@@ -111,6 +112,8 @@ interface ClipRun {
   audioPcm: FunnelDoneResponse["audioPcm"];
   /** TEST HOOK forwarded to the funnel worker's "analyze" request (forces the rolling-window path on small fixtures). */
   debugIngestBudgetBytes?: number;
+  /** Transcription tuning for this run, forwarded to the whisper worker's "transcribe" request(s). Undefined fields keep the worker's own defaults (base model, VAD on). */
+  transcription?: { model?: WhisperModelId; vad?: boolean };
   visualDone: boolean;
   audioDone: boolean;
   embedsInFlight: number;
@@ -243,6 +246,15 @@ export class FunnelOrchestrator {
        * verbatim to the funnel worker's "analyze" request.
        */
       debugIngestBudgetBytes?: number;
+      /**
+       * Local whisper model + VAD gating for THIS analyze call, forwarded to
+       * the whisper worker's "transcribe" request(s). Omit fields to keep
+       * the worker's defaults (base model, VAD on) — i.e. today's exact
+       * behavior. Applies at analyze time only: this is NOT consulted on a
+       * cache hit (below) — a cached dossier keeps whatever transcript it
+       * was originally analyzed with, regardless of the current default.
+       */
+      transcription?: { model?: WhisperModelId; vad?: boolean };
     } = {},
   ): Promise<ClipDossier> {
     const identity = opts.identityFile ?? file;
@@ -318,6 +330,7 @@ export class FunnelOrchestrator {
       ingestWindows: 1,
       audioPcm: null,
       debugIngestBudgetBytes: opts.debugIngestBudgetBytes,
+      transcription: opts.transcription,
       framesDecoded: 0,
       embedMsTotal: 0,
       embedCount: 0,
@@ -516,6 +529,8 @@ export class FunnelOrchestrator {
                 partial: null,
                 capS: null,
                 pcmKey: msg.audioPcm.key,
+                model: run.transcription?.model,
+                vad: run.transcription?.vad,
               });
             } else if (msg.ingestWindows > 1) {
               // Multi-window clip WITHOUT a PCM sidecar = the funnel already
@@ -537,6 +552,8 @@ export class FunnelOrchestrator {
                 opfsKey: msg.usedOpfs ? run.clipId : null,
                 partial: msg.partial,
                 capS: msg.analyzedThroughS,
+                model: run.transcription?.model,
+                vad: run.transcription?.vad,
               });
             }
             this.maybeFinish(run);
@@ -851,6 +868,10 @@ export class FunnelOrchestrator {
     if (this.pendingAudioEnrichment.has(dossier.clipId)) return;
     this.ensureWhisperWorker(device);
     this.pendingAudioEnrichment.set(dossier.clipId, { file: saveFile, dossier });
+    // No `model`/`vad` here on purpose: envelopeOnly requests never load a
+    // model or run the VAD gate (there's no ASR pass to gate), so forwarding
+    // a model choice would be dead data — worst case it'd force a
+    // large-v3-turbo download that this backfill pass never uses.
     this.whisperWorker!.postMessage({
       type: "transcribe",
       requestId: uid("whisper-env"),
