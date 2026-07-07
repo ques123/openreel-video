@@ -463,13 +463,21 @@ describe("buildRateTracker / deriveBatch", () => {
     expect(batch?.etaS).toBeCloseTo(5);
   });
 
-  it("all clips settled -> etaS sums to 0 and currentIndex reaches total", () => {
+  it("all clips settled (ready or error) -> null, so the bench drops the batch line instead of freezing on 'clip N of N'", () => {
     let state = added(initialPipelineState, "c1", 0);
     state = withEvent(state, { kind: "clip-done", clipId: "c1", dossier: fixtureDossier({ durationS: 10, denseFrames: [] }) }, 1000);
     state = added(state, "c2", 0);
     state = withEvent(state, { kind: "clip-error", clipId: "c2", message: "boom" });
+    expect(deriveBatch(state.clips, 1000)).toBeNull();
+  });
+
+  it("still reports a batch while at least one clip is analyzing, currentIndex = settled + 1", () => {
+    let state = added(initialPipelineState, "c1", 0);
+    state = withEvent(state, { kind: "clip-done", clipId: "c1", dossier: fixtureDossier({ durationS: 10, denseFrames: [] }) }, 1000);
+    state = added(state, "c2", 0); // still analyzing
     const batch = deriveBatch(state.clips, 1000);
-    expect(batch).toEqual({ currentIndex: 2, total: 2, etaS: 0 });
+    expect(batch?.currentIndex).toBe(2);
+    expect(batch?.total).toBe(2);
   });
 });
 

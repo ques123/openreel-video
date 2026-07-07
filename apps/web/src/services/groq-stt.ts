@@ -424,10 +424,10 @@ async function postChunk(
   // unproxied path (the observed signature when the location isn't applied).
   if (res.status === 404 || res.status === 405) throw proxyNotConfiguredError();
   if (res.status === 401 || res.status === 403) {
-    throw new Error(
-      "Groq key missing or invalid in /etc/nginx/snippets/groq-key.conf " +
-        "(get a gsk_ key at console.groq.com)",
-    );
+    // The Groq key is injected server-side — by the wizz gateway env in
+    // production, or an nginx snippet in the abacus/dev proxy. Either way the
+    // browser can't fix it; point at the server config generically.
+    throw new Error("Groq transcription key missing or invalid on the server (server-side config).");
   }
   if (!res.ok) {
     const body = await res.text().catch(() => "");

@@ -4,6 +4,7 @@
  */
 import type { UsageRollupRow } from "@wizz/contracts";
 import type { AdminUsageGroupBy } from "../../services/gateway";
+import { estimateCostUSD } from "../../services/model-pricing";
 
 /** Canonical, stable chip order — also the column order in the rollup table. */
 export const USAGE_GROUP_BY_DIMENSIONS: readonly AdminUsageGroupBy[] = [
@@ -129,4 +130,57 @@ export function sumUsageRollup(rows: readonly UsageRollupRow[]): UsageRollupTota
   }
   totals.knownCostUSD = anyCosted ? sumCost : null;
   return totals;
+}
+
+/* ───────────────────── estimated spend ───────────────────── */
+
+/**
+ * Best-effort USD for ONE rollup row. `knownCostUSD` (provider-billed:
+ * OpenRouter usage.cost, Groq billed seconds) is used when every event in the
+ * row reported one. Otherwise, when the row is grouped down to a single known
+ * model (OpenAI director/caption never report a cost — token×rate IS the
+ * invoice), we estimate from tokens via model-pricing (cached tokens get the
+ * discount). null when neither applies (e.g. Suno units, or a mixed-model row
+ * with no cost) — so the caller can count it as unpriceable rather than $0.
+ */
+export function estimatedRowCostUSD(row: UsageRollupRow): number | null {
+  if (row.knownCostUSD !== null && row.costedEvents === row.events) return row.knownCostUSD;
+  if (row.model) {
+    const est = estimateCostUSD(row.model, row.promptTokens, row.completionTokens, row.cachedTokens);
+    if (est !== null) return est;
+  }
+  return row.knownCostUSD; // partial exact-$ (or null) when tokens can't be priced
+}
+
+export interface EstimatedSpend {
+  /** Σ of priceable rows (exact where billed, token estimate otherwise). */
+  totalUSD: number;
+  /** How many events sit in rows we could NOT price at all (e.g. Suno). */
+  unpriceableEvents: number;
+  /** True when any row's figure came from a token estimate rather than a provider bill. */
+  hasEstimate: boolean;
+}
+
+/**
+ * Aggregate estimated spend across a rollup. Give it rows grouped so each
+ * carries a single model (e.g. groupBy includes "model") — otherwise
+ * multi-model rows can't be token-priced and land in `unpriceableEvents`.
+ * This is what makes the admin's "spend today" reflect director cost instead
+ * of the STT-only slice the raw provider-billed sum would show.
+ */
+export function estimateRollupSpendUSD(rows: readonly UsageRollupRow[]): EstimatedSpend {
+  let totalUSD = 0;
+  let unpriceableEvents = 0;
+  let hasEstimate = false;
+  for (const row of rows) {
+    const exact = row.knownCostUSD !== null && row.costedEvents === row.events;
+    const cost = estimatedRowCostUSD(row);
+    if (cost === null) {
+      unpriceableEvents += row.events;
+      continue;
+    }
+    totalUSD += cost;
+    if (!exact) hasEstimate = true;
+  }
+  return { totalUSD, unpriceableEvents, hasEstimate };
 }

@@ -57,7 +57,10 @@ export function reduceDirectorActivity(
     case "round":
       return activity.round === 1 ? firstRoundLine(isRefine) : null;
     case "search":
-      return { text: `Looking for: "${activity.query}"`, isQuery: true };
+      // Bare query only — the renderer owns the "Looking for:" label + quotes
+      // + italic styling for isQuery lines (DirectingScene). Emitting the
+      // label here too double-prefixes it in the UI.
+      return { text: activity.query, isQuery: true };
     case "rejected":
       return { text: "double-checking the cut", isQuery: false };
     case "note":

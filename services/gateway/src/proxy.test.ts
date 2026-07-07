@@ -150,8 +150,10 @@ describe("deriveUsageFromUpstreamJson", () => {
     expect(usage.promptTokens).toBeNull();
   });
 
-  it("suno: units=1 and every other field null", () => {
-    expect(deriveUsageFromUpstreamJson("suno", "music", { code: 200 }, null, 0)).toEqual({
+  it("suno: units=1 only for an accepted generate (inner code 200 + a taskId)", () => {
+    expect(
+      deriveUsageFromUpstreamJson("suno", "music", { code: 200, data: { taskId: "abc123" } }, null, 0),
+    ).toEqual({
       model: null,
       promptTokens: null,
       completionTokens: null,
@@ -161,6 +163,14 @@ describe("deriveUsageFromUpstreamJson", () => {
       units: 1,
       actualCostUSD: null,
     });
+  });
+
+  it("suno: units=0 when the inner envelope rejected the job (HTTP 200 + code 400)", () => {
+    // sunoapi.org signals validation failures with HTTP 200 + an inner code:400
+    // — billing a unit there would consume music quota for a job never queued.
+    expect(deriveUsageFromUpstreamJson("suno", "music", { code: 400, msg: "Please enter callBackUrl." }, null, 0).units).toBe(0);
+    // Also code:200 but no taskId (never a real queued job) → no unit.
+    expect(deriveUsageFromUpstreamJson("suno", "music", { code: 200 }, null, 0).units).toBe(0);
   });
 });
 

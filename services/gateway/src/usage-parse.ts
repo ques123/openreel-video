@@ -112,3 +112,17 @@ export function parseGroqUsage(raw: RawGroqTranscription | undefined | null): Pa
 
 /** units=1 on an accepted POST generate; record-info polls never reach this (metered-free, see proxy.ts). */
 export const SUNO_GENERATE_UNITS = 1;
+
+/**
+ * sunoapi.org signals validation failures with HTTP 200 + an inner
+ * `{code: 400, msg}` envelope (only code 200 + a real taskId means a job was
+ * actually queued — mirrors the client's own acceptance test in suno.ts's
+ * startMusicGeneration). So an HTTP-2xx alone is NOT proof of an accepted
+ * generate: bill a unit only when the inner envelope accepted the job, else a
+ * rejected call would wrongly consume music quota.
+ */
+export function sunoGenerateUnits(upstreamJson: unknown): number {
+  const env = upstreamJson as { code?: unknown; data?: { taskId?: unknown } } | null;
+  const accepted = env?.code === 200 && typeof env?.data?.taskId === "string" && env.data.taskId.length > 0;
+  return accepted ? SUNO_GENERATE_UNITS : 0;
+}

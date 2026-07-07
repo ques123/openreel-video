@@ -431,16 +431,16 @@ describe("transcribeCloudPcm — error mapping and retry", () => {
     );
   });
 
-  it("maps 401/403 to the Groq-key guidance", async () => {
+  it("maps 401/403 to server-side key guidance", async () => {
     const sent401 = stubFetch(() => ({ status: 401, contentType: "application/json", text: "" }));
     await expect(transcribeCloudPcm(new Float32Array(16000))).rejects.toThrow(
-      /groq-key\.conf/,
+      /key missing or invalid on the server/,
     );
     expect(sent401).toHaveLength(2);
 
     const sent403 = stubFetch(() => ({ status: 403, contentType: "application/json", text: "" }));
     await expect(transcribeCloudPcm(new Float32Array(16000))).rejects.toThrow(
-      /console\.groq\.com/,
+      /server-side config/,
     );
     expect(sent403).toHaveLength(2);
   });

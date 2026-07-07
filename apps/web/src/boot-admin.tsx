@@ -14,6 +14,14 @@ import { registerServiceWorker } from "./services/service-worker";
 import { initCustomFonts } from "./components/editor/inspector/font-options";
 
 export function bootAdmin(root: HTMLElement) {
+  // The admin build is the wizz.pbrain.dev admin PANEL — landing on a bare
+  // URL should open the admin shell (the lab, with the sidebar to Users/
+  // Usage/Presets/System), not the editor's welcome screen. Default an empty
+  // hash to #/lab; a hash the admin typed (#/users, #/editor, …) is honored.
+  if (!window.location.hash || window.location.hash === "#" || window.location.hash === "#/") {
+    window.location.hash = "#/lab";
+  }
+
   const POSTHOG_KEY = import.meta.env.VITE_PUBLIC_POSTHOG_KEY;
   const POSTHOG_HOST = import.meta.env.VITE_PUBLIC_POSTHOG_HOST;
 

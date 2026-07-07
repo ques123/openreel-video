@@ -358,7 +358,11 @@ export function deriveBatch(clips: RawClipState[], nowMs: number): BatchSummary 
   if (clips.length === 0) return null;
   const rates = buildRateTracker(clips);
   const settled = clips.filter((c) => c.readyAtMs !== null || c.outcome === "error").length;
-  const currentIndex = Math.min(clips.length, settled + (settled < clips.length ? 1 : 0));
+  // Nothing left analyzing → no batch line at all, so the bench switches to
+  // its "All footage understood" summary instead of freezing on the last
+  // "clip N of N · about a minute left" (the stale-header bug).
+  if (settled >= clips.length) return null;
+  const currentIndex = Math.min(clips.length, settled + 1);
 
   let etaS: number | null = 0;
   for (const clip of clips) {

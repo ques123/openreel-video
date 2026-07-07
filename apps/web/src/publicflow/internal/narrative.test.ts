@@ -33,8 +33,10 @@ describe("reduceDirectorActivity", () => {
       hitCount: 4,
       confidentCount: 2,
     };
+    // Bare query — the renderer (DirectingScene) owns the "Looking for:"
+    // label + quotes so it isn't double-applied in the UI.
     expect(reduceDirectorActivity(activity, false)).toEqual({
-      text: 'Looking for: "people laughing around a table at dusk"',
+      text: "people laughing around a table at dusk",
       isQuery: true,
     });
   });
@@ -46,9 +48,7 @@ describe("reduceDirectorActivity", () => {
       hitCount: 0,
       confidentCount: 0,
     };
-    expect(reduceDirectorActivity(activity, false)?.text).toBe(
-      'Looking for: "a sign that says "no entry""',
-    );
+    expect(reduceDirectorActivity(activity, false)?.text).toBe('a sign that says "no entry"');
   });
 
   it("a rejected submission becomes a generic line — raw validation errors never leak", () => {
@@ -82,9 +82,9 @@ describe("reduceDirectorActivityLog", () => {
     ];
     expect(reduceDirectorActivityLog(log, false)).toEqual([
       { text: "reading through your footage", isQuery: false },
-      { text: 'Looking for: "a dog running on a beach"', isQuery: true },
+      { text: "a dog running on a beach", isQuery: true },
       { text: "double-checking the cut", isQuery: false },
-      { text: 'Looking for: "sunset over water"', isQuery: true },
+      { text: "sunset over water", isQuery: true },
     ]);
   });
 

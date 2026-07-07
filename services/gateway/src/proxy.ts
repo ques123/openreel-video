@@ -33,7 +33,7 @@ import {
   extractRequestModel,
   parseChatUsage,
   parseGroqUsage,
-  SUNO_GENERATE_UNITS,
+  sunoGenerateUnits,
   type RawChatUsage,
   type RawGroqTranscription,
 } from "./usage-parse";
@@ -140,8 +140,9 @@ export function deriveUsageFromUpstreamJson(
     return { ...NO_USAGE, seconds: parsed.seconds, actualCostUSD: parsed.costUSD };
   }
   if (provider === "suno") {
-    // units=1 only for an ACCEPTED generate call — the caller only invokes this on a 2xx generate response.
-    return { ...NO_USAGE, units: SUNO_GENERATE_UNITS };
+    // HTTP 2xx is NOT proof of acceptance — sunoapi.org rejects with 200 + an
+    // inner code:400. Bill a unit only when the inner envelope queued a job.
+    return { ...NO_USAGE, units: sunoGenerateUnits(upstreamJson) };
   }
   // openai / openrouter chat completions (director or caption)
   const usage = parseChatUsage((upstreamJson as { usage?: RawChatUsage } | null)?.usage);

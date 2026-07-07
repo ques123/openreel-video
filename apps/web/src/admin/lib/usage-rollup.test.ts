@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { UsageRollupRow } from "@wizz/contracts";
 import {
+  estimatedRowCostUSD,
+  estimateRollupSpendUSD,
   resolveDateRangePreset,
   startOfIsoWeekYMD,
   sumUsageRollup,
@@ -125,5 +127,44 @@ describe("sumUsageRollup", () => {
   it("total knownCostUSD is null when NOT ONE row ever reported a cost (never $0)", () => {
     const rows = [row({ events: 4, knownCostUSD: null }), row({ events: 1, knownCostUSD: null })];
     expect(sumUsageRollup(rows).knownCostUSD).toBeNull();
+  });
+});
+
+describe("estimated spend (dollarizes OpenAI director cost that never reports a bill)", () => {
+  it("estimatedRowCostUSD: OpenAI director row estimated from tokens (no provider bill)", () => {
+    // 20061 prompt (37504 cached across the run — use a representative subset) + 234 completion on mini.
+    const r = row({
+      events: 2,
+      model: "gpt-5.4-mini",
+      promptTokens: 20061,
+      completionTokens: 234,
+      cachedTokens: 15000,
+      knownCostUSD: null,
+      costedEvents: 0,
+    });
+    const est = estimatedRowCostUSD(r);
+    expect(est).not.toBeNull();
+    expect(est!).toBeGreaterThan(0.002); // meaningfully non-zero, unlike the STT-only $0.0003 the raw sum showed
+  });
+
+  it("estimatedRowCostUSD: prefers the exact provider bill when every event reported one", () => {
+    const r = row({ events: 3, model: "qwen/qwen3-vl-30b-a3b-instruct", knownCostUSD: 0.0000053, costedEvents: 3 });
+    expect(estimatedRowCostUSD(r)).toBe(0.0000053);
+  });
+
+  it("estimatedRowCostUSD: unpriceable (Suno units, no token model) -> null", () => {
+    expect(estimatedRowCostUSD(row({ events: 2, model: null, units: 2, knownCostUSD: null }))).toBeNull();
+  });
+
+  it("estimateRollupSpendUSD: sums exact + estimate and counts unpriceable events", () => {
+    const rows = [
+      row({ events: 2, model: "gpt-5.4-mini", promptTokens: 20000, completionTokens: 200, cachedTokens: 15000 }),
+      row({ events: 3, model: "qwen/qwen3-vl-30b-a3b-instruct", knownCostUSD: 0.0002, costedEvents: 3 }),
+      row({ events: 2, model: null, units: 2, knownCostUSD: null }), // suno — unpriceable
+    ];
+    const spend = estimateRollupSpendUSD(rows);
+    expect(spend.totalUSD).toBeGreaterThan(0.0002); // includes the director estimate, not just the exact $0.0002
+    expect(spend.hasEstimate).toBe(true);
+    expect(spend.unpriceableEvents).toBe(2);
   });
 });

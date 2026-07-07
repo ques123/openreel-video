@@ -8,8 +8,9 @@ import type { UsageRollupRow } from "@wizz/contracts";
 import { adminGetUsage, type AdminUsageGroupBy } from "../../services/gateway";
 import { AdminProbeResult, describeProbeError, type ProbeState } from "../AdminProbeResult";
 import { SectionPage } from "../SectionPage";
-import { fmtCostCell } from "../lib/format";
+import { fmtExactUSD } from "../lib/format";
 import {
+  estimateRollupSpendUSD,
   resolveDateRangePreset,
   startOfIsoWeekYMD,
   sumUsageRollup,
@@ -31,11 +32,19 @@ function StatTile({ label, state }: { label: string; state: ProbeState<{ rows: U
       {state.status === "ok" &&
         (() => {
           const totals = sumUsageRollup(state.data.rows);
-          const cost = fmtCostCell(totals.knownCostUSD, totals.costedEvents, totals.events);
+          const spend = estimateRollupSpendUSD(state.data.rows);
+          // Estimated = provider-billed where reported (OpenRouter/Groq) +
+          // token×list-price for OpenAI director/caption (which never report a
+          // cost — token×rate IS the invoice). The old exact-only sum showed
+          // near-$0 because it counted only the STT slice.
+          const title =
+            "estimated spend: exact provider bills where reported, plus token×list-price for OpenAI" +
+            (spend.unpriceableEvents > 0 ? ` (${spend.unpriceableEvents} events not priceable, e.g. Suno)` : "");
           return (
             <>
-              <p className="mt-1 font-mono text-lg text-text-primary" title={cost.title}>
-                {cost.text}
+              <p className="mt-1 font-mono text-lg text-text-primary" title={title}>
+                {spend.hasEstimate ? "≈" : ""}
+                {fmtExactUSD(spend.totalUSD)}
               </p>
               <p className="text-[11px] text-text-secondary">{totals.events} events</p>
             </>
@@ -77,14 +86,17 @@ export function UsageSection() {
     let cancelled = false;
     const now = new Date();
     const todayYMD = now.toISOString().slice(0, 10);
-    adminGetUsage({ from: todayYMD, to: todayYMD })
+    // Group by model+provider so each row carries a single model — required
+    // for the token×rate estimate that dollarizes OpenAI director spend.
+    const spendGroupBy: AdminUsageGroupBy[] = ["provider", "model"];
+    adminGetUsage({ groupBy: spendGroupBy, from: todayYMD, to: todayYMD })
       .then((data) => {
         if (!cancelled) setTodayState({ status: "ok", data });
       })
       .catch((error: unknown) => {
         if (!cancelled) setTodayState({ status: "error", error });
       });
-    adminGetUsage({ from: startOfIsoWeekYMD(now), to: todayYMD })
+    adminGetUsage({ groupBy: spendGroupBy, from: startOfIsoWeekYMD(now), to: todayYMD })
       .then((data) => {
         if (!cancelled) setWeekState({ status: "ok", data });
       })
