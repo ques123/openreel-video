@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   AUDIO_EVENT_MAX_GAP_S,
   AUDIO_EVENT_Z_THRESHOLD,
+  VAD_ENERGY_Z_THRESHOLD,
   computeAudioEnvelope,
+  computeEnergyGateRegions,
   detectAudioEvents,
 } from "../audio-signal";
 import type { AudioEnvelope } from "../types";
@@ -193,5 +195,88 @@ describe("detectAudioEvents", () => {
     // Peak intensity should correspond to the loudest window (0.95), not
     // the first or last window of the run.
     expect(events[0].intensity).toBeGreaterThan(0);
+  });
+});
+
+describe("computeEnergyGateRegions", () => {
+  it("returns [] for an empty envelope", () => {
+    expect(computeEnergyGateRegions(envelopeFromWindows(0.25, []))).toEqual([]);
+  });
+
+  it("returns [] when windowS is non-positive", () => {
+    expect(computeEnergyGateRegions(envelopeFromWindows(0, [0.1, 0.2, 0.3]))).toEqual([]);
+  });
+
+  it("returns [] for a perfectly uniform (quiet) signal — nothing stands out", () => {
+    const env = envelopeFromWindows(0.25, new Array(10).fill(0.01));
+    expect(computeEnergyGateRegions(env)).toEqual([]);
+  });
+
+  it("returns [] for a perfectly uniform (loud) signal — nothing stands out", () => {
+    const env = envelopeFromWindows(0.25, new Array(10).fill(0.7));
+    expect(computeEnergyGateRegions(env)).toEqual([]);
+  });
+
+  it("seeds one region over a loud plateau against a quiet floor (MAD-collapse fallback path)", () => {
+    const quiet = new Array(10).fill(0.01);
+    const plateau = [0.9, 0.9, 0.9];
+    const env = envelopeFromWindows(0.25, [...quiet, ...plateau, ...quiet]);
+    const regions = computeEnergyGateRegions(env);
+    expect(regions).toEqual([{ start: 10 * 0.25, end: 13 * 0.25 }]);
+  });
+
+  it("does NOT bridge the gap between two separated plateaus itself", () => {
+    // Two speech-like plateaus separated by 3 quiet windows (0.75s) — raw
+    // gap-bridging is vad-regions.ts's job, not this function's.
+    const quiet6 = new Array(6).fill(0.01);
+    const env = envelopeFromWindows(0.25, [
+      ...quiet6,
+      0.9,
+      ...new Array(3).fill(0.01),
+      0.9,
+      0.9,
+      ...quiet6,
+    ]);
+    const regions = computeEnergyGateRegions(env);
+    expect(regions).toEqual([
+      { start: 6 * 0.25, end: 7 * 0.25 },
+      { start: 10 * 0.25, end: 12 * 0.25 },
+    ]);
+  });
+
+  it("closes a trailing region at the end of the envelope (no trailing quiet window)", () => {
+    const env = envelopeFromWindows(0.25, [...new Array(5).fill(0.01), 0.9, 0.9, 0.9]);
+    const regions = computeEnergyGateRegions(env);
+    expect(regions).toEqual([{ start: 5 * 0.25, end: 8 * 0.25 }]);
+  });
+
+  it("uses a non-degenerate median/MAD baseline (not the collapse fallback) when the floor varies", () => {
+    // A varying "ramp" floor (distinct values, so MAD doesn't collapse to 0)
+    // plus one clear outlier. Hand-computed: median 0.16, MAD 0.04 — only
+    // the 0.9 outlier's z-score (~12.5) clears the default threshold (1.0).
+    const env = envelopeFromWindows(0.25, [0.1, 0.12, 0.14, 0.16, 0.18, 0.2, 0.9]);
+    const regions = computeEnergyGateRegions(env);
+    expect(regions).toEqual([{ start: 6 * 0.25, end: 7 * 0.25 }]);
+  });
+
+  it("a lower custom zThreshold seeds an additional adjacent window (same baseline)", () => {
+    // Same data as above; window index 5 (0.2) has z ~= 0.67 — below the
+    // default 1.0 threshold but above a custom 0.5 — and is adjacent to the
+    // outlier, so it extends into ONE combined region instead of two.
+    const env = envelopeFromWindows(0.25, [0.1, 0.12, 0.14, 0.16, 0.18, 0.2, 0.9]);
+    const regions = computeEnergyGateRegions(env, 0.5);
+    expect(regions).toEqual([{ start: 5 * 0.25, end: 7 * 0.25 }]);
+  });
+
+  it("using the exported default threshold explicitly matches the implicit default", () => {
+    const env = envelopeFromWindows(0.25, [0.1, 0.12, 0.14, 0.16, 0.18, 0.2, 0.9]);
+    expect(computeEnergyGateRegions(env, VAD_ENERGY_Z_THRESHOLD)).toEqual(
+      computeEnergyGateRegions(env),
+    );
+  });
+
+  it("is tuned more sensitively than the loud-event detector (gate threshold < event threshold)", () => {
+    expect(VAD_ENERGY_Z_THRESHOLD).toBeGreaterThan(0);
+    expect(VAD_ENERGY_Z_THRESHOLD).toBeLessThan(AUDIO_EVENT_Z_THRESHOLD);
   });
 });

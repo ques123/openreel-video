@@ -282,6 +282,27 @@ export type CaptionWorkerResponse =
 // whisper-worker: audio decode + resample + ASR
 // ---------------------------------------------------------------------------
 
+/**
+ * Selectable local Whisper checkpoint. "base" (74M) is today's only model
+ * and the default everywhere it's omitted; "large-v3-turbo" (~800M) is much
+ * more accurate and far less prone to hallucinating on wind/music/silence,
+ * at the cost of a bigger download and slower inference. Model choice
+ * applies at ANALYZE time only — a cached dossier keeps whatever transcript
+ * it was originally analyzed with; changing the default doesn't
+ * retroactively re-transcribe cache hits.
+ */
+export type WhisperModelId = "base" | "large-v3-turbo";
+
+/**
+ * The transformers.js repo id for each selectable model. Lives here (rather
+ * than inline in whisper-worker.ts) so the mapping is unit-testable without
+ * a browser: worker-protocol.ts has no worker-only runtime imports.
+ */
+export const WHISPER_MODEL_IDS: Record<WhisperModelId, string> = {
+  base: "onnx-community/whisper-base",
+  "large-v3-turbo": "onnx-community/whisper-large-v3-turbo",
+};
+
 export interface WhisperInitRequest {
   type: "init";
   device: "auto" | InferenceDevice;
@@ -301,6 +322,8 @@ export interface WhisperTranscribeRequest {
   /**
    * Decode + loudness envelope ONLY, skip ASR. Used to enrich dossiers
    * cached before audio signals existed without re-running whisper.
+   * `model`/`vad` are irrelevant when this is set — no model is loaded and
+   * no VAD gate runs, since there's no ASR pass to gate.
    */
   envelopeOnly?: boolean;
   /**
@@ -311,6 +334,17 @@ export interface WhisperTranscribeRequest {
    * chunks (~600s) and offset segment timestamps by each chunk's start.
    */
   pcmKey?: string | null;
+  /** Local checkpoint for this request. Default "base" when omitted. */
+  model?: WhisperModelId;
+  /**
+   * Gate transcription to detected speech regions only (Silero VAD, falling
+   * back to an energy-based gate when Silero can't load/run) so
+   * wind/music/silence never reaches the model — cuts most hallucinations
+   * and speeds up quiet footage. Default true (ON); false reproduces the
+   * pre-VAD behavior exactly (whisper runs over the whole clip/macro-chunk,
+   * gate never consulted).
+   */
+  vad?: boolean;
 }
 
 export type WhisperRequest = WhisperInitRequest | WhisperTranscribeRequest;
@@ -319,6 +353,8 @@ export interface WhisperReadyResponse {
   type: "ready";
   device: InferenceDevice;
   loadMs: number;
+  /** Which local checkpoint finished loading (see WhisperModelId). */
+  model: WhisperModelId;
 }
 
 export interface WhisperModelProgressResponse {
@@ -340,6 +376,13 @@ export interface WhisperSegmentsResponse {
   audioEvents?: AudioEvent[];
   /** Echoes the request flag; segments are [] and must NOT overwrite transcript. */
   envelopeOnly?: boolean;
+  /**
+   * Total seconds covered by the final (merged/padded/split) VAD regions
+   * whisper actually transcribed. Undefined when the VAD gate didn't run
+   * (vad: false, or envelopeOnly) — informational only, purely for future
+   * UI/perf surfacing; the orchestrator is not required to consume it.
+   */
+  speechSecondsS?: number;
 }
 
 export interface WhisperErrorResponse {
