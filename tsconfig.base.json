@@ -24,7 +24,8 @@
       "@openreel/image-core": ["./packages/image-core/src/index.ts"],
       "@openreel/image-core/*": ["./packages/image-core/src/*"],
       "@openreel/ui": ["./packages/ui/src/index.ts"],
-      "@openreel/ui/*": ["./packages/ui/src/*"]
+      "@openreel/ui/*": ["./packages/ui/src/*"],
+      "@wizz/contracts": ["./packages/contracts/src/index.ts"]
     }
   },
   "exclude": ["node_modules", "dist", "build"]

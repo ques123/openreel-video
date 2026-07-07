@@ -6,10 +6,20 @@ import path from "path";
 export default defineConfig({
   plugins: [react()],
   assetsInclude: ["**/*.wasm"],
+  // Force the build target to a literal so main.tsx's target branch is
+  // statically dead in the other bundle (rollup then never emits the other
+  // target's chunks — how "public bundle contains no lab code" is achieved,
+  // not by hidden routes). Absent env = "admin" = today's app, unchanged.
+  define: {
+    "import.meta.env.VITE_APP_TARGET": JSON.stringify(
+      process.env.VITE_APP_TARGET === "public" ? "public" : "admin",
+    ),
+  },
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
       "@openreel/core": path.resolve(__dirname, "../../packages/core/src"),
+      "@wizz/contracts": path.resolve(__dirname, "../../packages/contracts/src"),
     },
   },
   worker: {

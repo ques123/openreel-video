@@ -1,0 +1,17 @@
+{
+  "name": "@wizz/gateway",
+  "version": "0.1.0",
+  "private": true,
+  "description": "wizz.video auth + metered LLM gateway (Hono + SQLite, systemd). Owns provider keys; every proxied call is session-checked, quota-checked, and written to usage_events. See docs/wizz-contracts.md for the HTTP surface (WS-B builds this from the stub).",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@wizz/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.4.5"
+  }
+}

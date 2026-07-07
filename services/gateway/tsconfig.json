@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "paths": {
+      "@wizz/contracts": ["../../packages/contracts/src/index.ts"]
+    }
+  },
+  "include": ["src"]
+}

@@ -1,0 +1,102 @@
+/**
+ * wizz.video design tokens — lifted VERBATIM from the approved wireframe
+ * (docs/wizz-ui-draft.html, signed off 2026-07-07). That file is the design
+ * source of truth for WS-D; do not re-derive or "improve" these values.
+ *
+ * Identity: tungsten-amber accent on blue-charcoal dark / warm daylight-bay
+ * light. Both themes are deliberately designed (not naive inversions): the
+ * amber brightens and the ground cools in the dark theme. Futura-lineage
+ * display + system body + mono timecodes.
+ *
+ * Theme rule (matches the wireframe's cycleTheme): OS preference via
+ * prefers-color-scheme by default; an explicit user choice stamps
+ * data-theme="dark|light" on <html> and must win in both directions.
+ *
+ * Scope note: these tokens style the PUBLIC product (and the admin shell
+ * chrome that wraps the lab). The lab page keeps its existing utilitarian
+ * look — do not restyle it with these.
+ */
+
+:root {
+  --ground: #f1f0ea;
+  --panel: #ffffff;
+  --panel-2: #f7f6f1;
+  --line: #dcd9d0;
+  --ink: #232630;
+  --dim: #6b7080;
+  --accent: #b3762a;
+  --on-accent: #ffffff;
+  --accent-soft: #b3762a22;
+  --good: #4d7c43;
+  --bad: #a94b40;
+  --shadow: 0 1px 2px rgb(35 38 48 / 0.06), 0 8px 24px rgb(35 38 48 / 0.07);
+
+  /* Type stacks (wireframe body/display/label/tc classes). No CDN fonts —
+   * Futura falls through to Avenir Next then system sans, by design. */
+  --font-body: "Avenir Next", -apple-system, "Segoe UI", system-ui, sans-serif;
+  --font-display: "Futura", "Avenir Next", ui-sans-serif, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ground: #14171d;
+    --panel: #1b1f28;
+    --panel-2: #171b22;
+    --line: #2a2f3a;
+    --ink: #eae7e0;
+    --dim: #8f95a3;
+    --accent: #e0a458;
+    --on-accent: #1a1206;
+    --accent-soft: #e0a45826;
+    --good: #79a86b;
+    --bad: #c96b5f;
+    --shadow: 0 1px 2px rgb(0 0 0 / 0.35), 0 10px 30px rgb(0 0 0 / 0.35);
+  }
+}
+
+:root[data-theme="dark"] {
+  --ground: #14171d;
+  --panel: #1b1f28;
+  --panel-2: #171b22;
+  --line: #2a2f3a;
+  --ink: #eae7e0;
+  --dim: #8f95a3;
+  --accent: #e0a458;
+  --on-accent: #1a1206;
+  --accent-soft: #e0a45826;
+  --good: #79a86b;
+  --bad: #c96b5f;
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.35), 0 10px 30px rgb(0 0 0 / 0.35);
+}
+
+:root[data-theme="light"] {
+  --ground: #f1f0ea;
+  --panel: #ffffff;
+  --panel-2: #f7f6f1;
+  --line: #dcd9d0;
+  --ink: #232630;
+  --dim: #6b7080;
+  --accent: #b3762a;
+  --on-accent: #ffffff;
+  --accent-soft: #b3762a22;
+  --good: #4d7c43;
+  --bad: #a94b40;
+  --shadow: 0 1px 2px rgb(35 38 48 / 0.06), 0 8px 24px rgb(35 38 48 / 0.07);
+}
+
+/* Shared a11y/motion rules the wireframe commits to (apply within .wizz scope). */
+.wizz :focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wizz *,
+  .wizz *::before,
+  .wizz *::after {
+    transition: none !important;
+    animation: none !important;
+  }
+}

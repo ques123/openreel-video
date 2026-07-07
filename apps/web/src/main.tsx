@@ -1,40 +1,18 @@
-import React from "react";
-import ReactDOM from "react-dom/client";
-import posthog from "posthog-js";
-import { PostHogProvider } from "posthog-js/react";
-import App from "./App";
+/**
+ * Entry point = target picker only. VITE_APP_TARGET is force-defined to a
+ * literal in vite.config.ts, so exactly one of these branches survives in
+ * each bundle and the other target's chunks are never emitted — the public
+ * bundle physically contains no lab/experiments/perf code (WS-C acceptance),
+ * and the admin bundle skips the public product. Keep this file free of any
+ * app logic; the boots own their startup.
+ */
 import "./index.css";
-import { registerServiceWorker } from "./services/service-worker";
-import { initCustomFonts } from "./components/editor/inspector/font-options";
-
-const POSTHOG_KEY = import.meta.env.VITE_PUBLIC_POSTHOG_KEY;
-const POSTHOG_HOST = import.meta.env.VITE_PUBLIC_POSTHOG_HOST;
-
-if (POSTHOG_KEY && POSTHOG_HOST) {
-  posthog.init(POSTHOG_KEY, {
-    api_host: POSTHOG_HOST,
-    capture_pageview: true,
-    capture_pageleave: true,
-  });
-}
-
-registerServiceWorker().then((registration) => {
-  if (registration) {
-  }
-});
-
-void initCustomFonts();
+import { IS_PUBLIC_TARGET } from "./app-target";
 
 const root = document.getElementById("root")!;
 
-ReactDOM.createRoot(root).render(
-  <React.StrictMode>
-    {POSTHOG_KEY && POSTHOG_HOST ? (
-      <PostHogProvider client={posthog}>
-        <App />
-      </PostHogProvider>
-    ) : (
-      <App />
-    )}
-  </React.StrictMode>,
-);
+if (IS_PUBLIC_TARGET) {
+  void import("./publicapp/boot").then(({ bootPublic }) => bootPublic(root));
+} else {
+  void import("./boot-admin").then(({ bootAdmin }) => bootAdmin(root));
+}

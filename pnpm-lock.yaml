@@ -189,6 +189,9 @@ importers:
       '@types/uuid':
         specifier: ^11.0.0
         version: 11.0.0
+      '@wizz/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
       class-variance-authority:
         specifier: ^0.7.1
         version: 0.7.1
@@ -298,6 +301,12 @@ importers:
       wrangler:
         specifier: ^3.114.17
         version: 3.114.17(@cloudflare/workers-types@4.20260117.0)
+
+  packages/contracts:
+    devDependencies:
+      typescript:
+        specifier: ^5.4.5
+        version: 5.9.3
 
   packages/core:
     dependencies:
@@ -439,6 +448,19 @@ importers:
       '@types/react-dom':
         specifier: ^18.3.0
         version: 18.3.7(@types/react@18.3.27)
+      typescript:
+        specifier: ^5.4.5
+        version: 5.9.3
+
+  services/gateway:
+    dependencies:
+      '@wizz/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.19.6
       typescript:
         specifier: ^5.4.5
         version: 5.9.3
