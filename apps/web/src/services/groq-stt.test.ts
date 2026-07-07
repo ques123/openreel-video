@@ -406,6 +406,29 @@ describe("transcribeCloudPcm — error mapping and retry", () => {
     expect(sent).toHaveLength(2);
   });
 
+  it("maps a 405 (nginx SPA fallback rejecting POST) to the apply-groq-proxy.sh guidance", async () => {
+    const sent = stubFetch(() => ({
+      status: 405,
+      contentType: "text/html",
+      text: "<html><head><title>405 Not Allowed</title></head></html>",
+    }));
+    await expect(transcribeCloudPcm(new Float32Array(16000))).rejects.toThrow(
+      /apply-groq-proxy\.sh/,
+    );
+    expect(sent).toHaveLength(2);
+  });
+
+  it("maps any other HTML-bodied error status to the route guidance, not raw markup", async () => {
+    stubFetch(() => ({
+      status: 502,
+      contentType: "text/html",
+      text: "<html><body><center><h1>502 Bad Gateway</h1></center></body></html>",
+    }));
+    await expect(transcribeCloudPcm(new Float32Array(16000))).rejects.toThrow(
+      /apply-groq-proxy\.sh/,
+    );
+  });
+
   it("maps 401/403 to the Groq-key guidance", async () => {
     const sent401 = stubFetch(() => ({ status: 401, contentType: "application/json", text: "" }));
     await expect(transcribeCloudPcm(new Float32Array(16000))).rejects.toThrow(

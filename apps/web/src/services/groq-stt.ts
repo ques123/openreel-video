@@ -408,7 +408,9 @@ async function postChunk(
     signal,
   });
 
-  if (res.status === 404) throw proxyNotConfiguredError();
+  // 404 = route absent; 405 = nginx's SPA fallback rejecting POST on an
+  // unproxied path (the observed signature when the location isn't applied).
+  if (res.status === 404 || res.status === 405) throw proxyNotConfiguredError();
   if (res.status === 401 || res.status === 403) {
     throw new Error(
       "Groq key missing or invalid in /etc/nginx/snippets/groq-key.conf " +
@@ -417,6 +419,9 @@ async function postChunk(
   }
   if (!res.ok) {
     const body = await res.text().catch(() => "");
+    // An HTML error body means some proxy layer answered, not Groq — point
+    // at the route setup rather than dumping markup into the clip row.
+    if (body.trimStart().startsWith("<")) throw proxyNotConfiguredError();
     throw new Error(`Groq ${res.status}: ${body.slice(0, 300)}`);
   }
   // An unproxied path falls through to the SPA and returns 200 text/html —
