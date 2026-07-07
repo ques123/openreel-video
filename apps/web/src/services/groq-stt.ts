@@ -27,7 +27,13 @@
  * so the encode step always exercises the (equally real) WAV fallback there.
  */
 
-import type { TranscriptSegment } from "@openreel/core";
+import {
+  planCloudSttUpload,
+  remapChunkTimeToSourceS,
+  remapCloudSttSegments,
+  type TranscriptSegment,
+  type VadRegion,
+} from "@openreel/core";
 import { WIZZ_CATEGORY_HEADER, type UsageCategory } from "@wizz/contracts";
 
 // ---------------------------------------------------------------------------
@@ -499,6 +505,111 @@ export async function transcribeCloudPcm(
     }
     billedSeconds += billedSecondsForChunk(bound.endS - bound.startS);
     opts.onProgress?.(bound.endS, totalS);
+  }
+
+  return {
+    segments,
+    words: anyWords ? words : null,
+    billedSeconds,
+    costUSD: costUSDForBilledSeconds(billedSeconds),
+    model: GROQ_WHISPER_MODEL,
+    ms: Math.round(performance.now() - startMs),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// VAD-gated entry point (wizz.video public pipeline — REQUIRED fast-follow)
+// ---------------------------------------------------------------------------
+
+/**
+ * Region-gated counterpart to transcribeCloudPcm: instead of uploading the
+ * clip's ENTIRE audio in fixed 600s chunks, this uploads ONLY the speech
+ * regions the caller supplies (already merged/padded/split by
+ * vad-regions.ts's processVadRegions — see packages/core/src/analysis/
+ * cloud-stt-plan.ts's module doc for why packing, not one-request-per-region,
+ * is what keeps this cheaper than the un-gated path). Quiet/no-speech audio
+ * costs nothing to upload and can't feed whisper's non-speech hallucinations
+ * (the documented Polish-silence-boilerplate failure).
+ *
+ * Each planned chunk is built by concatenating its packed regions' PCM (from
+ * the SAME source `pcm` the caller already extracted) into one contiguous
+ * buffer, encoded/uploaded exactly like an un-gated chunk (same
+ * encodeChunkAudio + postChunkWithRetry path, so the network/retry/error-
+ * mapping behavior — including the "proxy not configured" and Groq-key
+ * guidance — is identical), then remapped from chunk-relative back to
+ * absolute clip time via the plan's region map. `words` collapses to null
+ * under the exact same "any chunk reported words" rule transcribeCloudPcm
+ * uses. A zero-speech clip (or a clip whose VAD regions are all empty)
+ * produces zero chunks and therefore zero network calls.
+ *
+ * The un-gated `transcribeCloudPcm` above is UNCHANGED and stays the entry
+ * point for the admin lab's existing callers (whose transcriptSource mixer
+ * predates this gate and — per the wizz.video plan — the public preset keeps
+ * `transcriptSource: "local"` until this gate is proven in production
+ * regardless). The public pipeline (apps/web/src/publicflow/) uses this
+ * gated function exclusively.
+ */
+export async function transcribeCloudPcmGated(
+  pcm: Float32Array,
+  vadRegions: VadRegion[],
+  opts: TranscribeCloudPcmOptions = {},
+): Promise<CloudTranscriptResult> {
+  const startMs = performance.now();
+  const plan = planCloudSttUpload(pcm.length, SAMPLE_RATE_HZ, vadRegions, { maxChunkS: CLOUD_CHUNK_S });
+
+  if (plan.chunks.length === 0) {
+    return {
+      segments: [],
+      words: null,
+      billedSeconds: 0,
+      costUSD: 0,
+      model: GROQ_WHISPER_MODEL,
+      ms: Math.round(performance.now() - startMs),
+    };
+  }
+
+  const segments: TranscriptSegment[] = [];
+  const words: CloudTranscriptWord[] = [];
+  let anyWords = false;
+  let billedSeconds = 0;
+  const totalPlannedS = plan.totalSpeechS;
+  let doneS = 0;
+
+  for (const chunk of plan.chunks) {
+    if (opts.signal?.aborted) throw new DOMException("aborted", "AbortError");
+
+    // Concatenate this chunk's packed regions from the ORIGINAL pcm — the
+    // plan's sample offsets came from this exact array, so no re-derivation
+    // or rounding drift versus what planCloudSttUpload already computed.
+    const chunkSamples = new Float32Array(chunk.sampleCount);
+    let writeOffset = 0;
+    for (const region of chunk.regions) {
+      const slice = pcm.subarray(region.srcStartSample, region.srcEndSample);
+      chunkSamples.set(slice, writeOffset);
+      writeOffset += slice.length;
+    }
+
+    const { blob, filename } = await encodeChunkAudio(chunkSamples, SAMPLE_RATE_HZ);
+    // offsetS=0: postChunk returns CHUNK-relative segments/words (0-based
+    // within this upload's own audio) — remapped below via the region map,
+    // not via postChunk's own offsetting (which only knows a flat shift).
+    const result = await postChunkWithRetry(blob, filename, 0, opts.language, opts.signal);
+
+    segments.push(...remapCloudSttSegments(result.segments, chunk.regions));
+    if (result.words) {
+      anyWords = true;
+      for (const w of result.words) {
+        words.push({
+          word: w.word,
+          startS: remapChunkTimeToSourceS(w.startS, chunk.regions),
+          endS: remapChunkTimeToSourceS(w.endS, chunk.regions),
+        });
+      }
+    }
+
+    billedSeconds += billedSecondsForChunk(chunk.durationS);
+    doneS += chunk.durationS;
+    opts.onProgress?.(doneS, totalPlannedS);
   }
 
   return {

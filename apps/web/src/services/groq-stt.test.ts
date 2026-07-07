@@ -8,6 +8,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { VadRegion } from "@openreel/core";
 import {
   billedSecondsForChunk,
   buildGroqFormFields,
@@ -22,6 +23,7 @@ import {
   toTranscriptSegments,
   toTranscriptWords,
   transcribeCloudPcm,
+  transcribeCloudPcmGated,
 } from "./groq-stt";
 
 afterEach(() => {
@@ -465,5 +467,155 @@ describe("transcribeCloudPcm — abort", () => {
     const controller = new AbortController();
     await transcribeCloudPcm(new Float32Array(16000), { signal: controller.signal });
     expect(sent[0].signal).toBe(controller.signal);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Network layer: transcribeCloudPcmGated (VAD-gated upload path) against a
+// mocked fetch. Packing/economics themselves are covered exhaustively in
+// packages/core/src/analysis/__tests__/cloud-stt-plan.test.ts — these tests
+// are about THIS file's own wiring: concatenating packed PCM, reusing the
+// same network/retry/error path as transcribeCloudPcm, and remapping
+// chunk-relative results back to absolute clip time.
+// ---------------------------------------------------------------------------
+
+describe("transcribeCloudPcmGated — zero-speech clip", () => {
+  it("makes no network calls and returns an empty result when there are no VAD regions", async () => {
+    const sent = stubFetch(() => okJson([]));
+    const result = await transcribeCloudPcmGated(new Float32Array(100 * 16000), []);
+
+    expect(sent).toHaveLength(0);
+    expect(result).toEqual({
+      segments: [],
+      words: null,
+      billedSeconds: 0,
+      costUSD: 0,
+      model: GROQ_WHISPER_MODEL,
+      ms: expect.any(Number),
+    });
+  });
+});
+
+describe("transcribeCloudPcmGated — packing, concatenation, and remap", () => {
+  it("packs disjoint regions into ONE upload and remaps chunk-relative segments/words back to absolute clip time", async () => {
+    const progressCalls: [number, number][] = [];
+    const sent = stubFetch(() =>
+      okJson(
+        [
+          { start: 0, end: 1, text: "a" },
+          { start: 6, end: 7, text: "b" },
+        ],
+        [
+          { word: "a", start: 0, end: 1 },
+          { word: "b", start: 6, end: 6.5 },
+        ],
+      ),
+    );
+
+    const pcm = new Float32Array(100 * 16000); // 100s clip
+    const regions: VadRegion[] = [
+      { start: 10, end: 15 }, // 5s
+      { start: 50, end: 53 }, // 3s
+    ];
+    const result = await transcribeCloudPcmGated(pcm, regions, {
+      onProgress: (doneS, totalS) => progressCalls.push([doneS, totalS]),
+    });
+
+    // Both regions (8s total) fit comfortably under the 600s cap -> one upload.
+    expect(sent).toHaveLength(1);
+    const uploaded = sent[0].form.get("file") as File;
+    // 8s of packed audio at 16kHz mono 16-bit WAV = 44-byte header + 8*16000*2 bytes.
+    expect(uploaded.size).toBe(44 + 8 * 16000 * 2);
+
+    // "a" (chunk-time [0,1]) falls in the first packed region (chunkOffsetS 0..5) -> absolute [10,11].
+    // "b" (chunk-time [6,7]) falls in the second packed region (chunkOffsetS 5..8) -> absolute [51,52].
+    expect(result.segments).toEqual([
+      { t0: 10, t1: 11, text: "a" },
+      { t0: 51, t1: 52, text: "b" },
+    ]);
+    expect(result.words).toEqual([
+      { word: "a", startS: 10, endS: 11 },
+      { word: "b", startS: 51, endS: 51.5 },
+    ]);
+
+    // 8s of packed content is under the 10s floor.
+    expect(result.billedSeconds).toBe(10);
+    expect(result.costUSD).toBeCloseTo((10 / 3600) * 0.04);
+    expect(progressCalls).toEqual([[8, 8]]);
+  });
+
+  it("uploads one request per packed chunk when regions don't all fit under the cap, summing billed seconds", async () => {
+    const sent = stubFetch((call) =>
+      call === 0
+        ? okJson([{ start: 0, end: 590, text: "first chunk" }])
+        : okJson([{ start: 0, end: 15, text: "second chunk" }]),
+    );
+
+    const pcm = new Float32Array(2000 * 16000);
+    // 590 + 15 = 605 > the 600s cap, so packing must start a fresh chunk for
+    // the second region rather than force both into one oversized upload.
+    const regions: VadRegion[] = [
+      { start: 0, end: 590 },
+      { start: 700, end: 715 },
+    ];
+    const result = await transcribeCloudPcmGated(pcm, regions);
+
+    expect(sent).toHaveLength(2);
+    expect(result.segments).toEqual([
+      { t0: 0, t1: 590, text: "first chunk" },
+      { t0: 700, t1: 715, text: "second chunk" },
+    ]);
+    // chunk 1 = 590s + chunk 2 = 15s, both already above the 10s floor.
+    expect(result.billedSeconds).toBe(605);
+  });
+
+  it("collapses words to null only when every chunk's response omitted them, mirroring transcribeCloudPcm", async () => {
+    const sent = stubFetch((call) =>
+      call === 0
+        ? okJson([{ start: 0, end: 1, text: "a" }], null)
+        : okJson([{ start: 0, end: 1, text: "b" }], [{ word: "b", start: 0, end: 1 }]),
+    );
+    const pcm = new Float32Array(2000 * 16000);
+    const regions: VadRegion[] = [
+      { start: 0, end: 590 },
+      { start: 700, end: 715 },
+    ];
+    const result = await transcribeCloudPcmGated(pcm, regions);
+    expect(sent).toHaveLength(2);
+    expect(result.words).toEqual([{ word: "b", startS: 700, endS: 701 }]);
+  });
+});
+
+describe("transcribeCloudPcmGated — reuses the un-gated path's network/error handling", () => {
+  it("retries once on a failed chunk (same convention as transcribeCloudPcm)", async () => {
+    const sent = stubFetch((call) =>
+      call === 0
+        ? { status: 500, contentType: "application/json", text: "boom" }
+        : okJson([{ start: 0, end: 1, text: "hi" }]),
+    );
+    const result = await transcribeCloudPcmGated(new Float32Array(100 * 16000), [{ start: 0, end: 1 }]);
+    expect(sent).toHaveLength(2);
+    expect(result.segments).toEqual([{ t0: 0, t1: 1, text: "hi" }]);
+  });
+
+  it("maps a non-JSON/HTML response to the same apply-groq-proxy.sh guidance", async () => {
+    stubFetch(() => ({ status: 200, contentType: "text/html", text: "<html>not proxied</html>" }));
+    await expect(
+      transcribeCloudPcmGated(new Float32Array(100 * 16000), [{ start: 0, end: 1 }]),
+    ).rejects.toThrow(/apply-groq-proxy\.sh/);
+  });
+});
+
+describe("transcribeCloudPcmGated — abort", () => {
+  it("honors an already-aborted signal without making any request", async () => {
+    const sent = stubFetch(() => okJson([]));
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      transcribeCloudPcmGated(new Float32Array(100 * 16000), [{ start: 0, end: 1 }], {
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow();
+    expect(sent).toHaveLength(0);
   });
 });

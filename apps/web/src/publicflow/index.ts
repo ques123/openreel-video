@@ -5,6 +5,6 @@
  * in publicapp/ for scene development).
  */
 export * from "./types";
-export { usePublicPipeline } from "./use-public-pipeline";
+export { usePublicPipeline, type PublicPipelineHandle } from "./use-public-pipeline";
 export { usePublicDirector } from "./use-public-director";
 export { loadPublicRunConfig } from "./preset-runtime";
