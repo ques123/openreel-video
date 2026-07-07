@@ -110,6 +110,26 @@ export interface CloudRunMeta {
   actualCostUSD?: number;
 }
 
+/**
+ * One cloud transcription run (opt-in tier; local whisper ALWAYS runs and
+ * stays in `transcript`). Times are absolute clip seconds. Cost is exact —
+ * derived from billed seconds at the provider's flat audio rate, not a
+ * token estimate.
+ */
+export interface CloudTranscriptMeta {
+  /** Provider model id, e.g. "whisper-large-v3-turbo". */
+  model: string;
+  segments: TranscriptSegment[];
+  /** Word-level timestamps; null when the provider returned none. */
+  words: { word: string; startS: number; endS: number }[] | null;
+  /** Seconds billed (10s minimum per uploaded chunk). */
+  billedSeconds: number;
+  costUSD: number;
+  /** Wall-clock ms for the whole cloud call (encode + upload + parse). */
+  ms: number;
+  transcribedAt: number;
+}
+
 /** Local caption pass stats (speed side of the local-vs-cloud comparison). */
 export interface LocalCaptionPerf {
   totalMs: number;
@@ -221,6 +241,13 @@ export interface ClipDossier {
   /** Local caption pass timing; null until the pass finishes at least once. */
   localCaptionPerf: LocalCaptionPerf | null;
   transcript: TranscriptSegment[];
+  /**
+   * Opt-in cloud transcription (Groq whisper-large-v3-turbo) — coexists with
+   * the always-run local `transcript` for A/B comparison, mirroring how
+   * cloudDenseCaptions coexists with denseCaptions. Optional + additive: no
+   * DOSSIER_VERSION bump; cached dossiers simply lack it until a cloud run.
+   */
+  cloudTranscript?: CloudTranscriptMeta | null;
   /**
    * Loudness envelope from the audio pass. Optional: dossiers cached before
    * this field existed lack it (no DOSSIER_VERSION bump — it enriches

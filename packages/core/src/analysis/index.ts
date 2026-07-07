@@ -16,6 +16,7 @@ export * from "./caption-text";
 export * from "./style-presets";
 export * from "./footage-digest";
 export * from "./cloud-vision-plan";
+export * from "./extract-audio";
 export * from "./audio-signal";
 export * from "./signal-score";
 export * from "./music-prompt";

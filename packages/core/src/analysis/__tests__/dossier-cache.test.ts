@@ -139,6 +139,53 @@ describe("dossier serialization", () => {
   });
 });
 
+describe("dossier serialization: cloudTranscript (opt-in cloud transcription)", () => {
+  it("round-trips a cloudTranscript with word-level timestamps present", () => {
+    const original: ClipDossier = {
+      ...makeDossier(),
+      cloudTranscript: {
+        model: "whisper-large-v3-turbo",
+        segments: [{ t0: 0.5, t1: 4.2, text: "we finally made it to the falls" }],
+        words: [
+          { word: "we", startS: 0.5, endS: 0.7 },
+          { word: "finally", startS: 0.7, endS: 1.1 },
+        ],
+        billedSeconds: 12.5,
+        costUSD: 0.0001388888,
+        ms: 842,
+        transcribedAt: 1720000000000,
+      },
+    };
+    const restored = deserializeDossier(serializeDossier(original));
+    expect(restored.cloudTranscript).toEqual(original.cloudTranscript);
+  });
+
+  it("round-trips a cloudTranscript whose provider returned no word timestamps (words: null)", () => {
+    const original: ClipDossier = {
+      ...makeDossier(),
+      cloudTranscript: {
+        model: "whisper-large-v3-turbo",
+        segments: [{ t0: 0, t1: 3, text: "hello there" }],
+        words: null,
+        billedSeconds: 10,
+        costUSD: 0.00011,
+        ms: 500,
+        transcribedAt: 1720000001000,
+      },
+    };
+    const restored = deserializeDossier(serializeDossier(original));
+    expect(restored.cloudTranscript).toEqual(original.cloudTranscript);
+    expect(restored.cloudTranscript?.words).toBeNull();
+  });
+
+  it("leaves cloudTranscript absent when the dossier never ran a cloud transcription (no accidental default)", () => {
+    const original = makeDossier(); // cloudTranscript never set — additive/optional field
+    const restored = deserializeDossier(serializeDossier(original));
+    expect(restored.cloudTranscript).toBeUndefined();
+    expect("cloudTranscript" in restored).toBe(false);
+  });
+});
+
 describe("legacy migration (pre-split cloud stores)", () => {
   it("derives cloudShotCaptions and cloudRuns from a shots-scope legacy record", () => {
     const legacy = makeDossier() as unknown as Record<string, unknown>;

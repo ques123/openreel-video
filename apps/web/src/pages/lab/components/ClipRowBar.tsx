@@ -16,6 +16,63 @@ interface ClipRowBarProps {
   /** Collapsed-row bulk-enhance checkbox state; null = selection UI off. */
   selected: boolean | null;
   onSelectChange?: (checked: boolean) => void;
+  /**
+   * Non-null once this clip has a local transcript worth viewing (done +
+   * clip.transcript.length > 0) — opens TranscriptCompareModal at the page
+   * level. Null hides the affordance entirely.
+   */
+  onOpenTranscripts: (() => void) | null;
+  /** Retry a failed cloud transcription for this clip (cloudTranscribeClip). */
+  onRetryCloudTranscribe: () => void;
+}
+
+/**
+ * Compact per-clip transcript affordance: a "transcripts" button once a
+ * local transcript exists (opens the compare modal), plus the SEPARATE
+ * opt-in cloud transcription tier's own progress/error status inline — done
+ * doesn't need its own indicator here since the modal's cloud column already
+ * shows it. Lives in ClipRowBar (not ShotFilmstrip) because it renders
+ * identically in both the collapsed and expanded row layouts.
+ */
+function TranscriptAction({
+  cloudTranscribe,
+  onOpenTranscripts,
+  onRetryCloudTranscribe,
+}: {
+  cloudTranscribe: LabClip["cloudTranscribe"];
+  onOpenTranscripts: (() => void) | null;
+  onRetryCloudTranscribe: () => void;
+}) {
+  if (!onOpenTranscripts) return null;
+  return (
+    <span className="flex items-center gap-1 shrink-0">
+      <button
+        className="text-xs px-1.5 py-0.5 rounded border border-border text-text-secondary hover:text-text-primary"
+        onClick={onOpenTranscripts}
+        title="Compare local vs. cloud transcripts with video playback"
+      >
+        transcripts
+      </button>
+      {cloudTranscribe?.status === "queued" && (
+        <span className="text-[10px] text-text-secondary">cloud queued…</span>
+      )}
+      {cloudTranscribe?.status === "running" && (
+        <span className="text-[10px] text-sky-600">cloud transcribing…</span>
+      )}
+      {cloudTranscribe?.status === "error" && (
+        <span className="text-[10px] text-red-400" title={cloudTranscribe.error}>
+          cloud failed —{" "}
+          <button
+            className="underline hover:text-red-300"
+            onClick={onRetryCloudTranscribe}
+            title="Retry cloud transcription for this clip"
+          >
+            retry
+          </button>
+        </span>
+      )}
+    </span>
+  );
 }
 
 /**
@@ -121,6 +178,8 @@ export function ClipRowBar({
   onRemove,
   selected,
   onSelectChange,
+  onOpenTranscripts,
+  onRetryCloudTranscribe,
 }: ClipRowBarProps) {
   const caret = (
     <button
@@ -139,6 +198,11 @@ export function ClipRowBar({
         <div className="flex items-center gap-2 min-w-0 flex-1">
           <StatusBadges clip={clip} derivedStatus={derivedStatus} collapsed={false} />
         </div>
+        <TranscriptAction
+          cloudTranscribe={clip.cloudTranscribe}
+          onOpenTranscripts={onOpenTranscripts}
+          onRetryCloudTranscribe={onRetryCloudTranscribe}
+        />
         <RowActions
           clip={clip}
           derivedStatus={derivedStatus}
@@ -176,6 +240,11 @@ export function ClipRowBar({
             {clip.shots.length} shot{clip.shots.length === 1 ? "" : "s"}
           </span>
         )}
+        <TranscriptAction
+          cloudTranscribe={clip.cloudTranscribe}
+          onOpenTranscripts={onOpenTranscripts}
+          onRetryCloudTranscribe={onRetryCloudTranscribe}
+        />
         <RowActions
           clip={clip}
           derivedStatus={derivedStatus}

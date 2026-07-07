@@ -11,6 +11,10 @@
  * Deliberately NOT in here:
  * - the cloud-vision consent checkbox — per-session opt-in by design (each
  *   session re-consents to pixels leaving the device);
+ * - the cloud-TRANSCRIPTION consent checkbox (cloudEnabled on
+ *   TranscriptionRunSettings) — same per-session opt-in convention: audio
+ *   leaving the device to Groq re-consents each session, exactly like cloud
+ *   vision. Only the local whisper dials (model + VAD) are persisted below;
  * - the director model — already persisted under its own key by
  *   DirectorPanel (openreel:director-model); absorbing it is a later,
  *   separate migration;
@@ -54,6 +58,18 @@ export interface LabSettings {
    * (selectorConfigForPreset) without mutating what's stored here.
    */
   selector: SelectorConfig;
+  /**
+   * Local whisper dials — model checkpoint + VAD speech gate — threaded into
+   * usePerceptionLab's TranscriptionRunSettings along with the session-only
+   * `cloudEnabled` toggle (NOT persisted, see the file header comment).
+   */
+  transcription: TranscriptionSettings;
+}
+
+/** Persisted local-whisper dials. See LabSettings.transcription. */
+export interface TranscriptionSettings {
+  localModel: "base" | "large-v3-turbo";
+  vad: boolean;
 }
 
 /**
@@ -81,6 +97,10 @@ export function cloneSelectorConfig(config: SelectorConfig): SelectorConfig {
  * choice, never the silent reset. Selector defaults are
  * DEFAULT_SELECTOR_CONFIG (signal-score.ts), cloned so no LabSettings
  * instance shares mutable state with the core constant or another instance.
+ * Transcription defaults to the small/fast local checkpoint with VAD on
+ * (skip non-speech audio — fewer hallucinations, matches
+ * DEFAULT_TRANSCRIPTION_SETTINGS in use-perception-lab.ts minus the
+ * session-only cloudEnabled field).
  */
 export function defaultLabSettings(): LabSettings {
   return {
@@ -91,6 +111,7 @@ export function defaultLabSettings(): LabSettings {
       candidatesOnly: null,
     },
     selector: cloneSelectorConfig(DEFAULT_SELECTOR_CONFIG),
+    transcription: { localModel: "base", vad: true },
   };
 }
 
@@ -170,19 +191,37 @@ function migrateSelector(raw: unknown): SelectorConfig {
 }
 
 /**
+ * Per-field transcription migration — same "one stale value never discards
+ * the rest" salvaging as `cloud`/`selector`: an invalid localModel or a
+ * non-boolean vad falls back independently, so e.g. a hand-edited
+ * `{localModel: "large-v3-turbo", vad: "yes"}` keeps the valid model choice.
+ */
+function migrateTranscription(raw: unknown, defaults: TranscriptionSettings): TranscriptionSettings {
+  const t = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  return {
+    localModel:
+      t.localModel === "base" || t.localModel === "large-v3-turbo"
+        ? t.localModel
+        : defaults.localModel,
+    vad: typeof t.vad === "boolean" ? t.vad : defaults.vad,
+  };
+}
+
+/**
  * Coerce anything previously persisted (or hand-edited) into a valid
  * LabSettings: unknown fields are dropped, invalid values fall back to the
  * default PER FIELD (one stale value never discards the rest). Version is
  * currently informational — when v2 lands, add an explicit migration step
  * here keyed on `raw.version`.
  *
- * `selector` was added under the CURRENT version, deliberately without a
- * bump: it is a purely additive field using the exact same per-field
- * fallback shape `cloud` already has, so a v1 object that predates it just
- * gets `defaults.selector` — indistinguishable from a v1 object that was
- * missing a `cloud` sub-field. A version bump is for changes that need
- * version-KEYED special-casing (the file's own contract above); "add
- * another optional-shaped field with per-field defaults" isn't that.
+ * `selector` and `transcription` were both added under the CURRENT version,
+ * deliberately without a bump: each is a purely additive field using the
+ * exact same per-field fallback shape `cloud` already has, so a v1 object
+ * that predates either just gets `defaults.selector` / `defaults.transcription`
+ * — indistinguishable from a v1 object that was missing a `cloud` sub-field.
+ * A version bump is for changes that need version-KEYED special-casing (the
+ * file's own contract above); "add another optional-shaped field with
+ * per-field defaults" isn't that.
  */
 export function migrateLabSettings(raw: unknown): LabSettings {
   const defaults = defaultLabSettings();
@@ -203,6 +242,10 @@ export function migrateLabSettings(raw: unknown): LabSettings {
         typeof cloud.candidatesOnly === "boolean" ? cloud.candidatesOnly : null,
     },
     selector: migrateSelector((raw as { selector?: unknown }).selector),
+    transcription: migrateTranscription(
+      (raw as { transcription?: unknown }).transcription,
+      defaults.transcription,
+    ),
   };
 }
 

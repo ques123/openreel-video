@@ -27,11 +27,16 @@ describe("defaultLabSettings", () => {
       version: LAB_SETTINGS_VERSION,
       cloud: { scope: "shots", model: "gpt-5.4-mini", candidatesOnly: null },
       selector: DEFAULT_SELECTOR_CONFIG,
+      transcription: { localModel: "base", vad: true },
     });
   });
 
   it("defaults the selector to DEFAULT_SELECTOR_CONFIG", () => {
     expect(defaultLabSettings().selector).toEqual(DEFAULT_SELECTOR_CONFIG);
+  });
+
+  it("defaults transcription to whisper-base with VAD on", () => {
+    expect(defaultLabSettings().transcription).toEqual({ localModel: "base", vad: true });
   });
 
   it("returns a fresh object each call (no shared mutable default)", () => {
@@ -44,6 +49,7 @@ describe("defaultLabSettings", () => {
     expect(a.selector.weights).not.toBe(b.selector.weights);
     expect(a.selector.gate).not.toBe(b.selector.gate);
     expect(a.selector.keywords).not.toBe(b.selector.keywords);
+    expect(a.transcription).not.toBe(b.transcription);
   });
 });
 
@@ -71,6 +77,7 @@ describe("migrateLabSettings", () => {
         uniquenessPenalty: 0.2,
         keywords: ["birthday", "cake"],
       },
+      transcription: { localModel: "large-v3-turbo", vad: false },
     };
     expect(migrateLabSettings(settings)).toEqual(settings);
   });
@@ -91,6 +98,7 @@ describe("migrateLabSettings", () => {
       version: LAB_SETTINGS_VERSION,
       cloud: { scope: "timeline", model: "gpt-5.4-mini", candidatesOnly: true },
       selector: DEFAULT_SELECTOR_CONFIG,
+      transcription: { localModel: "base", vad: true },
     });
   });
 
@@ -111,8 +119,14 @@ describe("migrateLabSettings", () => {
       legacyFlag: true,
       cloud: { scope: "shots", model: "gpt-5.2", candidatesOnly: null, extra: 1 },
       selector: { ...DEFAULT_SELECTOR_CONFIG, extra: "nope" },
+      transcription: { localModel: "base", vad: true, extra: "nope" },
     });
-    expect(Object.keys(migrated).sort()).toEqual(["cloud", "selector", "version"]);
+    expect(Object.keys(migrated).sort()).toEqual([
+      "cloud",
+      "selector",
+      "transcription",
+      "version",
+    ]);
     expect(Object.keys(migrated.cloud).sort()).toEqual(["candidatesOnly", "model", "scope"]);
     expect(Object.keys(migrated.selector).sort()).toEqual([
       "chapterGapMinutes",
@@ -122,6 +136,7 @@ describe("migrateLabSettings", () => {
       "uniquenessPenalty",
       "weights",
     ]);
+    expect(Object.keys(migrated.transcription).sort()).toEqual(["localModel", "vad"]);
   });
 
   describe("selector field", () => {
@@ -213,6 +228,50 @@ describe("migrateLabSettings", () => {
       );
     });
   });
+
+  describe("transcription field", () => {
+    it("missing entirely falls back to the default (base, VAD on)", () => {
+      expect(migrateLabSettings({ version: LAB_SETTINGS_VERSION }).transcription).toEqual({
+        localModel: "base",
+        vad: true,
+      });
+    });
+
+    it("a non-object transcription (string/number/array) falls back to defaults", () => {
+      for (const raw of ["nope", 42, [], null]) {
+        expect(migrateLabSettings({ transcription: raw }).transcription).toEqual({
+          localModel: "base",
+          vad: true,
+        });
+      }
+    });
+
+    it("accepts large-v3-turbo and rejects an invalid localModel", () => {
+      expect(
+        migrateLabSettings({ transcription: { localModel: "large-v3-turbo" } }).transcription
+          .localModel,
+      ).toBe("large-v3-turbo");
+      expect(
+        migrateLabSettings({ transcription: { localModel: "medium" } }).transcription.localModel,
+      ).toBe("base");
+    });
+
+    it("accepts vad: false and rejects a non-boolean vad", () => {
+      expect(migrateLabSettings({ transcription: { vad: false } }).transcription.vad).toBe(false);
+      expect(migrateLabSettings({ transcription: { vad: "yes" } }).transcription.vad).toBe(true);
+    });
+
+    it("salvages per field: one invalid value keeps its sibling", () => {
+      expect(
+        migrateLabSettings({ transcription: { localModel: "nonsense", vad: false } })
+          .transcription,
+      ).toEqual({ localModel: "base", vad: false });
+      expect(
+        migrateLabSettings({ transcription: { localModel: "large-v3-turbo", vad: "nonsense" } })
+          .transcription,
+      ).toEqual({ localModel: "large-v3-turbo", vad: true });
+    });
+  });
 });
 
 describe("load/save", () => {
@@ -225,6 +284,7 @@ describe("load/save", () => {
       version: LAB_SETTINGS_VERSION,
       cloud: { scope: "timeline", model: "gpt-5.4-nano", candidatesOnly: true },
       selector: { ...DEFAULT_SELECTOR_CONFIG, topPerChapter: 10 },
+      transcription: { localModel: "large-v3-turbo", vad: false },
     };
     saveLabSettings(settings);
     expect(localStorage.getItem(LAB_SETTINGS_KEY)).not.toBeNull();

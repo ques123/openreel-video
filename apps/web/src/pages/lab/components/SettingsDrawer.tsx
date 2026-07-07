@@ -3,12 +3,19 @@ import type { CloudScope } from "@openreel/core";
 import { CAPTION_MODELS, type CaptionModel } from "../../../services/cloud-vision";
 import { shortModelLabel } from "../../../services/openai-proxy";
 import { formatAuxSpend, type AuxSpend } from "../enhance-cost";
-import { LAB_SETTINGS_KEY, type CloudEnhanceSettings, type LabSettings } from "../lab-settings";
+import {
+  LAB_SETTINGS_KEY,
+  type CloudEnhanceSettings,
+  type LabSettings,
+  type TranscriptionSettings,
+} from "../lab-settings";
 
 interface SettingsDrawerProps {
   settings: LabSettings;
   /** Patch the persisted cloud-enhance settings (page persists + re-renders). */
   onCloudChange: (patch: Partial<CloudEnhanceSettings>) => void;
+  /** Patch the persisted local-whisper settings (page persists + re-renders). */
+  onTranscriptionChange: (patch: Partial<TranscriptionSettings>) => void;
   /** Whether the selector currently has candidate shots (drives the auto hint). */
   hasCandidates: boolean;
   /** Effective candidates-only value after the auto rule (what a run would use). */
@@ -27,6 +34,7 @@ interface SettingsDrawerProps {
 export function SettingsDrawer({
   settings,
   onCloudChange,
+  onTranscriptionChange,
   hasCandidates,
   candidatesOnlyEffective,
   auxSpend,
@@ -124,6 +132,41 @@ export function SettingsDrawer({
           )}
         </div>
 
+        <div className="pt-3 border-t border-border space-y-2">
+          <h4 className="text-xs font-semibold text-text-primary">Transcription</h4>
+          <label className="block text-xs text-text-secondary">
+            <span className="font-medium">local model</span>
+            <select
+              className="mt-1 w-full bg-background border border-border rounded px-1.5 py-1 text-xs text-text-primary outline-none focus:border-primary"
+              value={settings.transcription.localModel}
+              onChange={(e) =>
+                onTranscriptionChange({
+                  localModel: e.target.value as TranscriptionSettings["localModel"],
+                })
+              }
+              title="Local whisper checkpoint: base is small and fast; large-v3-turbo is much more accurate but downloads ~800MB"
+            >
+              <option value="base">whisper-base · fast (74M)</option>
+              <option value="large-v3-turbo">large-v3-turbo · accurate (~800MB download)</option>
+            </select>
+            <span className="block mt-1 text-[10px] text-text-secondary/80">
+              applies to newly analyzed clips
+            </span>
+          </label>
+
+          <label
+            className="flex items-center gap-1.5 cursor-pointer select-none text-xs text-text-secondary"
+            title="Voice-activity gate: only transcribe audio the local VAD thinks is speech"
+          >
+            <input
+              type="checkbox"
+              checked={settings.transcription.vad}
+              onChange={(e) => onTranscriptionChange({ vad: e.target.checked })}
+            />
+            skip non-speech audio (fewer hallucinations)
+          </label>
+        </div>
+
         <div className="flex-1" />
 
         <div className="pt-3 border-t border-border space-y-1 text-[10px] text-text-secondary">
@@ -133,9 +176,9 @@ export function SettingsDrawer({
             <span className="text-text-secondary/70"> — brief suggestions + music brief</span>
           </p>
           <p className="text-text-secondary/70">
-            Cloud vision itself stays a per-session opt-in (header checkbox). The
-            director model has its own picker in the Director panel. Stored under{" "}
-            <code>{LAB_SETTINGS_KEY}</code>.
+            Cloud vision and cloud transcription both stay a per-session opt-in
+            (header checkboxes). The director model has its own picker in the
+            Director panel. Stored under <code>{LAB_SETTINGS_KEY}</code>.
           </p>
         </div>
       </div>
