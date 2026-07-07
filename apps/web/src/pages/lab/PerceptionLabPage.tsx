@@ -24,6 +24,7 @@ import {
   type DirectorExperiment,
 } from "../../services/experiments";
 import { proxiedMusicUrl } from "../../services/suno";
+import { GROQ_WHISPER_USD_PER_HOUR } from "../../services/groq-stt";
 import { useRouter } from "../../hooks/use-router";
 import { cloudShotCaptionsOf, cloudTimelineCaptionsOf, localCaptionsOf } from "./caption-views";
 import {
@@ -53,6 +54,7 @@ import {
   saveLabSettings,
   type CloudEnhanceSettings,
   type LabSettings,
+  type TranscriptionSettings,
 } from "./lab-settings";
 import { effectiveSelectorConfig } from "./selector-settings";
 import { CaptionCompareModal } from "./components/CaptionCompareModal";
@@ -73,10 +75,11 @@ import { SignalsPanel } from "./components/SignalsPanel";
 import { ShotPreviewModal, type ShotPreview } from "./components/ShotPreviewModal";
 import { StoryboardList } from "./components/StoryboardList";
 import { StoryboardPreviewModal } from "./components/StoryboardPreviewModal";
+import { TranscriptCompareModal } from "./components/TranscriptCompareModal";
 import { TranscriptPanel } from "./components/TranscriptPanel";
 import { useDirector } from "./use-director";
 import { useMusic } from "./use-music";
-import { usePerceptionLab, type LabClip } from "./use-perception-lab";
+import { usePerceptionLab, type LabClip, type TranscriptionRunSettings } from "./use-perception-lab";
 
 /**
  * Debug-export music meta from the experiment's COMMITTED track only — an
@@ -146,6 +149,16 @@ export function PerceptionLabPage() {
     effectiveSelector.presetOverrodeSharpness && activeStylePreset
       ? `preset "${activeStylePreset.label}" favors soft shots — blur gate converted to penalty`
       : null;
+  // Cloud TRANSCRIPTION opt-in: session-only, same per-session-consent
+  // convention as cloud vision's `cloudEnabled` below (audio leaving the
+  // device re-consents each session) — deliberately NOT part of
+  // labSettings.transcription, which only holds the persisted local whisper
+  // dials (model + VAD). Composed with those dials into the hook's 3rd arg.
+  const [cloudTranscriptionEnabled, setCloudTranscriptionEnabled] = useState(false);
+  const transcription: TranscriptionRunSettings = useMemo(
+    () => ({ ...labSettings.transcription, cloudEnabled: cloudTranscriptionEnabled }),
+    [labSettings.transcription, cloudTranscriptionEnabled],
+  );
   const {
     state,
     addFiles,
@@ -158,7 +171,8 @@ export function PerceptionLabPage() {
     removeClip,
     selection,
     storage,
-  } = usePerceptionLab(forceDevice, effectiveSelector.config);
+    cloudTranscribeClip,
+  } = usePerceptionLab(forceDevice, effectiveSelector.config, transcription);
   const getSelectorConfig = useCallback(() => effectiveSelector.config, [effectiveSelector]);
   const director = useDirector({ getDossiers, embedQuery, getSelectorConfig });
   const music = useMusic();
@@ -175,6 +189,8 @@ export function PerceptionLabPage() {
   const [storyboardStart, setStoryboardStart] = useState<number | null>(null);
   /** Clip whose side-by-side caption comparison is open; null = closed. */
   const [compareClip, setCompareClip] = useState<LabClip | null>(null);
+  /** Clip whose local/cloud transcript comparison is open; null = closed. */
+  const [transcriptClip, setTranscriptClip] = useState<LabClip | null>(null);
   /** Stored experiment being inspected; null = closed. */
   const [experimentOpen, setExperimentOpen] = useState<string | null>(null);
   const [matrixOpen, setMatrixOpen] = useState(false);
@@ -204,6 +220,14 @@ export function PerceptionLabPage() {
   const updateCloudSettings = useCallback((patch: Partial<CloudEnhanceSettings>) => {
     setLabSettings((prev) => {
       const next = { ...prev, cloud: { ...prev.cloud, ...patch } };
+      saveLabSettings(next);
+      return next;
+    });
+  }, []);
+  /** Patch the persisted local-whisper settings (SettingsDrawer's Transcription section). */
+  const updateTranscriptionSettings = useCallback((patch: Partial<TranscriptionSettings>) => {
+    setLabSettings((prev) => {
+      const next = { ...prev, transcription: { ...prev.transcription, ...patch } };
       saveLabSettings(next);
       return next;
     });
@@ -1027,6 +1051,19 @@ export function PerceptionLabPage() {
                 </span>
               </span>
             </label>
+            <label className="flex items-center gap-1.5 cursor-pointer select-none text-text-secondary">
+              <input
+                type="checkbox"
+                checked={cloudTranscriptionEnabled}
+                onChange={(e) => setCloudTranscriptionEnabled(e.target.checked)}
+              />
+              <span>
+                Cloud transcription{" "}
+                <span className="text-text-secondary/70">
+                  — audio leaves this device (Groq · ${GROQ_WHISPER_USD_PER_HOUR}/hr)
+                </span>
+              </span>
+            </label>
             <button
               className="px-2 py-0.5 rounded border border-border text-text-secondary hover:text-text-primary"
               onClick={() => setSettingsOpen(true)}
@@ -1173,6 +1210,12 @@ export function PerceptionLabPage() {
                       onRemove={() => handleRemoveClip(clip.clipId)}
                       selected={cloudEnabled ? isSelected(clip) : null}
                       onSelectChange={(checked) => handleClipSelect(clip.clipId, checked)}
+                      onOpenTranscripts={
+                        clip.status === "done" && clip.transcript.length > 0
+                          ? () => setTranscriptClip(clip)
+                          : null
+                      }
+                      onRetryCloudTranscribe={() => cloudTranscribeClip(clip.clipId)}
                     />
                     {/* Collapsed rows skip the filmstrip entirely — that is
                         what unloads its hundreds of inline base64 frames. */}
@@ -1275,6 +1318,7 @@ export function PerceptionLabPage() {
         <SettingsDrawer
           settings={labSettings}
           onCloudChange={updateCloudSettings}
+          onTranscriptionChange={updateTranscriptionSettings}
           hasCandidates={hasCandidates}
           candidatesOnlyEffective={candidatesOnly}
           auxSpend={auxSpend}
@@ -1292,6 +1336,16 @@ export function PerceptionLabPage() {
             setCompareClip(null);
             openPreviewAt(compareClip, t);
           }}
+        />
+      )}
+      {transcriptClip && (
+        <TranscriptCompareModal
+          clip={transcriptClip}
+          localModel={labSettings.transcription.localModel}
+          clips={state.clips}
+          onSelectClip={setTranscriptClip}
+          onClose={() => setTranscriptClip(null)}
+          getFile={getFile}
         />
       )}
       {experimentOpen && (

@@ -4,6 +4,7 @@ import {
   blurryAnnotations,
   DEFAULT_SELECTOR_CONFIG,
   expandSpanCaptions,
+  extractAudioPcm,
   FunnelOrchestrator,
   planCloudFrames,
   searchShots,
@@ -22,6 +23,7 @@ import {
   type TranscriptSegment,
 } from "@openreel/core";
 import { describeFramesCloud } from "../../services/cloud-vision";
+import { transcribeCloudPcm } from "../../services/groq-stt";
 
 export type ClipStatus = "analyzing" | "done" | "error" | "cancelled";
 
@@ -182,7 +184,9 @@ type Action =
   | { type: "cloud-start"; clipId: string; total: number; outOfCandidateRanges?: number }
   | { type: "cloud-progress"; clipId: string; done: number; total: number }
   | { type: "cloud-done"; clipId: string }
-  | { type: "cloud-error"; clipId: string; message: string };
+  | { type: "cloud-error"; clipId: string; message: string }
+  | { type: "cloud-transcribe-status"; clipId: string; state: CloudTranscribeState }
+  | { type: "cloud-transcribe-done"; clipId: string; dossier: ClipDossier };
 
 function updateClip(
   state: LabState,
@@ -281,6 +285,20 @@ export function reducer(state: LabState, action: Action): LabState {
           error: action.message,
           outOfCandidateRanges: c.cloud?.outOfCandidateRanges,
         },
+      }));
+
+    case "cloud-transcribe-status":
+      return updateClip(state, action.clipId, (c) => ({ ...c, cloudTranscribe: action.state }));
+
+    case "cloud-transcribe-done":
+      // The dossier's cloudTranscript field was already mutated in place
+      // before this dispatch (same convention as applyCloudResults for cloud
+      // vision) — reassigning it here explicitly is what actually triggers a
+      // re-render of this row (updateClip always returns a new LabClip).
+      return updateClip(state, action.clipId, (c) => ({
+        ...c,
+        cloudTranscribe: { status: "done" },
+        dossier: action.dossier,
       }));
 
     case "search-start":
@@ -443,6 +461,32 @@ function readDebugIngestBudgetBytes(): number | undefined {
   }
 }
 
+/**
+ * Whether a clip should be auto-queued for cloud transcription. Exported for
+ * unit testing (pure, no React needed). A clip leaves this pool permanently
+ * once anything has been attempted this session (queued/running/done/error)
+ * — auto-queue never retries a failure; that's what the manual
+ * cloudTranscribeClip retry affordance is for.
+ *
+ *  - status must be "done" with a dossier (nothing to transcribe otherwise).
+ *  - dossier.audioEnvelope === null means the audio pass ran and found NO
+ *    audio track — skip. undefined means "never computed" (a legacy cache
+ *    whose audio-signal enrichment hasn't landed yet) — that is NOT the same
+ *    as "no audio," so it does NOT skip; the clip is queued optimistically
+ *    and extractAudioPcm itself will find out for real.
+ *  - a dossier that already carries a cloudTranscript (this session's run, or
+ *    a cache hit from a previous session) is left alone.
+ */
+export function shouldAutoQueueCloudTranscribe(clip: LabClip): boolean {
+  return (
+    clip.status === "done" &&
+    clip.dossier !== null &&
+    clip.dossier.audioEnvelope !== null &&
+    !clip.dossier.cloudTranscript &&
+    !clip.cloudTranscribe
+  );
+}
+
 export function usePerceptionLab(
   forceDevice: "auto" | InferenceDevice = "auto",
   /**
@@ -467,6 +511,20 @@ export function usePerceptionLab(
   /** clipId -> original File, for shot preview playback. */
   const filesRef = useRef<Map<string, File>>(new Map());
   const [storage, setStorage] = useState<StorageStatus | null>(null);
+
+  /**
+   * Cloud transcription queue state. Concurrency 1 (cloudProcessingRef guards
+   * it): items are FIFO; a manual retry/re-run (force: true) is exempt from
+   * the cloudEnabled gate at dequeue time (see pumpCloudQueue) but still
+   * shares this one queue, so it never overlaps another clip's cloud call.
+   * transcriptionRef mirrors the `transcription` param on every render so
+   * async queue code always reads the CURRENT toggle, not a stale closure.
+   */
+  const cloudQueueRef = useRef<Array<{ clipId: string; force: boolean }>>([]);
+  const cloudProcessingRef = useRef(false);
+  const cloudAbortControllersRef = useRef<Map<string, AbortController>>(new Map());
+  const transcriptionRef = useRef(transcription);
+  transcriptionRef.current = transcription;
 
   /** Re-read the OPFS scratch quota estimate. Guarded — absent on Safari. */
   const refreshStorage = useCallback(() => {
@@ -517,9 +575,19 @@ export function usePerceptionLab(
   useEffect(() => {
     // Kick model downloads on mount so they overlap with the first decode.
     getOrchestrator().warmUp(forceDevice);
+    // Snapshotting the Map reference here (not re-read from the ref inside
+    // the cleanup below) satisfies react-hooks/exhaustive-deps; it's the
+    // same object either way since nothing ever reassigns
+    // cloudAbortControllersRef.current, only mutates its contents.
+    const abortControllers = cloudAbortControllersRef.current;
     return () => {
       orchestratorRef.current?.dispose();
       orchestratorRef.current = null;
+      // Stop any cloud-transcribe work in flight or waiting — nothing should
+      // keep decoding/uploading audio after the lab unmounts.
+      cloudQueueRef.current = [];
+      for (const controller of abortControllers.values()) controller.abort();
+      abortControllers.clear();
     };
   }, [getOrchestrator, forceDevice]);
 
@@ -588,6 +656,12 @@ export function usePerceptionLab(
         const clipId = `lab-clip-${Date.now().toString(36)}-${clipCounter}`;
         const proxy = proxyForOriginal.get(file);
 
+        // Local whisper model + VAD gating for this analyze call only —
+        // applies to new analyses; a cache hit keeps whatever it was
+        // originally analyzed with (see analyzeFile's opts doc in
+        // funnel-orchestrator.ts).
+        const transcriptionOpts = { model: transcription.localModel, vad: transcription.vad };
+
         if (proxy) {
           filesRef.current.set(clipId, file);
           dispatch({
@@ -598,20 +672,29 @@ export function usePerceptionLab(
             proxyName: proxy.name,
           });
           orchestrator
-            .analyzeFile(proxy, forceDevice, clipId, { identityFile: file, debugIngestBudgetBytes })
+            .analyzeFile(proxy, forceDevice, clipId, {
+              identityFile: file,
+              debugIngestBudgetBytes,
+              transcription: transcriptionOpts,
+            })
             .catch(() => {
               // clip-error event already updated the row; swallow the rejection.
             });
         } else {
           filesRef.current.set(clipId, file);
           dispatch({ type: "clip-added", clipId, fileName: file.name, fileSize: file.size });
-          orchestrator.analyzeFile(file, forceDevice, clipId, { debugIngestBudgetBytes }).catch(() => {
-            // clip-error event already updated the row; swallow the rejection.
-          });
+          orchestrator
+            .analyzeFile(file, forceDevice, clipId, {
+              debugIngestBudgetBytes,
+              transcription: transcriptionOpts,
+            })
+            .catch(() => {
+              // clip-error event already updated the row; swallow the rejection.
+            });
         }
       }
     },
-    [getOrchestrator, forceDevice],
+    [getOrchestrator, forceDevice, transcription.localModel, transcription.vad],
   );
 
   const runSearch = useCallback(
@@ -657,6 +740,13 @@ export function usePerceptionLab(
    */
   const removeClip = useCallback((clipId: string) => {
     orchestratorRef.current?.cancelClip(clipId);
+    // Drop it from the cloud-transcribe queue if it hasn't started yet, and
+    // abort its in-flight extractAudioPcm/transcribeCloudPcm call if it has
+    // — runCloudTranscribeItem's catch sees the AbortError and skips
+    // gracefully (no error state, no dossier save for a clip that's gone).
+    cloudQueueRef.current = cloudQueueRef.current.filter((item) => item.clipId !== clipId);
+    cloudAbortControllersRef.current.get(clipId)?.abort();
+    cloudAbortControllersRef.current.delete(clipId);
     dossiersRef.current.delete(clipId);
     filesRef.current.delete(clipId);
     dispatch({ type: "clip-removed", clipId });
@@ -774,15 +864,126 @@ export function usePerceptionLab(
   }, [state.clips, selectorConfig]);
 
   /**
-   * Manually (re)run cloud transcription for one clip — retry affordance for
-   * error rows and the explicit per-clip trigger. SKELETON: the integration
-   * wave replaces this with the real queue; the signature is the contract.
+   * Process one queued clip: extract its audio (on this thread) and send it
+   * through the Groq cloud pass, then persist the result into the dossier.
+   * Concurrency is enforced by the caller (pumpCloudQueue) — this function
+   * assumes it alone owns cloudProcessingRef for its duration.
+   *
+   * A clip whose File/dossier vanished (removed mid-queue) is skipped
+   * silently — see removeClip, which also aborts this call if it's already
+   * running for the clip being removed.
    */
-  const cloudTranscribeClip = useCallback((clipId: string) => {
-    void clipId;
-    void transcription;
-    console.warn("[lab] cloudTranscribeClip not wired yet");
-  }, [transcription]);
+  const runCloudTranscribeItem = useCallback(
+    async (clipId: string) => {
+      const file = filesRef.current.get(clipId);
+      const dossier = dossiersRef.current.get(clipId);
+      if (!file || !dossier) return; // removed/never-analyzed — nothing to do
+
+      const controller = new AbortController();
+      cloudAbortControllersRef.current.set(clipId, controller);
+      dispatch({ type: "cloud-transcribe-status", clipId, state: { status: "running" } });
+
+      try {
+        const pcm = await extractAudioPcm(file, { signal: controller.signal });
+        if (!pcm) throw new Error("no audio track found");
+        const result = await transcribeCloudPcm(pcm, { signal: controller.signal });
+
+        // Re-running an already-transcribed clip (manual retry, or a fresh
+        // enable/disable/enable cycle) REPLACES the existing cloudTranscript
+        // outright — there is no merge; the newest run is the one kept.
+        dossier.cloudTranscript = { ...result, transcribedAt: Date.now() };
+        await getOrchestrator().saveDossier(file, dossier);
+
+        // The clip may have been removed while the save was in flight.
+        if (!filesRef.current.has(clipId)) return;
+        dispatch({ type: "cloud-transcribe-done", clipId, dossier });
+      } catch (err) {
+        if (controller.signal.aborted) return; // removed/cancelled mid-flight — not an error
+        console.error(`[lab] cloud transcription failed for clip "${dossier.fileName}":`, err);
+        if (filesRef.current.has(clipId)) {
+          const message = err instanceof Error ? err.message : String(err);
+          dispatch({ type: "cloud-transcribe-status", clipId, state: { status: "error", error: message } });
+        }
+      } finally {
+        cloudAbortControllersRef.current.delete(clipId);
+      }
+    },
+    [getOrchestrator],
+  );
+
+  /**
+   * Drain the cloud-transcribe queue one item at a time. A non-forced item
+   * (auto-queued) is left in place — NOT dropped — when cloudEnabled has
+   * since turned off: the queue just pauses until re-enabled (toggling back
+   * on, or any enqueue call, resumes it). A forced item (manual
+   * cloudTranscribeClip) always proceeds regardless of the toggle.
+   */
+  const pumpCloudQueue = useCallback(() => {
+    if (cloudProcessingRef.current) return;
+    const next = cloudQueueRef.current[0];
+    if (!next) return;
+    if (!next.force && !transcriptionRef.current.cloudEnabled) return;
+
+    cloudQueueRef.current.shift();
+    cloudProcessingRef.current = true;
+    void runCloudTranscribeItem(next.clipId).finally(() => {
+      cloudProcessingRef.current = false;
+      pumpCloudQueue();
+    });
+  }, [runCloudTranscribeItem]);
+
+  /**
+   * Add a clip to the cloud-transcribe queue (deduping by clipId — a clip
+   * already waiting just gets promoted to `force` if this call requests it)
+   * and immediately marks it "queued" so the UI reflects it before its turn
+   * comes up.
+   */
+  const enqueueCloudTranscribe = useCallback(
+    (clipId: string, opts: { force?: boolean } = {}) => {
+      const force = opts.force ?? false;
+      const existing = cloudQueueRef.current.find((item) => item.clipId === clipId);
+      if (existing) {
+        if (force) existing.force = true;
+      } else {
+        cloudQueueRef.current.push({ clipId, force });
+        dispatch({ type: "cloud-transcribe-status", clipId, state: { status: "queued" } });
+      }
+      pumpCloudQueue();
+    },
+    [pumpCloudQueue],
+  );
+
+  /**
+   * Auto-queue: whenever cloud transcription is enabled, every eligible done
+   * clip (see shouldAutoQueueCloudTranscribe) gets enqueued. Re-running on
+   * every state.clips change covers a clip finishing analysis while already
+   * enabled; re-running when cloudEnabled flips on covers the backfill over
+   * clips that finished earlier in the session. Also pumps unconditionally
+   * so a toggle-back-on resumes items already sitting in the queue from
+   * before it was turned off (see pumpCloudQueue).
+   */
+  useEffect(() => {
+    if (!transcription.cloudEnabled) return;
+    for (const c of state.clips) {
+      if (shouldAutoQueueCloudTranscribe(c)) enqueueCloudTranscribe(c.clipId);
+    }
+    pumpCloudQueue();
+  }, [state.clips, transcription.cloudEnabled, enqueueCloudTranscribe, pumpCloudQueue]);
+
+  /**
+   * Manually (re)run cloud transcription for one clip — retry affordance for
+   * error rows, and a general re-run trigger regardless of the auto-queue
+   * rules above (works even while cloudEnabled is off, on a clip that
+   * already has a cloudTranscript, etc.). Re-running REPLACES the existing
+   * cloudTranscript (see runCloudTranscribeItem). A clipId with no
+   * File/dossier (already removed) is a harmless no-op once its turn comes.
+   */
+  const cloudTranscribeClip = useCallback(
+    (clipId: string) => {
+      enqueueCloudTranscribe(clipId, { force: true });
+    },
+    [enqueueCloudTranscribe],
+  );
 
   return {
     state,

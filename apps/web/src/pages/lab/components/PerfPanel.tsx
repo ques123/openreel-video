@@ -13,6 +13,27 @@ function fmtGB(bytes: number): string {
   return `${(bytes / 1e9).toFixed(1)}GB`;
 }
 
+/** 45 -> "<1m", 185 -> "3m", 5410 -> "1h 30m" — billed-seconds at a glance. */
+function fmtBilledHM(totalSeconds: number): string {
+  if (totalSeconds < 60) return "<1m";
+  const mins = Math.round(totalSeconds / 60);
+  if (mins < 60) return `${mins}m`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return `${h}h ${m}m`;
+}
+
+/**
+ * Plain (never tilde-estimated) dollar figure at 4 decimals. Cloud
+ * transcription cost is exact billed-seconds × flat-rate math (no token
+ * estimate involved, unlike the vision costCellFor path above) — worth more
+ * precision than fmtUSD's 2 decimals since a single short clip can bill
+ * fractions of a cent.
+ */
+function fmtExactUSD(n: number): string {
+  return `$${n.toFixed(4)}`;
+}
+
 /** Renders a costCellFor() result — dimmed (opacity-60) for every estimated ("~") cell. */
 function CostTd({ cell }: { cell: CostCell }) {
   return (
@@ -120,6 +141,34 @@ export function PerfPanel({ clips, models, storage }: PerfPanelProps) {
   const computeTitle =
     "summed per-clip compute time — bulk runs process 3 clips concurrently, so wall-clock can be ~⅓ of this";
 
+  // Cloud TRANSCRIPTION totals — a separate ledger from cloud vision above:
+  // one row per distinct model (only whisper-large-v3-turbo via Groq today,
+  // but future providers coexist the same way cloudRunArchive's models do).
+  // Every field here is exact billed-seconds × flat-rate math, never a token
+  // estimate, so there's no costCellFor/estimated-vs-actual distinction to
+  // draw — just sum and display.
+  const transcriptionUsage = new Map<
+    string,
+    { model: string; clips: number; billedSeconds: number; costUSD: number; ms: number }
+  >();
+  for (const c of clips) {
+    const ct = c.dossier?.cloudTranscript;
+    if (!ct) continue;
+    const row = transcriptionUsage.get(ct.model) ?? {
+      model: ct.model,
+      clips: 0,
+      billedSeconds: 0,
+      costUSD: 0,
+      ms: 0,
+    };
+    row.clips += 1;
+    row.billedSeconds += ct.billedSeconds;
+    row.costUSD += ct.costUSD;
+    row.ms += ct.ms;
+    transcriptionUsage.set(ct.model, row);
+  }
+  const transcriptionCostTitle = "billed seconds × $0.04/hr — exact, not an estimate";
+
   return (
     <div className="bg-background-secondary border border-border rounded-lg p-3">
       <h3 className="text-sm font-semibold text-text-primary mb-2">Performance</h3>
@@ -226,6 +275,42 @@ export function PerfPanel({ clips, models, storage }: PerfPanelProps) {
                     </tr>
                   );
                 })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {transcriptionUsage.size > 0 && (
+        <div className="mb-3">
+          <p className="text-xs font-semibold text-text-primary mb-1">Transcription totals</p>
+          <table className="w-full text-[10px] font-mono">
+            <thead>
+              <tr className="text-text-secondary text-left">
+                <th className="font-normal pr-2">model</th>
+                <th className="font-normal pr-2 text-right">clips</th>
+                <th className="font-normal pr-2 text-right">billed</th>
+                <th className="font-normal pr-2 text-right" title={transcriptionCostTitle}>
+                  $
+                </th>
+                <th className="font-normal text-right" title={computeTitle}>
+                  compute
+                </th>
+              </tr>
+            </thead>
+            <tbody className="text-text-primary">
+              {[...transcriptionUsage.values()]
+                .sort((a, b) => a.model.localeCompare(b.model))
+                .map((row) => (
+                  <tr key={row.model}>
+                    <td className="pr-2">{row.model}</td>
+                    <td className="pr-2 text-right">{row.clips}</td>
+                    <td className="pr-2 text-right">{fmtBilledHM(row.billedSeconds)}</td>
+                    <td className="pr-2 text-right" title={transcriptionCostTitle}>
+                      {fmtExactUSD(row.costUSD)}
+                    </td>
+                    <td className="text-right">{fmtDur(row.ms)}</td>
+                  </tr>
+                ))}
             </tbody>
           </table>
         </div>
