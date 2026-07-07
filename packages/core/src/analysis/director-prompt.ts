@@ -48,6 +48,15 @@ export interface PromptSources {
    * moments stay visible and the model can still pull any shot.
    */
   promptMode?: "full" | "candidates";
+  /**
+   * Which transcript variant the prompt carries when `transcript` is on
+   * (mirrors the caption model pins above). "local" (default) = the
+   * always-computed in-browser whisper pass (dossier.transcript). "cloud" =
+   * the opt-in Groq run (dossier.cloudTranscript) — clips lacking a cloud
+   * run fall back to local, per clip, and the prompt names the source
+   * either way so the conversation inspector shows exactly what was sent.
+   */
+  transcriptSource?: "local" | "cloud";
 }
 
 export const DEFAULT_PROMPT_SOURCES: PromptSources = {
