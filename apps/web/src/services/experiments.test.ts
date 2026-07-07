@@ -135,6 +135,37 @@ describe("experimentCostLine — cached tokens", () => {
   });
 });
 
+describe("experimentCostLine — actual (billed) director cost", () => {
+  const base = {
+    model: "qwen/qwen3.7-max",
+    promptTokens: 1_000_000,
+    completionTokens: 10_000,
+  };
+
+  it("prefers the exact billed costUSD (plain $, no tilde) when complete", () => {
+    const line = experimentCostLine({ ...base, costUSD: 0.204 });
+    expect(line).toContain("$0.20");
+    expect(line).not.toContain("≈$0.20");
+    // The exact figure wins even though it differs from the floor-rate
+    // estimate — this is the whole point (OpenRouter can bill above it).
+    const estimate = estimateCostUSD(base.model, base.promptTokens, base.completionTokens)!;
+    expect(line).not.toContain(`≈${fmtUSD(estimate)}`);
+  });
+
+  it("falls back to the ≈ token×rate estimate when costUSDIncomplete is set", () => {
+    const line = experimentCostLine({ ...base, costUSD: 0.05, costUSDIncomplete: true });
+    const estimate = estimateCostUSD(base.model, base.promptTokens, base.completionTokens)!;
+    expect(line).toContain(`≈${fmtUSD(estimate)}`);
+    expect(line).not.toContain("$0.05");
+  });
+
+  it("falls back to the ≈ estimate when costUSD was never recorded (OpenAI models, legacy runs)", () => {
+    const line = experimentCostLine(base);
+    const estimate = estimateCostUSD(base.model, base.promptTokens, base.completionTokens)!;
+    expect(line).toContain(`≈${fmtUSD(estimate)}`);
+  });
+});
+
 describe("experimentCostLine — aux usage", () => {
   it("appends aux tokens and cost when present", () => {
     const aux = [

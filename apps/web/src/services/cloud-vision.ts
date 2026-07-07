@@ -10,7 +10,13 @@
  */
 
 import type { CloudFrame, DenseCaption } from "@openreel/core";
-import { apiBaseForModel, DIRECTOR_MODEL, parseChatUsage, type RawChatUsage } from "./openai-proxy";
+import {
+  apiBaseForModel,
+  DIRECTOR_MODEL,
+  parseChatUsage,
+  providerForModel,
+  type RawChatUsage,
+} from "./openai-proxy";
 
 const BATCH_SIZE = 16;
 /** Concurrent batch requests: ~6x wall-clock at identical cost. */
@@ -69,6 +75,59 @@ interface BatchUsage {
   promptTokens: number;
   completionTokens: number;
   cachedTokens: number;
+  /**
+   * Exact USD billed for this attempt; null when the provider didn't report
+   * one (see ChatUsage.costUSD). Optional (not just nullable), matching
+   * ChatUsage.costUSD's optionality, so a ChatUsage from parseChatUsage
+   * structurally satisfies this type without a cast; always read via
+   * `?? null` since the field itself may be entirely absent.
+   */
+  costUSD?: number | null;
+}
+
+/**
+ * OpenRouter-only additions to a captioning request body: `usage.include`
+ * captures the exact billed cost (see ChatUsage.costUSD/BatchUsage.costUSD),
+ * and `provider.sort: "price"` prefers the cheapest available provider —
+ * fallbacks still apply on errors/rate limits, so this never sacrifices
+ * availability for price. Captions are the batch cost center (unlike the
+ * director's interactive chatComplete calls in openai-proxy.ts, which skip
+ * provider.sort), so price-first routing is the right default here. OpenAI
+ * models are returned untouched: its API has no `usage`/`provider` request
+ * params. Exported as a small pure function so the body-shaping is directly
+ * unit-testable without a network stub.
+ */
+export function withOpenRouterAccounting(
+  body: Record<string, unknown>,
+  model: string,
+): Record<string, unknown> {
+  if (providerForModel(model) !== "OpenRouter") return body;
+  return { ...body, usage: { include: true }, provider: { sort: "price" } };
+}
+
+/**
+ * actualCostUSD for a run: the sum of every usage-bearing batch's billed
+ * cost (see BatchUsage.costUSD), but ONLY when every one of them reported a
+ * cost — a single unreported cost makes the total untrustworthy (the caller
+ * must fall back to the token×rate estimate instead of silently understating
+ * spend), so this returns null rather than a partial sum. Empty input (no
+ * usage-bearing batch at all) is the same "unknown" case, hence also null.
+ *
+ * Batches that failed BOTH attempts with NO usage at all (a genuine timeout/
+ * abort — see the worker loop in describeFramesCloud) never appear in
+ * `costs`: they are inherently unknowable, not just unreported, so they
+ * can't be allowed to poison completeness for the batches that DID report.
+ * Because something may still have been billed for them server-side, the
+ * true bill can only be HIGHER than whatever this returns — never lower.
+ */
+export function aggregateActualCostUSD(costs: Array<number | null>): number | null {
+  if (costs.length === 0) return null;
+  let sum = 0;
+  for (const cost of costs) {
+    if (cost === null) return null;
+    sum += cost;
+  }
+  return sum;
 }
 
 interface BatchResult extends BatchUsage {
@@ -124,14 +183,19 @@ async function describeBatch(
   const res = await fetch(`${apiBaseForModel(model)}/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model,
-      messages: [{ role: "user", content }],
-      response_format: { type: "json_object" },
-      ...(model.includes("/")
-        ? { max_tokens: maxTokens }
-        : { max_completion_tokens: maxTokens }),
-    }),
+    body: JSON.stringify(
+      withOpenRouterAccounting(
+        {
+          model,
+          messages: [{ role: "user", content }],
+          response_format: { type: "json_object" },
+          ...(model.includes("/")
+            ? { max_tokens: maxTokens }
+            : { max_completion_tokens: maxTokens }),
+        },
+        model,
+      ),
+    ),
     signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
   });
   if (!res.ok) {
@@ -173,6 +237,7 @@ async function describeBatch(
     promptTokens: usage?.promptTokens ?? 0,
     completionTokens: usage?.completionTokens ?? 0,
     cachedTokens: usage?.cachedTokens ?? 0,
+    costUSD: usage?.costUSD ?? null,
   };
 }
 
@@ -192,6 +257,14 @@ export interface CloudVisionRun {
   completionTokens: number;
   /** Prompt tokens served from the provider's cache (subset of promptTokens). */
   cachedTokens: number;
+  /**
+   * Exact USD billed for the run, summed across every usage-bearing batch —
+   * null when that sum isn't fully known (some/all batches didn't report a
+   * cost, e.g. an OpenAI caption model, or no batch reported usage at all).
+   * See aggregateActualCostUSD. Callers MUST fall back to the token×rate
+   * estimate when this is null rather than treating it as $0.
+   */
+  actualCostUSD: number | null;
 }
 
 export async function describeFramesCloud(
@@ -207,10 +280,13 @@ export async function describeFramesCloud(
   let completionTokens = 0;
   let cachedTokens = 0;
   let framesDone = 0;
+  /** One entry per usage-bearing batch attempt — see aggregateActualCostUSD. */
+  const batchCosts: Array<number | null> = [];
   const absorbUsage = (u: BatchUsage) => {
     promptTokens += u.promptTokens;
     completionTokens += u.completionTokens;
     cachedTokens += u.cachedTokens;
+    batchCosts.push(u.costUSD ?? null);
   };
   const absorb = (b: BatchResult) => {
     captions.push(...b.captions);
@@ -266,5 +342,6 @@ export async function describeFramesCloud(
     promptTokens,
     completionTokens,
     cachedTokens,
+    actualCostUSD: aggregateActualCostUSD(batchCosts),
   };
 }

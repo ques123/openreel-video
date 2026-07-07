@@ -7,7 +7,7 @@
 
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { CloudFrame } from "@openreel/core";
-import { describeFramesCloud } from "./cloud-vision";
+import { aggregateActualCostUSD, describeFramesCloud, withOpenRouterAccounting } from "./cloud-vision";
 
 // jsdom (unlike every browser this app supports) hasn't implemented
 // AbortSignal.any yet — shim it so the composed watchdog path is exercised.
@@ -41,6 +41,8 @@ interface SentRequest {
     messages: { content: { type: string; image_url?: { url: string } }[] }[];
     max_completion_tokens?: number;
     max_tokens?: number;
+    usage?: { include: boolean };
+    provider?: { sort: string };
   };
   signal: AbortSignal | null;
 }
@@ -48,7 +50,7 @@ interface SentRequest {
 /** Captions reply covering `count` images, plus a wire-format usage block. */
 const okReply = (
   count: number,
-  usage: { in: number; out: number; cached?: number },
+  usage: { in: number; out: number; cached?: number; cost?: number },
   text = (i: number) => `caption ${i}`,
 ) => ({
   choices: [
@@ -64,16 +66,18 @@ const okReply = (
     prompt_tokens: usage.in,
     completion_tokens: usage.out,
     prompt_tokens_details: { cached_tokens: usage.cached ?? 0 },
+    ...(usage.cost !== undefined ? { cost: usage.cost } : {}),
   },
 });
 
 /** A billed response whose content is NOT the strict JSON we demanded. */
-const badJsonReply = (usage: { in: number; out: number; cached?: number }) => ({
+const badJsonReply = (usage: { in: number; out: number; cached?: number; cost?: number }) => ({
   choices: [{ message: { content: "sorry, here are your captions: 1) a road" } }],
   usage: {
     prompt_tokens: usage.in,
     completion_tokens: usage.out,
     prompt_tokens_details: { cached_tokens: usage.cached ?? 0 },
+    ...(usage.cost !== undefined ? { cost: usage.cost } : {}),
   },
 });
 
@@ -132,6 +136,19 @@ describe("describeFramesCloud request shaping", () => {
     expect(sent[0].url).toContain("/api/proxy/openrouter/");
     expect(sent[0].body.max_tokens).toBe(4 * 200);
     expect(sent[0].body.max_completion_tokens).toBeUndefined();
+    // withOpenRouterAccounting: exact-cost capture + price-first routing —
+    // captions are the batch cost center, unlike the director's interactive
+    // chatComplete calls (see openai-proxy.test.ts, which asserts no
+    // provider.sort there).
+    expect(sent[0].body.usage).toEqual({ include: true });
+    expect(sent[0].body.provider).toEqual({ sort: "price" });
+  });
+
+  it("does NOT add usage/provider fields for an OpenAI (bare) model id", async () => {
+    const sent = stubFetch((n) => okReply(n, { in: 10, out: 5 }));
+    await describeFramesCloud(makeFrames(4), undefined, undefined, "gpt-5.2");
+    expect(sent[0].body.usage).toBeUndefined();
+    expect(sent[0].body.provider).toBeUndefined();
   });
 
   it("always arms a watchdog signal, composed with the caller's when given", async () => {
@@ -187,5 +204,78 @@ describe("describeFramesCloud cost accounting", () => {
     const run = await describeFramesCloud(makeFrames(3), undefined, undefined, "gpt-5.2");
     expect(run.promptTokens).toBe(500);
     expect(run.cachedTokens).toBe(450);
+  });
+
+  it("sums actualCostUSD when EVERY batch reports one (all-reported case)", async () => {
+    // 20 frames -> 2 batches (16 + 4), both report a cost.
+    stubFetch((n, first) =>
+      first === "f16"
+        ? okReply(n, { in: 111, out: 22, cost: 0.00004 })
+        : okReply(n, { in: 1000, out: 400, cost: 0.0002 }),
+    );
+    const run = await describeFramesCloud(makeFrames(20), undefined, undefined, "qwen/qwen3-vl-235b-a22b-instruct");
+    expect(run.actualCostUSD).toBeCloseTo(0.0002 + 0.00004, 10);
+  });
+
+  it("falls back to null when ONE batch's cost is unreported (partial case)", async () => {
+    stubFetch((n, first) =>
+      first === "f16"
+        ? okReply(n, { in: 111, out: 22 }) // no cost — e.g. an OpenRouter reply that omitted it
+        : okReply(n, { in: 1000, out: 400, cost: 0.0002 }),
+    );
+    const run = await describeFramesCloud(makeFrames(20), undefined, undefined, "qwen/qwen3-vl-235b-a22b-instruct");
+    expect(run.actualCostUSD).toBeNull();
+  });
+
+  it("is null when NO batch reports a cost (e.g. an OpenAI caption model)", async () => {
+    stubFetch((n) => okReply(n, { in: 500, out: 100 }));
+    const run = await describeFramesCloud(makeFrames(3), undefined, undefined, "gpt-5.2");
+    expect(run.actualCostUSD).toBeNull();
+  });
+
+  it("still counts a billed-but-unusable batch's cost toward actualCostUSD", async () => {
+    // Single 4-frame batch: fails strict-JSON on the first attempt (billed,
+    // reports a cost) then succeeds on the retry (billed, reports a cost).
+    stubFetch((n, _first, call) =>
+      call === 0
+        ? badJsonReply({ in: 50, out: 10, cost: 0.00001 })
+        : okReply(n, { in: 60, out: 30, cost: 0.00002 }),
+    );
+    const run = await describeFramesCloud(makeFrames(4), undefined, undefined, "qwen/qwen3-vl-235b-a22b-instruct");
+    expect(run.actualCostUSD).toBeCloseTo(0.00001 + 0.00002, 10);
+  });
+});
+
+describe("withOpenRouterAccounting", () => {
+  it("adds usage.include and provider.sort for an OpenRouter (slash) model id", () => {
+    const body = withOpenRouterAccounting({ model: "qwen/qwen3-vl-235b-a22b-instruct" }, "qwen/qwen3-vl-235b-a22b-instruct");
+    expect(body).toEqual({
+      model: "qwen/qwen3-vl-235b-a22b-instruct",
+      usage: { include: true },
+      provider: { sort: "price" },
+    });
+  });
+
+  it("returns the body untouched for an OpenAI (bare) model id", () => {
+    const original = { model: "gpt-5.2", max_completion_tokens: 200 };
+    const body = withOpenRouterAccounting(original, "gpt-5.2");
+    expect(body).toBe(original); // same reference — genuinely untouched
+    expect(body).not.toHaveProperty("usage");
+    expect(body).not.toHaveProperty("provider");
+  });
+});
+
+describe("aggregateActualCostUSD", () => {
+  it("sums every cost when all batches reported one", () => {
+    expect(aggregateActualCostUSD([0.0002, 0.00004, 0.0001])).toBeCloseTo(0.00034, 10);
+  });
+
+  it("returns null when some (but not all) batches reported a cost", () => {
+    expect(aggregateActualCostUSD([0.0002, null, 0.0001])).toBeNull();
+  });
+
+  it("returns null when no batch reported a cost (including the empty/vacuous case)", () => {
+    expect(aggregateActualCostUSD([null, null])).toBeNull();
+    expect(aggregateActualCostUSD([])).toBeNull();
   });
 });

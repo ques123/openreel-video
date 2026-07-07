@@ -266,6 +266,17 @@ export function useDirector(deps: UseDirectorDeps) {
                 exp.usage.completionTokens += usage.completionTokens;
                 exp.usage.cachedTokens = (exp.usage.cachedTokens ?? 0) + usage.cachedTokens;
                 exp.usage.calls += 1;
+                // All-or-null completeness (see CloudRunMeta.actualCostUSD):
+                // an OpenAI director model (gpt-5.x) never reports a cost, so
+                // this simply never completes for those runs — expected, not
+                // a failure, since OpenAI's token×rate price is already
+                // exact. A qwen/OpenRouter director model's run stays
+                // complete as long as every response reported one.
+                if (usage.costUSD !== undefined && usage.costUSD !== null) {
+                  exp.usage.costUSD = (exp.usage.costUSD ?? 0) + usage.costUSD;
+                } else {
+                  exp.usage.costUSDIncomplete = true;
+                }
               },
             ),
           search: async (query, topK) => searchShots(await embedQuery(query), dossiers, topK),

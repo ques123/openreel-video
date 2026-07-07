@@ -1,4 +1,4 @@
-import { estimateCostUSD, fmtUSD } from "../../../services/model-pricing";
+import { costCellFor, estimateCostUSD, type CostCell } from "../../../services/model-pricing";
 import type { LabClip, ModelStatus, StorageStatus } from "../use-perception-lab";
 import { StorageBreakdownSection } from "./StorageBreakdownSection";
 
@@ -11,6 +11,15 @@ interface PerfPanelProps {
 /** 5_400_000_000 -> "5.4GB". */
 function fmtGB(bytes: number): string {
   return `${(bytes / 1e9).toFixed(1)}GB`;
+}
+
+/** Renders a costCellFor() result — dimmed (opacity-60) for every estimated ("~") cell. */
+function CostTd({ cell }: { cell: CostCell }) {
+  return (
+    <td className={`pr-2 text-right${cell.estimated ? " opacity-60" : ""}`} title={cell.title}>
+      {cell.text}
+    </td>
+  );
 }
 
 function ModelRow({ name, status }: { name: string; status: ModelStatus }) {
@@ -39,7 +48,18 @@ export function PerfPanel({ clips, models, storage }: PerfPanelProps) {
   // the local caption pass — the "what has captioning cost me" ledger.
   const usage = new Map<
     string,
-    { model: string; clips: number; frames: number; inTok: number; outTok: number; ms: number }
+    {
+      model: string;
+      clips: number;
+      frames: number;
+      inTok: number;
+      outTok: number;
+      ms: number;
+      /** Sum of actualCostUSD across every token-bearing entry that reported one. */
+      actualCostUSD: number;
+      /** False as soon as ANY token-bearing entry in the row lacked actualCostUSD. */
+      actualCostComplete: boolean;
+    }
   >();
   let localMs = 0;
   let localFrames = 0;
@@ -65,18 +85,30 @@ export function PerfPanel({ clips, models, storage }: PerfPanelProps) {
         inTok: 0,
         outTok: 0,
         ms: 0,
+        actualCostUSD: 0,
+        actualCostComplete: true,
       };
       row.clips += 1;
       row.frames += e.meta.framesSent;
       row.inTok += e.meta.promptTokens;
       row.outTok += e.meta.completionTokens;
       row.ms += e.meta.ms;
-      usage.set(key, row);
-      if (e.meta.promptTokens + e.meta.completionTokens > 0) {
+      const tokenBearing = e.meta.promptTokens + e.meta.completionTokens > 0;
+      if (tokenBearing) {
         measuredFrames += e.meta.framesSent;
         measuredIn += e.meta.promptTokens;
         measuredOut += e.meta.completionTokens;
+        // actualCostUSD is only ever set on a token-bearing archive entry
+        // (see use-perception-lab.ts) — an entry that lacks it here means
+        // the run's cost wasn't fully known, so the WHOLE row must fall back
+        // to the estimate rather than under-report a partial sum.
+        if (e.meta.actualCostUSD !== undefined) {
+          row.actualCostUSD += e.meta.actualCostUSD;
+        } else {
+          row.actualCostComplete = false;
+        }
       }
+      usage.set(key, row);
     }
   }
   const inPerFrame = measuredFrames > 0 ? measuredIn / measuredFrames : null;
@@ -85,6 +117,8 @@ export function PerfPanel({ clips, models, storage }: PerfPanelProps) {
   const fmtDur = (ms: number) =>
     ms >= 60_000 ? `${(ms / 60_000).toFixed(1)}min` : `${(ms / 1000).toFixed(1)}s`;
   const estimateTitle = "estimated from frame count — tokens were not recorded for early runs";
+  const computeTitle =
+    "summed per-clip compute time — bulk runs process 3 clips concurrently, so wall-clock can be ~⅓ of this";
 
   return (
     <div className="bg-background-secondary border border-border rounded-lg p-3">
@@ -113,7 +147,9 @@ export function PerfPanel({ clips, models, storage }: PerfPanelProps) {
                 <th className="font-normal pr-2 text-right">in</th>
                 <th className="font-normal pr-2 text-right">out</th>
                 <th className="font-normal pr-2 text-right">≈$</th>
-                <th className="font-normal text-right">time</th>
+                <th className="font-normal text-right" title={computeTitle}>
+                  compute
+                </th>
               </tr>
             </thead>
             <tbody className="text-text-primary">
@@ -136,6 +172,12 @@ export function PerfPanel({ clips, models, storage }: PerfPanelProps) {
 
                   if (!preTracking) {
                     const cost = estimateCostUSD(row.model, row.inTok, row.outTok);
+                    const costCell = costCellFor(
+                      row.model,
+                      row.actualCostComplete ? row.actualCostUSD : null,
+                      cost,
+                      false,
+                    );
                     return (
                       <tr key={key}>
                         <td className="pr-2">{key.replace("gpt-", "")}</td>
@@ -143,7 +185,7 @@ export function PerfPanel({ clips, models, storage }: PerfPanelProps) {
                         <td className="pr-2 text-right">{row.frames}</td>
                         <td className="pr-2 text-right">{fmtTok(row.inTok)}</td>
                         <td className="pr-2 text-right">{fmtTok(row.outTok)}</td>
-                        <td className="pr-2 text-right">{cost !== null ? fmtUSD(cost) : "—"}</td>
+                        <CostTd cell={costCell} />
                         <td className="text-right">{timeCell}</td>
                       </tr>
                     );
@@ -167,6 +209,7 @@ export function PerfPanel({ clips, models, storage }: PerfPanelProps) {
                   const estIn = Math.round(row.frames * inPerFrame);
                   const estOut = Math.round(row.frames * outPerFrame);
                   const estCost = estimateCostUSD(row.model, estIn, estOut);
+                  const preTrackingCostCell = costCellFor(row.model, null, estCost, true);
                   return (
                     <tr key={key}>
                       <td className="pr-2">{key.replace("gpt-", "")}</td>
@@ -178,9 +221,7 @@ export function PerfPanel({ clips, models, storage }: PerfPanelProps) {
                       <td className="pr-2 text-right opacity-60" title={estimateTitle}>
                         ~{fmtTok(estOut)}
                       </td>
-                      <td className="pr-2 text-right opacity-60" title={estimateTitle}>
-                        {estCost !== null ? `~${fmtUSD(estCost)}` : "—"}
-                      </td>
+                      <CostTd cell={preTrackingCostCell} />
                       <td className="text-right">{timeCell}</td>
                     </tr>
                   );

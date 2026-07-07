@@ -859,6 +859,11 @@ export function PerceptionLabPage() {
       setBulkRunning(true);
       setBulkSummary(null);
       const results: BulkClipResult[] = [];
+      // Wall-clock for the WHOLE run (guardrail confirm excluded — that's
+      // user think-time, not enhance time): BULK_CLIP_CONCURRENCY clips run
+      // concurrently, so this is well under the sum of per-clip compute the
+      // PerfPanel "compute" column shows — see clip-rollup.ts's BulkRunSummary.
+      const wallStart = performance.now();
       try {
         let next = 0;
         const worker = async () => {
@@ -889,7 +894,7 @@ export function PerceptionLabPage() {
         );
       } finally {
         setBulkRunning(false);
-        setBulkSummary(summarizeBulkRun(results));
+        setBulkSummary(summarizeBulkRun(results, Math.round(performance.now() - wallStart)));
       }
     },
     [plansFor, enhanceClip, cloudScope, cloudModel, candidatesOnly, picksByClip],

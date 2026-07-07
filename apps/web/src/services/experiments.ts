@@ -135,6 +135,25 @@ export interface DirectorExperiment {
     calls: number;
     /** Prompt tokens served from provider cache (subset of promptTokens). */
     cachedTokens?: number;
+    /**
+     * Sum of ChatUsage.costUSD across every director call in this
+     * conversation so far. Trustworthy ONLY while costUSDIncomplete is
+     * falsy — same all-or-null completeness rule as CloudRunMeta.
+     * actualCostUSD (see packages/core/src/analysis/types.ts): a value can
+     * still be sitting here after costUSDIncomplete flips true (accumulation
+     * doesn't retroactively undo), so always gate reads on that flag rather
+     * than on `costUSD !== undefined` alone.
+     */
+    costUSD?: number;
+    /**
+     * Set once any call in this conversation didn't report a cost. An
+     * OpenAI director model (gpt-5.x) NEVER reports one — its token×rate
+     * price is exact anyway — so a run on those models always ends up
+     * incomplete; a qwen/OpenRouter director model stays complete as long
+     * as every response reported one. Absent = still complete (including
+     * "no calls yet") or a legacy record that predates cost tracking.
+     */
+    costUSDIncomplete?: boolean;
   };
   /** Total LLM wall-clock across the conversation so far. */
   durationMs: number;
@@ -184,6 +203,10 @@ export interface ExperimentSummary {
   completionTokens?: number;
   /** Prompt tokens served from provider cache (subset of promptTokens). */
   cachedTokens?: number;
+  /** Exact USD billed for the director calls — see DirectorExperiment.usage.costUSD. */
+  costUSD?: number;
+  /** See DirectorExperiment.usage.costUSDIncomplete. */
+  costUSDIncomplete?: boolean;
   /** Auxiliary LLM usage billed to the run (brief suggestions, music brief). */
   auxUsage?: ModelChatUsage[];
   /** Total LLM wall-clock across the conversation so far. */
@@ -277,15 +300,24 @@ export function experimentAuxCostUSD(aux: ModelChatUsage[]): number | null {
  * runs, so it's dropped silently rather than showing "gen 0s"). Both
  * durations are labeled ("gen" for the director's LLM wall-clock, "cap" for
  * captioning) since the line carries two independent timings once both are
- * present. cachedTokens (when recorded) both discounts the director ≈$ and is
+ * present. cachedTokens (when recorded) both discounts the director $ and is
  * shown inline so cache effectiveness is visible per run; aux covers the
  * side calls (brief suggestions, music brief) so the line is the run's total.
+ *
+ * The director figure prefers the exact billed cost (costUSD, gated on
+ * costUSDIncomplete — same all-or-null rule as CloudRunMeta.actualCostUSD)
+ * over the token×rate estimate, dropping the "≈" prefix ONLY for that exact
+ * figure — caption/aux costs below are unaffected (still always estimates,
+ * still always "≈") since threading actual cost through captionStats is a
+ * separate, larger change (see PerfPanel.tsx for where that IS done).
  */
 export function experimentCostLine(s: {
   model: string;
   promptTokens?: number;
   completionTokens?: number;
   cachedTokens?: number;
+  costUSD?: number;
+  costUSDIncomplete?: boolean;
   durationMs?: number;
   captionModels?: string;
   captionStats?: ExperimentCaptionStats;
@@ -296,11 +328,14 @@ export function experimentCostLine(s: {
   const directorTok = (s.promptTokens ?? 0) + (s.completionTokens ?? 0);
   if (directorTok > 0) {
     const cached = s.cachedTokens ?? 0;
-    const dirCost = estimateCostUSD(s.model, s.promptTokens ?? 0, s.completionTokens ?? 0, cached);
+    const actualCost = !s.costUSDIncomplete && s.costUSD !== undefined ? s.costUSD : null;
+    const estCost = estimateCostUSD(s.model, s.promptTokens ?? 0, s.completionTokens ?? 0, cached);
+    const dirCost = actualCost ?? estCost;
+    const prefix = actualCost !== null ? "" : "≈";
     parts.push(
       `${fmtTokens(directorTok)} tok` +
         (cached > 0 ? ` (${fmtTokens(cached)} cached)` : "") +
-        (dirCost !== null ? ` ≈${fmtUSD(dirCost)}` : ""),
+        (dirCost !== null ? ` ${prefix}${fmtUSD(dirCost)}` : ""),
     );
   }
   if (s.durationMs) parts.push(`gen ${fmtDurationMs(s.durationMs)}`);
@@ -360,6 +395,10 @@ function summarize(exp: DirectorExperiment, prev?: ExperimentSummary): Experimen
     // Absent-key convention (matches briefAngle/styleId): legacy records
     // without cache/aux tracking keep their shape unchanged in the index.
     ...(exp.usage.cachedTokens !== undefined ? { cachedTokens: exp.usage.cachedTokens } : {}),
+    ...(exp.usage.costUSD !== undefined ? { costUSD: exp.usage.costUSD } : {}),
+    ...(exp.usage.costUSDIncomplete !== undefined
+      ? { costUSDIncomplete: exp.usage.costUSDIncomplete }
+      : {}),
     ...(aux.length > 0 ? { auxUsage: aux } : {}),
     durationMs: exp.durationMs,
     captionStats: exp.captionStats,
@@ -382,6 +421,10 @@ async function backfillIndex(index: ExperimentSummary[]): Promise<boolean> {
     entry.promptTokens = full.usage.promptTokens;
     entry.completionTokens = full.usage.completionTokens;
     if (full.usage.cachedTokens !== undefined) entry.cachedTokens = full.usage.cachedTokens;
+    if (full.usage.costUSD !== undefined) entry.costUSD = full.usage.costUSD;
+    if (full.usage.costUSDIncomplete !== undefined) {
+      entry.costUSDIncomplete = full.usage.costUSDIncomplete;
+    }
     const aux = experimentAuxUsage(full);
     if (aux.length > 0) entry.auxUsage = aux;
     entry.durationMs = full.durationMs;

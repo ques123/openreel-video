@@ -694,6 +694,12 @@ export function usePerceptionLab(
           // blur gate + similarity merge saved (preMergeCount vs framesSent).
           cachedTokens: run.cachedTokens,
           preMergeCount,
+          // Absent-key convention (matches cachedTokens/preMergeCount's
+          // additive rollout): only set when every usage-bearing batch in
+          // the run reported a cost (see aggregateActualCostUSD) — an
+          // incomplete run leaves this unset so display falls back to the
+          // token×rate estimate instead of persisting a partial number.
+          ...(run.actualCostUSD !== null ? { actualCostUSD: run.actualCostUSD } : {}),
         });
         await getOrchestrator().saveDossier(file, dossier);
         dispatch({ type: "cloud-done", clipId });

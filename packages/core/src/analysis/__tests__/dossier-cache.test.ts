@@ -65,6 +65,7 @@ function makeDossier(): ClipDossier {
         ms: 900,
         promptTokens: 500,
         completionTokens: 60,
+        actualCostUSD: 0.00034,
       },
       timeline: null,
     },
@@ -81,6 +82,7 @@ function makeDossier(): ClipDossier {
           ms: 900,
           promptTokens: 500,
           completionTokens: 60,
+          actualCostUSD: 0.00034,
         },
       },
     ],
@@ -122,6 +124,11 @@ describe("dossier serialization", () => {
     expect(Array.from(emb!)).toEqual(Array.from(original.shots[0].embedding!));
     expect(restored.shots[1].embedding).toBeNull();
     expect(restored.shots[0].motion).toEqual(original.shots[0].motion);
+    // actualCostUSD is additive (like cachedTokens/preMergeCount before it) —
+    // no field whitelisting in serializeDossier/deserializeDossier, so it
+    // must survive the JSON round-trip through the wholesale spread.
+    expect(restored.cloudRuns.shots?.actualCostUSD).toBe(0.00034);
+    expect(restored.cloudRunArchive[0].meta.actualCostUSD).toBe(0.00034);
   });
 
   it("produces a standalone ArrayBuffer", () => {
