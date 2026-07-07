@@ -5,6 +5,11 @@
   "description": "wizz.video auth + metered LLM gateway (Hono + SQLite, systemd). Owns provider keys; every proxied call is session-checked, quota-checked, and written to usage_events. See docs/wizz-contracts.md for the HTTP surface (WS-B builds this from the stub).",
   "type": "module",
   "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.mjs",
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.mjs --external:better-sqlite3 --external:@node-rs/argon2 && mkdir -p dist/migrations && cp src/migrations/*.sql dist/migrations/",
+    "test": "vitest",
+    "test:run": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

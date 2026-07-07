@@ -65,3 +65,9 @@ CLAUDE.md
 mobile-mockup/
 # Claude Code agent worktrees (session-local)
 .claude/worktrees/
+
+# wizz target build outputs (ship scripts)
+apps/web/dist-public/
+apps/web/dist-admin/
+services/gateway/dist/
+services/gateway/dev.db*
