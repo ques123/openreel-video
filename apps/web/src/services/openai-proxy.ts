@@ -7,6 +7,7 @@
  */
 
 import type { AssistantTurn, ChatMessage, ToolDef } from "@openreel/core";
+import { WIZZ_CATEGORY_HEADER, type UsageCategory } from "@wizz/contracts";
 
 /** Confirmed available through the abacus proxy (GET /models). */
 export const DIRECTOR_MODEL = "gpt-5.2";
@@ -25,6 +26,9 @@ export const DIRECTOR_MODELS = [
 
 export const BASE = "/api/proxy/openai";
 export const OPENROUTER_BASE = "/api/proxy/openrouter";
+
+/** Every call in this file bills the "director" quota category (see @wizz/contracts). */
+const CATEGORY: UsageCategory = "director";
 
 /**
  * Same-origin proxy base for a model id: provider-prefixed ids
@@ -120,7 +124,8 @@ export async function chatComplete(
     providerForModel(req.model) === "OpenRouter" ? { ...req, usage: { include: true } } : req;
   const res = await fetch(`${apiBaseForModel(req.model)}/chat/completions`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", [WIZZ_CATEGORY_HEADER]: CATEGORY },
+    credentials: "include",
     body: JSON.stringify(requestBody),
     signal,
   });
@@ -148,7 +153,11 @@ export async function chatComplete(
 }
 
 export async function listModels(signal?: AbortSignal): Promise<string[]> {
-  const res = await fetch(`${BASE}/models`, { signal });
+  const res = await fetch(`${BASE}/models`, {
+    credentials: "include",
+    headers: { [WIZZ_CATEGORY_HEADER]: CATEGORY },
+    signal,
+  });
   if (!res.ok) throw new Error(`OpenAI ${res.status}`);
   const data = (await res.json()) as { data?: { id: string }[] };
   return (data.data ?? []).map((m) => m.id);

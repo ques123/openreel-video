@@ -13,6 +13,14 @@ import { useProjectRecovery } from "./hooks/useProjectRecovery";
 import { useKieAIPoller } from "./hooks/useKieAIPoller";
 import { SOCIAL_MEDIA_PRESETS, type SocialMediaCategory } from "@openreel/core";
 import { TooltipProvider } from "@openreel/ui";
+import {
+  AdminShell,
+  PresetsSection,
+  SystemSection,
+  UsageSection,
+  UsersSection,
+  type AdminSection,
+} from "./admin";
 
 const EditorInterface = lazy(() =>
   import("./components/editor/EditorInterface").then((m) => ({
@@ -40,6 +48,17 @@ const PRESET_DIMENSIONS: Record<string, SocialMediaCategory> = {
   "720x1280": "instagram-stories",
   "1280x720": "youtube-video",
 };
+
+/**
+ * Hash routes that mount inside the admin shell (sidebar + content pane) —
+ * "lab" is today's PerceptionLabPage, the other four are Wave-2 stubs (see
+ * apps/web/src/admin/). Additive: every other route below is unchanged.
+ */
+const ADMIN_SECTIONS: readonly AdminSection[] = ["lab", "users", "usage", "presets", "system"];
+
+function asAdminSection(route: string): AdminSection | null {
+  return (ADMIN_SECTIONS as readonly string[]).includes(route) ? (route as AdminSection) : null;
+}
 
 function App() {
   const { activeModal, closeModal, skipWelcomeScreen } = useUIStore();
@@ -97,7 +116,7 @@ function App() {
       navigate("editor");
     } else if (route === "editor" && skipWelcomeScreen) {
       hasHandledInitialRoute.current = true;
-    } else if (["welcome", "templates", "recent", "lab"].includes(route)) {
+    } else if (["welcome", "templates", "recent", ...ADMIN_SECTIONS].includes(route)) {
       hasHandledInitialRoute.current = true;
     }
   }, [
@@ -112,7 +131,7 @@ function App() {
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
-      if (e.key === "Escape" && route !== "editor" && route !== "lab") {
+      if (e.key === "Escape" && route !== "editor" && !asAdminSection(route)) {
         navigate("editor");
       }
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
@@ -137,16 +156,28 @@ function App() {
         ? "recent"
         : undefined;
   const isSharePage = route === "share" && params.shareId;
-  const isLabPage = route === "lab";
+  const adminSection = asAdminSection(route);
 
   return (
     <TooltipProvider>
       <div className="h-screen w-screen bg-background text-text-primary overflow-hidden">
         <MobileBlocker />
-        {isLabPage ? (
-          <Suspense fallback={<LoadingSpinner message="Loading perception lab..." />}>
-            <PerceptionLabPage />
-          </Suspense>
+        {adminSection ? (
+          <AdminShell section={adminSection}>
+            {adminSection === "lab" ? (
+              <Suspense fallback={<LoadingSpinner message="Loading perception lab..." />}>
+                <PerceptionLabPage />
+              </Suspense>
+            ) : adminSection === "users" ? (
+              <UsersSection />
+            ) : adminSection === "usage" ? (
+              <UsageSection />
+            ) : adminSection === "presets" ? (
+              <PresetsSection />
+            ) : (
+              <SystemSection />
+            )}
+          </AdminShell>
         ) : isSharePage ? (
           <SharePage shareId={params.shareId!} />
         ) : showWelcome ? (

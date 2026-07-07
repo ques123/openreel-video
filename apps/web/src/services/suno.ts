@@ -15,6 +15,7 @@ import {
   type MusicBrief,
   type Storyboard,
 } from "@openreel/core";
+import { WIZZ_CATEGORY_HEADER, type UsageCategory } from "@wizz/contracts";
 import {
   BASE as OPENAI_BASE,
   parseChatUsage,
@@ -23,6 +24,10 @@ import {
 } from "./openai-proxy";
 
 export const BASE = "/api/proxy/suno";
+
+/** Generation + polling bill "music"; the brief-writer LLM call below posts to the OpenAI proxy, so it bills "director" instead (see @wizz/contracts). */
+const MUSIC_CATEGORY: UsageCategory = "music";
+const DIRECTOR_CATEGORY: UsageCategory = "director";
 
 /** Callback the sunoapi.org job posts to on completion (unused client-side; we poll). */
 const CALLBACK_URL = "https://openreel.pbrain.dev/api/suno-callback";
@@ -86,7 +91,8 @@ function toSunoTrack(raw: Record<string, unknown>): SunoTrack {
 export async function startMusicGeneration(brief: MusicBrief): Promise<string> {
   const res = await fetch(`${BASE}/generate`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", [WIZZ_CATEGORY_HEADER]: MUSIC_CATEGORY },
+    credentials: "include",
     body: JSON.stringify({
       customMode: true,
       instrumental: true,
@@ -118,7 +124,10 @@ export interface MusicTaskResult {
 
 /** Poll a generation task. Two track variations land once status is "ready". */
 export async function pollMusicTask(taskId: string): Promise<MusicTaskResult> {
-  const res = await fetch(`${BASE}/generate/record-info?taskId=${encodeURIComponent(taskId)}`);
+  const res = await fetch(`${BASE}/generate/record-info?taskId=${encodeURIComponent(taskId)}`, {
+    credentials: "include",
+    headers: { [WIZZ_CATEGORY_HEADER]: MUSIC_CATEGORY },
+  });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new Error(`suno record-info ${res.status}: ${body.slice(0, 300)}`);
@@ -194,7 +203,8 @@ export async function generateMusicBrief(
 
     const res = await fetch(`${OPENAI_BASE}/chat/completions`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", [WIZZ_CATEGORY_HEADER]: DIRECTOR_CATEGORY },
+      credentials: "include",
       body: JSON.stringify({
         model: BRIEF_MODEL,
         messages: [

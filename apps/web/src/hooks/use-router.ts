@@ -7,7 +7,13 @@ export type AppRoute =
   | "templates"
   | "recent"
   | "share"
-  | "lab";
+  | "lab"
+  // Admin shell sections (WS-C): additive, hash-routed like "lab" already
+  // was. See apps/web/src/admin/AdminShell.tsx and docs/wizz-contracts.md §0.
+  | "users"
+  | "usage"
+  | "presets"
+  | "system";
 
 export interface RouteParams {
   dimensions?: string;
@@ -47,6 +53,10 @@ function parseHash(hash: string): RouterState {
     "recent",
     "share",
     "lab",
+    "users",
+    "usage",
+    "presets",
+    "system",
   ];
 
   if (route === "share" && pathParts[1]) {

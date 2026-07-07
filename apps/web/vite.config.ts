@@ -61,16 +61,36 @@ export default defineConfig({
       "Cross-Origin-Opener-Policy": "same-origin",
       "Cross-Origin-Embedder-Policy": "require-corp",
     },
-    proxy: {
-      // Director LLM + Suno music calls: forward to the deployed nginx
-      // (tailnet), which injects the OpenAI/Suno keys server-side — no key
-      // on this machine. One entry covers every /api/proxy/* sub-path
-      // (openai, suno, ...) so new proxied services need no vite.config change.
-      "/api/proxy": {
-        target: "https://openreel.pbrain.dev",
-        changeOrigin: true,
-      },
-    },
+    // Two dev-proxy modes (see docs/wizz-contracts.md §0/§4):
+    //   1. Default (VITE_DEV_GATEWAY unset) — pre-gateway dev: only
+    //      /api/proxy/* (director LLM + cloud vision + Groq STT + Suno
+    //      music) forwards, straight to the deployed nginx on abacus
+    //      (tailnet), which injects the OpenAI/OpenRouter/Groq/Suno keys
+    //      server-side — no key ever exists on this machine. The newer
+    //      /api/auth|preset|quota|telemetry|admin/* routes are NOT proxied
+    //      in this mode (there's no gateway to answer them yet); calls to
+    //      those fall through to this dev server's own SPA fallback, which
+    //      gatewayFetch (src/services/gateway.ts) maps to a clear
+    //      upstream_error instead of a cryptic JSON-parse failure.
+    //   2. VITE_DEV_GATEWAY=http://127.0.0.1:8792 (or wherever a local
+    //      services/gateway is listening) — proxy the WHOLE /api/* surface
+    //      (which covers /api/proxy/* too) to it, so auth/preset/quota/
+    //      telemetry/admin all work against a real local gateway. The
+    //      gateway injects provider keys server-side, same as abacus does
+    //      in mode 1.
+    proxy: process.env.VITE_DEV_GATEWAY
+      ? {
+          "/api": {
+            target: process.env.VITE_DEV_GATEWAY,
+            changeOrigin: true,
+          },
+        }
+      : {
+          "/api/proxy": {
+            target: "https://openreel.pbrain.dev",
+            changeOrigin: true,
+          },
+        },
   },
   preview: {
     headers: {

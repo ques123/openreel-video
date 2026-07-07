@@ -28,6 +28,7 @@
  */
 
 import type { TranscriptSegment } from "@openreel/core";
+import { WIZZ_CATEGORY_HEADER, type UsageCategory } from "@wizz/contracts";
 
 // ---------------------------------------------------------------------------
 // Config / constants
@@ -35,6 +36,9 @@ import type { TranscriptSegment } from "@openreel/core";
 
 export const GROQ_BASE = "/api/proxy/groq";
 export const GROQ_WHISPER_MODEL = "whisper-large-v3-turbo";
+
+/** Every call in this file bills the "stt" quota category (see @wizz/contracts). */
+const CATEGORY: UsageCategory = "stt";
 
 /** List price, 2026-07 (console.groq.com/pricing) — update by hand if it changes. */
 export const GROQ_WHISPER_USD_PER_HOUR = 0.04;
@@ -404,6 +408,8 @@ async function postChunk(
 ): Promise<ChunkTranscript> {
   const res = await fetch(`${GROQ_BASE}/audio/transcriptions`, {
     method: "POST",
+    headers: { [WIZZ_CATEGORY_HEADER]: CATEGORY },
+    credentials: "include",
     body: buildFormData(blob, filename, language),
     signal,
   });

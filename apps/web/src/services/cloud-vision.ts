@@ -10,6 +10,7 @@
  */
 
 import type { CloudFrame, DenseCaption } from "@openreel/core";
+import { WIZZ_CATEGORY_HEADER, type UsageCategory } from "@wizz/contracts";
 import {
   apiBaseForModel,
   DIRECTOR_MODEL,
@@ -17,6 +18,9 @@ import {
   providerForModel,
   type RawChatUsage,
 } from "./openai-proxy";
+
+/** Every call in this file bills the "caption" quota category (see @wizz/contracts). */
+const CATEGORY: UsageCategory = "caption";
 
 const BATCH_SIZE = 16;
 /** Concurrent batch requests: ~6x wall-clock at identical cost. */
@@ -182,7 +186,8 @@ async function describeBatch(
   );
   const res = await fetch(`${apiBaseForModel(model)}/chat/completions`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", [WIZZ_CATEGORY_HEADER]: CATEGORY },
+    credentials: "include",
     body: JSON.stringify(
       withOpenRouterAccounting(
         {
