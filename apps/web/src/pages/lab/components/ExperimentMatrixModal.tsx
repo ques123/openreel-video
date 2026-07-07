@@ -256,6 +256,16 @@ function chipsFor(exp: ExperimentSummary, all: ExperimentSummary[]): SettingChip
     { label: "c·timeline", value: String(s.cloudTimeline), common: uniform((e) => e.promptSources.cloudTimeline) },
     { label: "script", value: String(s.transcript), common: uniform((e) => e.promptSources.transcript) },
     {
+      // Which transcript variant fed the prompt, independent of the on/off
+      // "script" toggle above. Absent (legacy runs predating the cloud
+      // transcript toggle) defaults to "local" — the only variant that
+      // existed then — both for display and for the diff below, so an old
+      // run and an explicit local=true run compare as identical.
+      label: "transcript",
+      value: s.transcriptSource ?? "local",
+      common: uniform((e) => e.promptSources.transcriptSource ?? "local"),
+    },
+    {
       label: "mode",
       value: s.promptMode ?? "full",
       common: uniform((e) => e.promptSources.promptMode ?? "full"),

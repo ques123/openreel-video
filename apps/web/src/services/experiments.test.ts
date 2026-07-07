@@ -111,6 +111,34 @@ describe("buildExperimentsExport", () => {
   });
 });
 
+describe("promptSources.transcriptSource — recording", () => {
+  it("round-trips an explicit cloud selection through export/JSON", () => {
+    const exp = makeExperiment({
+      promptSources: {
+        localCaptions: true,
+        cloudShots: true,
+        cloudTimeline: true,
+        transcript: true,
+        transcriptSource: "cloud",
+      },
+    });
+    const payload = buildExperimentsExport([exp]);
+    const parsed = JSON.parse(JSON.stringify(payload)) as typeof payload;
+    expect(parsed.experiments[0].promptSources.transcriptSource).toBe("cloud");
+  });
+
+  it("leaves transcriptSource absent on legacy-shaped records — callers default it to local, storage does not backfill it", () => {
+    // makeExperiment's default promptSources is `{}`, the shape of a record
+    // saved before the cloud transcript toggle existed (same convention as
+    // briefAngle/styleId elsewhere in this file: absent key, not `undefined`
+    // written out explicitly).
+    const exp = makeExperiment();
+    const payload = buildExperimentsExport([exp]);
+    const parsed = JSON.parse(JSON.stringify(payload)) as typeof payload;
+    expect(parsed.experiments[0].promptSources.transcriptSource).toBeUndefined();
+  });
+});
+
 describe("experimentCostLine — cached tokens", () => {
   const base = {
     model: "gpt-5.2",

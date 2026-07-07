@@ -4,15 +4,24 @@ import {
   buildCandidatesMessage,
   buildDossierMessage,
   buildRefineMessage,
+  DEFAULT_PROMPT_SOURCES,
   dossierToPromptText,
   formatSearchResults,
   formatValidationFeedback,
+  resolveTranscript,
 } from "../director-prompt";
 import type { SearchResult } from "../retrieval";
 import type { Storyboard } from "../director-types";
 import { DEFAULT_SELECTOR_CONFIG } from "../signal-score";
 import type { SelectionResult } from "../signal-score";
-import { makeChapter, makeDossier, makePick, makeShot, makeShotScore } from "./director-fixtures";
+import {
+  makeChapter,
+  makeCloudTranscript,
+  makeDossier,
+  makePick,
+  makeShot,
+  makeShotScore,
+} from "./director-fixtures";
 
 describe("dossierToPromptText", () => {
   it("renders header, shots table and rounds times to 0.1s", () => {
@@ -33,9 +42,9 @@ describe("dossierToPromptText", () => {
     expect(partial).toContain("!! PARTIAL: analyzed only through 61.0s");
   });
 
-  it("marks empty transcripts as no speech", () => {
+  it("marks empty transcripts as no speech, labeled as the local pass", () => {
     expect(dossierToPromptText(makeDossier({ transcript: [] }))).toContain(
-      "TRANSCRIPT: (no speech detected)",
+      "TRANSCRIPT (local whisper): (no speech detected)",
     );
   });
 
@@ -179,6 +188,120 @@ describe("dossierToPromptText", () => {
     // 2026-06-24T05:42:00Z
     const text = dossierToPromptText(makeDossier({ recordedAt: 1782279720000 }));
     expect(text).toContain("recorded 2026-06-24 05:42 UTC");
+  });
+});
+
+describe("resolveTranscript", () => {
+  it("defaults to the local whisper pass when transcriptSource is unset", () => {
+    const dossier = makeDossier({ transcript: [{ t0: 0, t1: 1, text: "hi" }] });
+    const result = resolveTranscript(dossier, DEFAULT_PROMPT_SOURCES);
+    expect(result.label).toBe("local whisper");
+    expect(result.segments).toEqual([{ t0: 0, t1: 1, text: "hi" }]);
+  });
+
+  it("explicit local behaves the same as the default", () => {
+    const dossier = makeDossier({ transcript: [{ t0: 0, t1: 1, text: "hi" }] });
+    const result = resolveTranscript(dossier, { ...DEFAULT_PROMPT_SOURCES, transcriptSource: "local" });
+    expect(result.label).toBe("local whisper");
+    expect(result.segments).toEqual([{ t0: 0, t1: 1, text: "hi" }]);
+  });
+
+  it("selects the cloud transcript and labels it with the provider model", () => {
+    const dossier = makeDossier({
+      transcript: [{ t0: 0, t1: 1, text: "local line" }],
+      cloudTranscript: makeCloudTranscript({
+        model: "whisper-large-v3-turbo",
+        segments: [{ t0: 0, t1: 1, text: "cloud line" }],
+      }),
+    });
+    const result = resolveTranscript(dossier, { ...DEFAULT_PROMPT_SOURCES, transcriptSource: "cloud" });
+    expect(result.label).toBe("cloud whisper-large-v3-turbo");
+    expect(result.segments).toEqual([{ t0: 0, t1: 1, text: "cloud line" }]);
+  });
+
+  it("falls back to local, labeled as a fallback, when this clip has no cloud run", () => {
+    const dossier = makeDossier({ transcript: [{ t0: 0, t1: 1, text: "local line" }] });
+    const result = resolveTranscript(dossier, { ...DEFAULT_PROMPT_SOURCES, transcriptSource: "cloud" });
+    expect(result.label).toBe("local whisper (cloud not run for this clip)");
+    expect(result.segments).toEqual([{ t0: 0, t1: 1, text: "local line" }]);
+  });
+
+  it("keeps an empty cloud run as a cloud hit instead of silently falling back to local", () => {
+    const dossier = makeDossier({
+      transcript: [{ t0: 0, t1: 1, text: "local line" }],
+      cloudTranscript: makeCloudTranscript({ model: "whisper-large-v3-turbo", segments: [] }),
+    });
+    const result = resolveTranscript(dossier, { ...DEFAULT_PROMPT_SOURCES, transcriptSource: "cloud" });
+    expect(result.label).toBe("cloud whisper-large-v3-turbo");
+    expect(result.segments).toEqual([]);
+  });
+});
+
+describe("dossierToPromptText transcript source labeling", () => {
+  it("labels the default (unset transcriptSource) transcript as local whisper", () => {
+    const text = dossierToPromptText(
+      makeDossier({ transcript: [{ t0: 0, t1: 1, text: "hello" }] }),
+    );
+    expect(text).toContain("TRANSCRIPT (local whisper):");
+    expect(text).toContain("hello");
+  });
+
+  it("uses the cloud transcript and names its model when transcriptSource is cloud", () => {
+    const dossier = makeDossier({
+      transcript: [{ t0: 0, t1: 1, text: "local line" }],
+      cloudTranscript: makeCloudTranscript({
+        model: "whisper-large-v3-turbo",
+        segments: [{ t0: 0, t1: 1, text: "cloud line" }],
+      }),
+    });
+    const text = dossierToPromptText(dossier, {
+      sources: { ...DEFAULT_PROMPT_SOURCES, transcriptSource: "cloud" },
+    });
+    expect(text).toContain("TRANSCRIPT (cloud whisper-large-v3-turbo):");
+    expect(text).toContain("cloud line");
+    expect(text).not.toContain("local line");
+  });
+
+  it("falls back to local per clip and names the fallback when this clip has no cloud run", () => {
+    const dossier = makeDossier({ transcript: [{ t0: 0, t1: 1, text: "local only" }] });
+    const text = dossierToPromptText(dossier, {
+      sources: { ...DEFAULT_PROMPT_SOURCES, transcriptSource: "cloud" },
+    });
+    expect(text).toContain("TRANSCRIPT (local whisper (cloud not run for this clip)):");
+    expect(text).toContain("local only");
+  });
+
+  it("renders an empty cloud run as a cloud no-speech hit, not a local fallback", () => {
+    const dossier = makeDossier({
+      transcript: [{ t0: 0, t1: 1, text: "should not appear" }],
+      cloudTranscript: makeCloudTranscript({ model: "whisper-large-v3-turbo", segments: [] }),
+    });
+    const text = dossierToPromptText(dossier, {
+      sources: { ...DEFAULT_PROMPT_SOURCES, transcriptSource: "cloud" },
+    });
+    expect(text).toContain("TRANSCRIPT (cloud whisper-large-v3-turbo): (no speech detected)");
+    expect(text).not.toContain("should not appear");
+  });
+
+  it("ignores transcriptSource when transcript is withheld", () => {
+    const dossier = makeDossier({
+      cloudTranscript: makeCloudTranscript({
+        model: "whisper-large-v3-turbo",
+        segments: [{ t0: 0, t1: 1, text: "cloud line" }],
+      }),
+    });
+    const text = dossierToPromptText(dossier, {
+      sources: {
+        localCaptions: true,
+        cloudShots: true,
+        cloudTimeline: true,
+        transcript: false,
+        transcriptSource: "cloud",
+      },
+    });
+    expect(text).toContain("TRANSCRIPT: (withheld for this run — work from the visuals)");
+    expect(text).not.toContain("cloud line");
+    expect(text).not.toContain("cloud whisper-large-v3-turbo");
   });
 });
 
@@ -394,5 +517,130 @@ describe("buildCandidatesMessage", () => {
     expect(text).not.toContain("hello there");
     const withheldCount = text.split("withheld for this run").length - 1;
     expect(withheldCount).toBe(2);
+  });
+});
+
+describe("buildCandidatesMessage transcript source labeling", () => {
+  function soloSelection(clipId: string): SelectionResult {
+    return {
+      config: DEFAULT_SELECTOR_CONFIG,
+      chapters: [makeChapter({ index: 0, clipIds: [clipId], startedAt: 1000, label: "ch 0" })],
+      scores: [makeShotScore({ clipId, shotIndex: 0, gated: false })],
+      picks: [makePick({ clipId, shotIndex: 0, chapterIndex: 0, rank: 1 })],
+    };
+  }
+
+  it("labels the bottom TRANSCRIPTS section as local by default", () => {
+    const dossier = makeDossier({
+      clipId: "clip-a",
+      recordedAt: 1000,
+      shots: [makeShot(0, 0, 10, { motion: 5 })],
+      transcript: [{ t0: 1, t1: 3, text: "local speech" }],
+    });
+    const text = buildCandidatesMessage([dossier], soloSelection("clip-a"));
+    expect(text).toContain("TRANSCRIPT (local whisper):");
+    expect(text).toContain("local speech");
+  });
+
+  it("uses the labeled cloud transcript in both the pick preview and the TRANSCRIPTS section", () => {
+    const dossier = makeDossier({
+      clipId: "clip-a",
+      recordedAt: 1000,
+      shots: [makeShot(0, 0, 10, { motion: 5 })],
+      transcript: [{ t0: 1, t1: 3, text: "local speech" }],
+      cloudTranscript: makeCloudTranscript({
+        model: "whisper-large-v3-turbo",
+        segments: [{ t0: 1, t1: 3, text: "cloud speech" }],
+      }),
+    });
+    const text = buildCandidatesMessage([dossier], soloSelection("clip-a"), {
+      ...DEFAULT_PROMPT_SOURCES,
+      transcriptSource: "cloud",
+    });
+    // Pick preview (inside CHAPTER 0 / CANDIDATES) shows the cloud line, not local.
+    expect(text).toContain("[1.0-3.0] cloud speech");
+    expect(text).not.toContain("local speech");
+    // Bottom TRANSCRIPTS section names the source.
+    expect(text).toContain("TRANSCRIPT (cloud whisper-large-v3-turbo):");
+  });
+
+  it("resolves per clip: one clip's cloud hit alongside another clip's local fallback", () => {
+    const withCloud = makeDossier({
+      clipId: "clip-cloud",
+      recordedAt: 1000,
+      shots: [makeShot(0, 0, 10, { motion: 5 })],
+      transcript: [{ t0: 0, t1: 1, text: "clip-cloud local" }],
+      cloudTranscript: makeCloudTranscript({
+        model: "whisper-large-v3-turbo",
+        segments: [{ t0: 0, t1: 1, text: "clip-cloud cloud" }],
+      }),
+    });
+    const withoutCloud = makeDossier({
+      clipId: "clip-local-only",
+      recordedAt: 2000,
+      shots: [makeShot(0, 0, 10, { motion: 5 })],
+      transcript: [{ t0: 0, t1: 1, text: "clip-local-only local" }],
+    });
+    const selection: SelectionResult = {
+      config: DEFAULT_SELECTOR_CONFIG,
+      chapters: [
+        makeChapter({ index: 0, clipIds: ["clip-cloud"], startedAt: 1000, label: "ch 0" }),
+        makeChapter({ index: 1, clipIds: ["clip-local-only"], startedAt: 2000, label: "ch 1" }),
+      ],
+      scores: [
+        makeShotScore({ clipId: "clip-cloud", shotIndex: 0, gated: false }),
+        makeShotScore({ clipId: "clip-local-only", shotIndex: 0, gated: false }),
+      ],
+      picks: [
+        makePick({ clipId: "clip-cloud", shotIndex: 0, chapterIndex: 0, rank: 1 }),
+        makePick({ clipId: "clip-local-only", shotIndex: 0, chapterIndex: 1, rank: 1 }),
+      ],
+    };
+    const text = buildCandidatesMessage([withCloud, withoutCloud], selection, {
+      ...DEFAULT_PROMPT_SOURCES,
+      transcriptSource: "cloud",
+    });
+    expect(text).toContain("TRANSCRIPT (cloud whisper-large-v3-turbo):");
+    expect(text).toContain("clip-cloud cloud");
+    expect(text).toContain("TRANSCRIPT (local whisper (cloud not run for this clip)):");
+    expect(text).toContain("clip-local-only local");
+  });
+
+  it("keeps an empty cloud run as a cloud hit in the TRANSCRIPTS section, not a local fallback", () => {
+    const dossier = makeDossier({
+      clipId: "clip-a",
+      recordedAt: 1000,
+      shots: [makeShot(0, 0, 10, { motion: 5 })],
+      transcript: [{ t0: 1, t1: 3, text: "should not appear" }],
+      cloudTranscript: makeCloudTranscript({ model: "whisper-large-v3-turbo", segments: [] }),
+    });
+    const text = buildCandidatesMessage([dossier], soloSelection("clip-a"), {
+      ...DEFAULT_PROMPT_SOURCES,
+      transcriptSource: "cloud",
+    });
+    expect(text).toContain("TRANSCRIPT (cloud whisper-large-v3-turbo): (no speech detected)");
+    expect(text).not.toContain("should not appear");
+  });
+
+  it("ignores transcriptSource when transcript is withheld", () => {
+    const dossier = makeDossier({
+      clipId: "clip-a",
+      recordedAt: 1000,
+      shots: [makeShot(0, 0, 10, { motion: 5 })],
+      cloudTranscript: makeCloudTranscript({
+        model: "whisper-large-v3-turbo",
+        segments: [{ t0: 1, t1: 3, text: "cloud speech" }],
+      }),
+    });
+    const text = buildCandidatesMessage([dossier], soloSelection("clip-a"), {
+      localCaptions: true,
+      cloudShots: true,
+      cloudTimeline: true,
+      transcript: false,
+      transcriptSource: "cloud",
+    });
+    expect(text).not.toContain("cloud speech");
+    const withheldCount = text.split("withheld for this run").length - 1;
+    expect(withheldCount).toBe(1);
   });
 });
