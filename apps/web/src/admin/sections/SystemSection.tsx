@@ -1,59 +1,50 @@
 /**
- * Wave-2 stub: global default quotas, the kill switch, invite codes, and
- * settings editing land here. For now this proves the gateway plumbing
- * end-to-end with one real call (adminGetHealth) — see
- * AdminProbeResult/SectionPage.
+ * System: global default quotas, footage cap, invite requirement, the kill
+ * switch, invite-code management, and health. See docs/wizz-video-plan.md
+ * §WS-C and docs/wizz-contracts.md §2.
  */
 import { useEffect, useState } from "react";
-import type { AdminHealth } from "@wizz/contracts";
-import { adminGetHealth } from "../../services/gateway";
+import type { GlobalSettings } from "@wizz/contracts";
+import { adminGetSettings } from "../../services/gateway";
 import { AdminProbeResult, type ProbeState } from "../AdminProbeResult";
 import { SectionPage } from "../SectionPage";
+import { GlobalSettingsForm } from "./system/GlobalSettingsForm";
+import { HealthCard } from "./system/HealthCard";
+import { InvitesPanel } from "./system/InvitesPanel";
+import { KillSwitchControl } from "./system/KillSwitchControl";
 
 export function SystemSection() {
-  const [state, setState] = useState<ProbeState<AdminHealth>>({ status: "loading" });
+  const [state, setState] = useState<ProbeState<GlobalSettings>>({ status: "loading" });
 
-  useEffect(() => {
-    let cancelled = false;
-    adminGetHealth()
-      .then((data) => {
-        if (!cancelled) setState({ status: "ok", data });
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) setState({ status: "error", error });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const load = () => {
+    setState((prev) => (prev.status === "ok" ? prev : { status: "loading" }));
+    adminGetSettings()
+      .then((data) => setState({ status: "ok", data }))
+      .catch((error: unknown) => setState({ status: "error", error }));
+  };
+
+  useEffect(load, []);
 
   return (
     <SectionPage
       title="System"
-      description={
-        <>
-          Wave-2 stub — global default quotas, the kill switch, invite codes, and
-          settings editing land here. This already calls{" "}
-          <code className="font-mono">GET /api/admin/health</code> through the gateway
-          service layer.
-        </>
-      }
+      description="Global default quotas, the footage cap, invite requirement, the kill switch, invite codes, and gateway health."
     >
       <AdminProbeResult
         state={state}
-        render={(data) => (
-          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 font-mono text-sm text-text-primary">
-            <dt className="text-text-secondary">ok</dt>
-            <dd>{String(data.ok)}</dd>
-            <dt className="text-text-secondary">version</dt>
-            <dd>{data.version}</dd>
-            <dt className="text-text-secondary">uptimeS</dt>
-            <dd>{data.uptimeS}</dd>
-            <dt className="text-text-secondary">killSwitch</dt>
-            <dd>{String(data.killSwitch)}</dd>
-            <dt className="text-text-secondary">db.users</dt>
-            <dd>{data.db.users}</dd>
-          </dl>
+        render={(settings) => (
+          <div className="space-y-4">
+            <KillSwitchControl settings={settings} onToggled={load} />
+            <HealthCard />
+            <div className="rounded-md border border-border bg-background-secondary p-3">
+              <h3 className="mb-2 text-xs font-semibold text-text-primary">Global settings</h3>
+              <GlobalSettingsForm settings={settings} onSaved={load} />
+            </div>
+            <div className="rounded-md border border-border bg-background-secondary p-3">
+              <h3 className="mb-2 text-xs font-semibold text-text-primary">Invite codes</h3>
+              <InvitesPanel />
+            </div>
+          </div>
         )}
       />
     </SectionPage>

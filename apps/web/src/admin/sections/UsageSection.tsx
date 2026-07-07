@@ -1,28 +1,95 @@
 /**
- * Wave-2 stub: the real Usage & Spend rollup dashboard (PerfPanel idioms,
- * exact-$ cost-truth conventions) lands here. For now this proves the
- * gateway plumbing end-to-end with one real call — see
- * AdminProbeResult/SectionPage.
+ * Usage & Spend: groupBy chips + date window + rollup table (PerfPanel
+ * exact-$ conventions), plus a "spend today / this week" stat row. See
+ * docs/wizz-video-plan.md §WS-C and docs/wizz-contracts.md §2.
  */
 import { useEffect, useState } from "react";
 import type { UsageRollupRow } from "@wizz/contracts";
-import { adminGetUsage } from "../../services/gateway";
-import { AdminProbeResult, type ProbeState } from "../AdminProbeResult";
+import { adminGetUsage, type AdminUsageGroupBy } from "../../services/gateway";
+import { AdminProbeResult, describeProbeError, type ProbeState } from "../AdminProbeResult";
 import { SectionPage } from "../SectionPage";
+import { fmtCostCell } from "../lib/format";
+import {
+  resolveDateRangePreset,
+  startOfIsoWeekYMD,
+  sumUsageRollup,
+  toggleUsageGroupBy,
+  type DateRangePreset,
+} from "../lib/usage-rollup";
+import { DateWindowPicker } from "./usage/DateWindowPicker";
+import { GroupByChips } from "./usage/GroupByChips";
+import { RollupTable } from "./usage/RollupTable";
+
+function StatTile({ label, state }: { label: string; state: ProbeState<{ rows: UsageRollupRow[] }> }) {
+  return (
+    <div className="rounded-md border border-border bg-background-secondary p-3">
+      <p className="text-[11px] uppercase tracking-wide text-text-secondary">{label}</p>
+      {state.status === "loading" && <p className="mt-1 text-lg text-text-secondary">…</p>}
+      {state.status === "error" && (
+        <p className="mt-1 text-xs text-status-error">{describeProbeError(state.error)}</p>
+      )}
+      {state.status === "ok" &&
+        (() => {
+          const totals = sumUsageRollup(state.data.rows);
+          const cost = fmtCostCell(totals.knownCostUSD, totals.costedEvents, totals.events);
+          return (
+            <>
+              <p className="mt-1 font-mono text-lg text-text-primary" title={cost.title}>
+                {cost.text}
+              </p>
+              <p className="text-[11px] text-text-secondary">{totals.events} events</p>
+            </>
+          );
+        })()}
+    </div>
+  );
+}
 
 export function UsageSection() {
-  const [state, setState] = useState<ProbeState<{ rows: UsageRollupRow[] }>>({
-    status: "loading",
-  });
+  const [groupBy, setGroupBy] = useState<AdminUsageGroupBy[]>(["day"]);
+  const [preset, setPreset] = useState<DateRangePreset>("30d");
+  const [custom, setCustom] = useState(() => resolveDateRangePreset("today", new Date()));
+  const [rowsState, setRowsState] = useState<ProbeState<{ rows: UsageRollupRow[] }>>({ status: "loading" });
+  const [todayState, setTodayState] = useState<ProbeState<{ rows: UsageRollupRow[] }>>({ status: "loading" });
+  const [weekState, setWeekState] = useState<ProbeState<{ rows: UsageRollupRow[] }>>({ status: "loading" });
+
+  const range = resolveDateRangePreset(preset, new Date(), custom);
+  const rangeReady = preset !== "custom" || Boolean(custom.from && custom.to);
+
+  useEffect(() => {
+    if (!rangeReady) return;
+    let cancelled = false;
+    setRowsState((prev) => (prev.status === "ok" ? prev : { status: "loading" }));
+    adminGetUsage({ groupBy, from: range.from, to: range.to })
+      .then((data) => {
+        if (!cancelled) setRowsState({ status: "ok", data });
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) setRowsState({ status: "error", error });
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [groupBy.join(","), range.from, range.to, rangeReady]);
 
   useEffect(() => {
     let cancelled = false;
-    adminGetUsage({ groupBy: ["day"] })
+    const now = new Date();
+    const todayYMD = now.toISOString().slice(0, 10);
+    adminGetUsage({ from: todayYMD, to: todayYMD })
       .then((data) => {
-        if (!cancelled) setState({ status: "ok", data });
+        if (!cancelled) setTodayState({ status: "ok", data });
       })
       .catch((error: unknown) => {
-        if (!cancelled) setState({ status: "error", error });
+        if (!cancelled) setTodayState({ status: "error", error });
+      });
+    adminGetUsage({ from: startOfIsoWeekYMD(now), to: todayYMD })
+      .then((data) => {
+        if (!cancelled) setWeekState({ status: "ok", data });
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) setWeekState({ status: "error", error });
       });
     return () => {
       cancelled = true;
@@ -32,22 +99,20 @@ export function UsageSection() {
   return (
     <SectionPage
       title="Usage & Spend"
-      description={
-        <>
-          Wave-2 stub — daily/provider/model rollups and exact-$ spend land here. This
-          already calls <code className="font-mono">GET /api/admin/usage</code> through
-          the gateway service layer.
-        </>
-      }
+      wide
+      description="Rollups by day/user/provider/model/category, with exact-$ where providers report it."
     >
-      <AdminProbeResult
-        state={state}
-        render={(data) => (
-          <p className="font-mono text-sm text-text-primary">
-            {data.rows.length} usage row(s) returned by the gateway.
-          </p>
-        )}
-      />
+      <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-2 md:w-96">
+        <StatTile label="Spend today" state={todayState} />
+        <StatTile label="Spend this week" state={weekState} />
+      </div>
+
+      <div className="mb-3 space-y-2">
+        <GroupByChips selected={groupBy} onToggle={(dim) => setGroupBy((prev) => toggleUsageGroupBy(prev, dim))} />
+        <DateWindowPicker preset={preset} onPresetChange={setPreset} custom={custom} onCustomChange={setCustom} />
+      </div>
+
+      <AdminProbeResult state={rowsState} render={(data) => <RollupTable rows={data.rows} groupBy={groupBy} />} />
     </SectionPage>
   );
 }
