@@ -6,6 +6,12 @@ import path from "path";
 export default defineConfig({
   plugins: [react()],
   assetsInclude: ["**/*.wasm"],
+  // The public target is SERVED AT /app/ on wizz.video (nginx location /app
+  // -> /var/www/wizz/app) — without this base, built asset URLs are
+  // root-absolute (/assets/...) and 404 into the landing-page location.
+  // Admin target serves at / on wizz.pbrain.dev; dev servers respect the
+  // same base per target (publicapp/router.ts handles the prefix).
+  base: process.env.VITE_APP_TARGET === "public" ? "/app/" : "/",
   // Force the build target to a literal so main.tsx's target branch is
   // statically dead in the other bundle (rollup then never emits the other
   // target's chunks — how "public bundle contains no lab code" is achieved,
