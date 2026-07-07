@@ -25,6 +25,31 @@ import { describeFramesCloud } from "../../services/cloud-vision";
 
 export type ClipStatus = "analyzing" | "done" | "error" | "cancelled";
 
+/**
+ * Transcription settings threaded from the page (persisted prefs + the
+ * SESSION-ONLY cloud consent toggle — audio leaving the device follows the
+ * same per-session opt-in convention as cloud vision). Local whisper ALWAYS
+ * runs; `cloudEnabled` only adds the Groq pass on top.
+ */
+export interface TranscriptionRunSettings {
+  localModel: "base" | "large-v3-turbo";
+  vad: boolean;
+  cloudEnabled: boolean;
+}
+
+export const DEFAULT_TRANSCRIPTION_SETTINGS: TranscriptionRunSettings = {
+  localModel: "base",
+  vad: true,
+  cloudEnabled: false,
+};
+
+/** Per-clip cloud transcription progress (dossier.cloudTranscript holds the result). */
+export type CloudTranscribeState =
+  | { status: "queued" }
+  | { status: "running" }
+  | { status: "done" }
+  | { status: "error"; error: string };
+
 /** What one enhanceClip run ended as (drives the bulk-run failure summary). */
 export type EnhanceOutcome = { ok: true } | { ok: false; error: string };
 
@@ -41,6 +66,8 @@ export interface LabClip {
   proxyName?: string;
   status: ClipStatus;
   error?: string;
+  /** Cloud transcription progress for this clip; absent = never attempted. */
+  cloudTranscribe?: CloudTranscribeState;
   /**
    * True when this analysis replaces a cached dossier invalidated by a
    * DOSSIER_VERSION bump — the UI labels it "re-analyzing (pipeline
@@ -426,6 +453,13 @@ export function usePerceptionLab(
    * pass one.
    */
   selectorConfig: SelectorConfig = DEFAULT_SELECTOR_CONFIG,
+  /**
+   * Transcription prefs + session cloud consent. Local model/vad apply to
+   * NEW analyses; cloudEnabled additionally queues a Groq transcription for
+   * every done clip missing dossier.cloudTranscript (integration wave wires
+   * the behavior — the default keeps existing callers/tests unchanged).
+   */
+  transcription: TranscriptionRunSettings = DEFAULT_TRANSCRIPTION_SETTINGS,
 ) {
   const [state, dispatch] = useReducer(reducer, initialState);
   const orchestratorRef = useRef<FunnelOrchestrator | null>(null);
@@ -739,6 +773,17 @@ export function usePerceptionLab(
     }
   }, [state.clips, selectorConfig]);
 
+  /**
+   * Manually (re)run cloud transcription for one clip — retry affordance for
+   * error rows and the explicit per-clip trigger. SKELETON: the integration
+   * wave replaces this with the real queue; the signature is the contract.
+   */
+  const cloudTranscribeClip = useCallback((clipId: string) => {
+    void clipId;
+    void transcription;
+    console.warn("[lab] cloudTranscribeClip not wired yet");
+  }, [transcription]);
+
   return {
     state,
     addFiles,
@@ -751,5 +796,6 @@ export function usePerceptionLab(
     removeClip,
     selection,
     storage,
+    cloudTranscribeClip,
   };
 }
