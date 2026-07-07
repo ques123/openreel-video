@@ -101,7 +101,7 @@ export function DirectorPanel({
   onStyleIdChange,
   selectionSummary,
 }: DirectorPanelProps) {
-  const { state, start, refine, cancel, reset } = director;
+  const { state, start, refine, cancel, reset, getCloudTranscriptCoverage } = director;
   const [brief, setBrief] = useState("");
   const [target, setTarget] = useState("60");
   const [model, setModel] = useState<string>(() => loadStoredDirectorModel());
@@ -142,6 +142,9 @@ export function DirectorPanel({
     musicState.startedAtMs,
     musicState.phase === "generating" || musicState.phase === "partial",
   );
+  // Loaded-clip coverage for the transcript-source select below: gates the
+  // "cloud" option and drives its "cloud (3/9 clips)" hint.
+  const transcriptCoverage = getCloudTranscriptCoverage();
 
   const requestSuggestions = () => {
     if (!ready || running || suggestLoading) return;
@@ -380,6 +383,30 @@ export function DirectorPanel({
                       </option>
                     ))}
                   </select>
+                )}
+                {key === "transcript" && sources.transcript && (
+                  <>
+                    <select
+                      className="bg-background border border-border rounded px-1 py-0 text-[10px] text-text-primary"
+                      value={sources.transcriptSource ?? "local"}
+                      disabled={!ready || running}
+                      onChange={(e) =>
+                        setSources((s) => ({
+                          ...s,
+                          transcriptSource: e.target.value === "cloud" ? "cloud" : "local",
+                        }))
+                      }
+                      title="Which transcript variant the director reads — clips without a cloud run fall back to local"
+                    >
+                      <option value="local">local whisper</option>
+                      <option value="cloud" disabled={transcriptCoverage.withCloud === 0}>
+                        cloud · whisper-large-v3-turbo
+                      </option>
+                    </select>
+                    <span className="text-text-secondary/80">
+                      cloud ({transcriptCoverage.withCloud}/{transcriptCoverage.total} clips)
+                    </span>
+                  </>
                 )}
               </span>
             );

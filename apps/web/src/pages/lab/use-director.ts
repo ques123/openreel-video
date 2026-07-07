@@ -514,7 +514,34 @@ export function useDirector(deps: UseDirectorDeps) {
   /** The persisted record of the current conversation (for export/history). */
   const getExperiment = useCallback(() => experimentRef.current, []);
 
-  return { state, start, refine, cancel, removeItem, moveItem, reset, getExperiment };
+  /**
+   * How many currently-loaded (done) clips carry a cloud transcript
+   * (dossier.cloudTranscript) vs. the total — drives the mixer's
+   * transcript-source select in DirectorPanel: the "cloud" option's
+   * enablement and its "cloud (3/9 clips)" coverage hint. Recomputed on every
+   * call rather than memoized: getDossiers() is a cheap ref snapshot (see
+   * usePerceptionLab), and this must reflect analysis finishing in the
+   * background between renders.
+   */
+  const getCloudTranscriptCoverage = useCallback((): { withCloud: number; total: number } => {
+    const dossiers = getDossiers();
+    return {
+      withCloud: dossiers.filter((d) => !!d.cloudTranscript).length,
+      total: dossiers.length,
+    };
+  }, [getDossiers]);
+
+  return {
+    state,
+    start,
+    refine,
+    cancel,
+    removeItem,
+    moveItem,
+    reset,
+    getExperiment,
+    getCloudTranscriptCoverage,
+  };
 }
 
 export type UseDirectorReturn = ReturnType<typeof useDirector>;

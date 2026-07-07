@@ -10,7 +10,13 @@
 import { mergeDenseCaptions } from "./caption-text";
 import type { SearchResult } from "./retrieval";
 import type { SelectionResult } from "./signal-score";
-import type { ClipDossier, CloudRunArchiveEntry, DenseCaption, Shot } from "./types";
+import type {
+  ClipDossier,
+  CloudRunArchiveEntry,
+  DenseCaption,
+  Shot,
+  TranscriptSegment,
+} from "./types";
 import { storyboardDurationS, type Storyboard } from "./director-types";
 
 /** Per-clip transcript budget; talky clips get truncated, not dropped. */
@@ -123,7 +129,42 @@ function shotCaptionText(
   );
 }
 
-/** Transcript section: withheld / no-speech / timecoded lines, budget-capped. */
+/**
+ * Resolves which transcript segments a clip contributes to the prompt, per
+ * the `transcriptSource` mixer (see its doc comment on PromptSources — this
+ * function IS that contract): "local" (default) always uses the
+ * always-computed `dossier.transcript`. "cloud" uses `dossier.cloudTranscript`
+ * when this clip has one, falling back to local — labeled as a fallback — when
+ * it does not. Every branch returns a `label` so callers can name the source
+ * inline (the conversation inspector must always show what was actually sent).
+ *
+ * Empty-cloud edge: a clip whose `cloudTranscript` exists but recorded ZERO
+ * segments (the cloud pass ran and heard no speech) is still a CLOUD hit —
+ * its (empty) segments are returned as-is, not swapped for local. Falling
+ * back there would misrepresent what the cloud run actually heard.
+ */
+export function resolveTranscript(
+  dossier: ClipDossier,
+  sources: PromptSources,
+): { segments: TranscriptSegment[]; label: string } {
+  if (sources.transcriptSource === "cloud") {
+    if (dossier.cloudTranscript) {
+      return {
+        segments: dossier.cloudTranscript.segments,
+        label: `cloud ${dossier.cloudTranscript.model}`,
+      };
+    }
+    return { segments: dossier.transcript, label: "local whisper (cloud not run for this clip)" };
+  }
+  return { segments: dossier.transcript, label: "local whisper" };
+}
+
+/**
+ * Transcript section: withheld / no-speech / timecoded lines, budget-capped.
+ * The header names the resolved source (local vs cloud, see resolveTranscript)
+ * so the exact bytes sent to the LLM are auditable in the conversation
+ * inspector.
+ */
 function renderTranscript(
   dossier: ClipDossier,
   sources: PromptSources,
@@ -132,12 +173,15 @@ function renderTranscript(
   const lines: string[] = [];
   if (!sources.transcript) {
     lines.push("  TRANSCRIPT: (withheld for this run — work from the visuals)");
-  } else if (dossier.transcript.length === 0) {
-    lines.push("  TRANSCRIPT: (no speech detected)");
+    return lines;
+  }
+  const { segments, label } = resolveTranscript(dossier, sources);
+  if (segments.length === 0) {
+    lines.push(`  TRANSCRIPT (${label}): (no speech detected)`);
   } else {
-    lines.push("  TRANSCRIPT:");
+    lines.push(`  TRANSCRIPT (${label}):`);
     let used = 0;
-    for (const seg of dossier.transcript) {
+    for (const seg of segments) {
       const line = `    [${fmtS(seg.t0)}-${fmtS(seg.t1)}] ${seg.text.trim()}`;
       if (used + line.length > maxTranscriptChars) {
         lines.push("    [transcript truncated]");
@@ -342,8 +386,9 @@ export function buildCandidatesMessage(
       if (captionText) {
         lines.push(`    "${captionText}"`);
       }
-      if (src.transcript && dossier.transcript.length > 0) {
-        const overlapping = dossier.transcript.filter(
+      if (src.transcript) {
+        const { segments } = resolveTranscript(dossier, src);
+        const overlapping = segments.filter(
           (seg) => seg.t0 < shot.tEnd && seg.t1 > shot.tStart,
         );
         for (const seg of overlapping.slice(0, 2)) {

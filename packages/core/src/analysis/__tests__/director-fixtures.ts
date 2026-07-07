@@ -1,4 +1,4 @@
-import type { ClipDossier, DossierPerf, Shot, TranscriptSegment } from "../types";
+import type { ClipDossier, CloudTranscriptMeta, DossierPerf, Shot, TranscriptSegment } from "../types";
 import { DOSSIER_VERSION } from "../types";
 import type { CandidatePick, Chapter, ShotScore } from "../signal-score";
 
@@ -59,6 +59,7 @@ export function makeDossier(
     cloudRuns?: ClipDossier["cloudRuns"];
     cloudVision?: ClipDossier["cloudVision"];
     transcript?: TranscriptSegment[];
+    cloudTranscript?: CloudTranscriptMeta | null;
   } = {},
 ): ClipDossier {
   return {
@@ -81,7 +82,22 @@ export function makeDossier(
     cloudVision: opts.cloudVision ?? null,
     localCaptionPerf: null,
     transcript: opts.transcript ?? [],
+    cloudTranscript: opts.cloudTranscript ?? null,
     perf,
+  };
+}
+
+/** Cloud transcription run fixture (Groq whisper-large-v3-turbo by default). */
+export function makeCloudTranscript(overrides: Partial<CloudTranscriptMeta> = {}): CloudTranscriptMeta {
+  return {
+    model: "whisper-large-v3-turbo",
+    segments: [],
+    words: null,
+    billedSeconds: 10,
+    costUSD: 0.0011,
+    ms: 420,
+    transcribedAt: 1,
+    ...overrides,
   };
 }
 
