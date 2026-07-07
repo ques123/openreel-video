@@ -10,8 +10,28 @@ import ReactDOM from "react-dom/client";
 import posthog from "posthog-js";
 import { PostHogProvider } from "posthog-js/react";
 import App from "./App";
-import { registerServiceWorker } from "./services/service-worker";
 import { initCustomFonts } from "./components/editor/inspector/font-options";
+
+/**
+ * The wizz admin panel is an always-online tailnet tool — a service worker
+ * gives it nothing but the documented stale-bundle trap (openreel's sw.js is
+ * byte-stable across deploys, so even a no-cache re-fetch never fires an
+ * update event, and its runtime cache keeps serving old hashed assets — this
+ * is exactly what served a stale editor bundle over the fresh admin deploy).
+ * So the admin build, like the public build, ships NO service worker AND
+ * actively evicts any one a prior deploy registered, so a redeploy is always
+ * immediately live without a manual unregister.
+ */
+function purgeServiceWorkers(): void {
+  if (!("serviceWorker" in navigator)) return;
+  void navigator.serviceWorker
+    .getRegistrations()
+    .then((regs) => Promise.all(regs.map((r) => r.unregister())))
+    .catch(() => {});
+  if (typeof caches !== "undefined") {
+    void caches.keys().then((keys) => Promise.all(keys.map((k) => caches.delete(k)))).catch(() => {});
+  }
+}
 
 export function bootAdmin(root: HTMLElement) {
   // The admin build is the wizz.pbrain.dev admin PANEL — landing on a bare
@@ -33,10 +53,7 @@ export function bootAdmin(root: HTMLElement) {
     });
   }
 
-  registerServiceWorker().then((registration) => {
-    if (registration) {
-    }
-  });
+  purgeServiceWorkers();
 
   void initCustomFonts();
 
