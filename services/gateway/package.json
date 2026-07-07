@@ -8,10 +8,18 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@wizz/contracts": "workspace:*"
+    "@hono/node-server": "^2.0.8",
+    "@node-rs/argon2": "^2.0.2",
+    "@wizz/contracts": "workspace:*",
+    "better-sqlite3": "^12.11.1",
+    "hono": "^4.12.28"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.10.0",
-    "typescript": "^5.4.5"
+    "esbuild": "^0.28.1",
+    "tsx": "^4.23.0",
+    "typescript": "^5.4.5",
+    "vitest": "^1.6.0"
   }
 }
