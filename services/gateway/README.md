@@ -3,8 +3,10 @@
 Auth + metered LLM proxy for wizz.video. Hono + better-sqlite3, two HTTP
 listeners from one process: a **public** listener (session-checked, rate
 limited, `/api/admin/*` always 403s `admin_only`) and an **admin** listener
-(tailnet-only in production; admin routes work there with no session at all —
-"arrived on the tailnet" is a port-binding fact, not a forgeable header).
+(tailnet-only in production; admin routes — and, via the synthetic tailnet
+identity described below, the proxy/preset/quota/telemetry routes too — work
+there with no session at all: "arrived on the tailnet" is a port-binding
+fact, not a forgeable header).
 
 Full HTTP/schema spec: `docs/wizz-contracts.md` (gitignored ops doc, read it
 from disk). Shared types/constants: `@wizz/contracts`
@@ -38,7 +40,7 @@ pnpm --filter @wizz/gateway test:run   # one-shot
 pnpm --filter @wizz/gateway test       # watch mode
 ```
 
-185 tests across 11 files, each using a fresh in-memory (`:memory:`)
+225 tests across 14 files, each using a fresh in-memory (`:memory:`)
 SQLite database. The proxy's upstream `fetch` is fully injectable
 (`ProxyDeps.fetchImpl`) — tests never hit the network; `src/test-helpers.ts`
 (not itself a test file) is the shared scaffolding every `*.test.ts` builds
@@ -66,12 +68,12 @@ copy step that puts the migration `.sql` files next to the bundle
 | File | Responsibility |
 |---|---|
 | `env.ts` | Env parsing + local-dev defaults |
-| `db.ts` | DB open/pragmas/migrations, settings seed, bootstrap invite, session GC, `SettingsCache`/`PresetCache` |
+| `db.ts` | DB open/pragmas/migrations, settings + synthetic-admin seeds, bootstrap invite, session GC, `SettingsCache`/`PresetCache` |
 | `context.ts` | Shared Hono `Variables` shape (`surface`, `user`, `sessionTokenHash`) |
 | `errors.ts` | `WizzError`, the error envelope builder, `app.onError`/`errorResponse` |
 | `crypto-ids.ts` | IDs, session tokens, invite codes, temp passwords (all `node:crypto`) |
-| `users.ts` | `users` table row CRUD + DB-row → `AdminUser` mapping |
-| `sessions.ts` | Cookie lifecycle: create/validate/rolling-refresh/clear, `requireSession` middleware, `clientIp`/`isHttpsRequest` |
+| `users.ts` | `users` table row CRUD + DB-row → `AdminUser` mapping; the synthetic tailnet-admin constants |
+| `sessions.ts` | Cookie lifecycle: create/validate/rolling-refresh/clear, `requireSession` + `sessionOrSyntheticAdmin` middleware, `clientIp`/`isHttpsRequest` |
 | `csrf.ts` | Origin-header check on mutating methods |
 | `rate-limit.ts` | In-memory sliding-window limiter + the login/proxy/telemetry instances |
 | `quota.ts` | Effective-limit resolution, quotaOverrides merge-patch, UTC-day windowing, "used today" SQL, `QuotaStatus` assembly |
@@ -115,14 +117,51 @@ provider keys log a warning at boot but don't prevent it from starting.
 
 ## The bootstrap invite
 
-On every boot, `ensureBootstrapInvite` checks whether the `users` table is
-empty. If it is, and no invite exists yet at all, it mints one
-(`maxUses: 1`, `note: "bootstrap — admin"`) and prints its code to stdout —
-that's how the admin creates the very first account. If the table is still
-empty on a later restart (the invite was never used), it re-prints the
-**same** code instead of minting a new one, so a restart never strands you
-without ever having seen the code. Once any user exists, this is a no-op
-forever.
+On every boot, `ensureBootstrapInvite` checks whether any REAL account exists
+(the synthetic tailnet admin below is excluded from this count — it exists on
+every fresh DB and can't log in). If none does, and no invite exists yet at
+all, it mints one (`maxUses: 1`, `note: "bootstrap — admin"`) and prints its
+code to stdout — that's how the admin creates the very first account. If
+still no real account exists on a later restart (the invite was never used),
+it re-prints the **same** code instead of minting a new one, so a restart
+never strands you without ever having seen the code. Once any real user
+exists, this is a no-op forever.
+
+## The synthetic tailnet admin (admin-surface identity)
+
+The admin SPA (wizz.pbrain.dev) embeds the perception lab, whose
+director/caption/STT/music calls hit `/api/proxy/*` — but the admin surface
+has no login (tailnet arrival IS the identity). So on the **admin listener
+only**, the four session-scoped route groups — `/api/proxy/*`, `/api/preset`,
+`/api/quota`, `/api/telemetry` — resolve a reserved identity instead of
+requiring a cookie:
+
+- **The row**: `id "admin"`, `email "admin@tailnet"`, seeded idempotently by
+  `openDb` on every open (existing deployed DBs pick it up on their next
+  boot — no migration). Its `password_hash` is a sentinel that argon2 can
+  never verify, login short-circuits its id to `invalid_credentials`, and
+  the email itself fails signup's validation (no dot in the domain) — three
+  independent reasons it can never be logged into or claimed.
+- **Attribution**: all metering/quota rows from session-less admin-surface
+  calls attribute to this user, so the admin's own lab spend is visible in
+  the Usage section (deliberate — it appears in user lists and rollups).
+- **Real cookies are preferred**: a usable session cookie on the admin
+  surface attributes to that account instead. Anything less than a usable
+  session (missing, expired, unknown, or a disabled user's cookie) falls
+  back to the synthetic identity — a stray cookie must never break the admin
+  surface.
+- **Everything else in the proxy check order is unchanged** on the admin
+  surface: kill switch, path whitelist, category validation, body caps, and
+  quota checks (against the synthetic user's own overrides) all still apply;
+  per-user/per-IP rate limits still apply only on the public listener.
+- **Guardrails**: `PATCH …/users/admin {disabled}` and
+  `POST …/users/admin/reset-password` return 400 `bad_request` with a clear
+  message; `quotaOverrides` on it ARE allowed (capping the lab's own spend
+  is legitimate).
+- **The public listener is byte-identical to before** — its branch of
+  `sessionOrSyntheticAdmin` is literally the same code path `requireSession`
+  uses (a shared strict-mapping function), and the suite asserts 401s across
+  all four route groups without a session.
 
 ## Notable design choices / contract judgment calls
 

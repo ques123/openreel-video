@@ -60,7 +60,7 @@ describe("GET /api/admin/health", () => {
     };
     expect(body.ok).toBe(true);
     expect(body.db.ok).toBe(true);
-    expect(body.db.users).toBe(1);
+    expect(body.db.users).toBe(2); // the one signup + the seeded synthetic tailnet admin
     expect(body.db.sizeBytes).toBeGreaterThan(0);
     expect(body.killSwitch).toBe(false);
   });
@@ -74,7 +74,8 @@ describe("admin users", () => {
 
     const all = await adminApp.request("/api/admin/users");
     const allBody = (await all.json()) as { users: { email: string; usage: { events: number } }[] };
-    expect(allBody.users).toHaveLength(2);
+    expect(allBody.users).toHaveLength(3); // 2 signups + the synthetic tailnet admin (included by design)
+    expect(allBody.users.some((u) => u.email === "admin@tailnet")).toBe(true);
     expect(allBody.users[0].usage).toEqual({
       today: { directorTokens: 0, cloudCaptionFrames: 0, sttSeconds: 0, sunoGens: 0 },
       total: { directorTokens: 0, cloudCaptionFrames: 0, sttSeconds: 0, sunoGens: 0 },

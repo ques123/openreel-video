@@ -33,6 +33,7 @@ import { applyQuotaOverridesPatch, utcMidnightISO, type QuotaOverridesPatch } fr
 import { parseJsonBody } from "./request-utils";
 import {
   getUserRowById,
+  isSyntheticAdmin,
   mapUserRow,
   searchUsers,
   updateUserDisabled,
@@ -231,6 +232,15 @@ function registerUserRoutes(app: Hono<{ Variables: Vars }>, deps: AdminDeps): vo
 
     if (body.disabled !== undefined) {
       if (typeof body.disabled !== "boolean") throw new WizzError("bad_request", "disabled must be a boolean.");
+      // The synthetic tailnet admin is deliberately included in listings (spend visibility) but can never
+      // be disabled — the admin surface's identity must always resolve. quotaOverrides on it stay allowed
+      // (capping the lab's own spend is legitimate).
+      if (isSyntheticAdmin(id)) {
+        throw new WizzError(
+          "bad_request",
+          "The synthetic tailnet admin cannot be disabled — it is the admin listener's identity.",
+        );
+      }
       updateUserDisabled(db, id, body.disabled);
     }
 
@@ -249,6 +259,12 @@ function registerUserRoutes(app: Hono<{ Variables: Vars }>, deps: AdminDeps): vo
     const id = c.req.param("id");
     const row = getUserRowById(db, id);
     if (!row) throw new WizzError("not_found");
+    if (isSyntheticAdmin(id)) {
+      throw new WizzError(
+        "bad_request",
+        "The synthetic tailnet admin has no password — arriving on the tailnet listener is its identity.",
+      );
+    }
     const tempPassword = generateTempPassword();
     const passwordHash = await hashPassword(tempPassword);
     updateUserPasswordHash(db, id, passwordHash);

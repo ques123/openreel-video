@@ -7,6 +7,31 @@
 import type Database from "better-sqlite3";
 import type { AdminUser, PublicUser, QuotaLimits } from "@wizz/contracts";
 
+/**
+ * The synthetic tailnet-admin identity: on the ADMIN listener, /api/proxy/*,
+ * /api/preset, /api/quota and /api/telemetry resolve to this reserved user
+ * row when no (usable) real session cookie is present — the admin SPA has no
+ * login because arriving on the tailnet listener IS the identity. The row is
+ * seeded idempotently by openDb (db.ts) so metering/quota attribution has a
+ * real users row to hang off; its lab spend shows up in the Usage section —
+ * that's a feature, not leakage.
+ *
+ * Login as this account is impossible by construction, twice over: the
+ * password_hash sentinel below is not a valid argon2 digest (verify() can
+ * only fail on it), and handleLogin short-circuits the id to
+ * invalid_credentials before even calling verify. The email is additionally
+ * unregisterable via signup ("admin@tailnet" has no dot in its domain, so
+ * isPlausibleEmail rejects it before uniqueness is ever consulted).
+ */
+export const SYNTHETIC_ADMIN_USER_ID = "admin";
+export const SYNTHETIC_ADMIN_EMAIL = "admin@tailnet";
+/** Deliberately not an argon2 digest — argon2.verify() rejects it as malformed, which auth.ts maps to "no match". */
+export const SYNTHETIC_ADMIN_PASSWORD_SENTINEL = "*tailnet-identity-no-password*";
+
+export function isSyntheticAdmin(userId: string): boolean {
+  return userId === SYNTHETIC_ADMIN_USER_ID;
+}
+
 export interface UserRow {
   id: string;
   email: string;

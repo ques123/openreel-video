@@ -1,6 +1,9 @@
 /**
  * POST /api/telemetry — coarse client events (no pixels, no transcripts, no
- * filenames; contracts §2). Session-required, 120/min/user.
+ * filenames; contracts §2). Session-required on the public listener; on the
+ * admin listener the tailnet identity applies (sessionOrSyntheticAdmin).
+ * 120/min/user on both surfaces — the synthetic admin is just another user
+ * key to the limiter.
  */
 import type { Hono } from "hono";
 import type Database from "better-sqlite3";
@@ -10,7 +13,7 @@ import { WizzError } from "./errors";
 import type { GatewayEnv } from "./env";
 import type { RateLimiter } from "./rate-limit";
 import { parseJsonBody } from "./request-utils";
-import { requireSession } from "./sessions";
+import { sessionOrSyntheticAdmin } from "./sessions";
 import { newId } from "./crypto-ids";
 
 export interface TelemetryDeps {
@@ -24,7 +27,7 @@ function isTelemetryType(value: unknown): value is TelemetryEventBody["type"] {
 }
 
 export function registerTelemetryRoutes(app: Hono<{ Variables: Vars }>, deps: TelemetryDeps): void {
-  app.post("/api/telemetry", requireSession(deps.db, deps.env), async (c) => {
+  app.post("/api/telemetry", sessionOrSyntheticAdmin(deps.db, deps.env), async (c) => {
     const user = c.get("user");
     if (!user) throw new WizzError("auth_required");
 

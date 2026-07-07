@@ -19,9 +19,9 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Context, MiddlewareHandler } from "hono";
 import type { CookieOptions } from "hono/utils/cookie";
 import type Database from "better-sqlite3";
-import { WIZZ_SESSION_COOKIE, WIZZ_SESSION_TTL_DAYS } from "@wizz/contracts";
+import { WIZZ_SESSION_COOKIE, WIZZ_SESSION_TTL_DAYS, type AdminUser } from "@wizz/contracts";
 import { hashToken, newSessionToken } from "./crypto-ids";
-import { getUserRowById, mapUserRow, touchUserLastSeen } from "./users";
+import { getUserRowById, mapUserRow, touchUserLastSeen, SYNTHETIC_ADMIN_USER_ID } from "./users";
 import { WizzError } from "./errors";
 import type { GatewayEnv } from "./env";
 import type { Vars } from "./context";
@@ -117,48 +117,116 @@ export function deleteSessionByRawToken(db: Database.Database, token: string): v
 }
 
 /**
- * The shared session gate for every session-required route (preset, quota,
- * telemetry, proxy). Validates the cookie, loads + disabled-checks the user,
- * performs the rolling refresh, and attaches `user` to context. Throws
- * WizzError("auth_required" | "account_disabled") — caught by app.onError.
+ * Attempts to resolve (and rolling-refresh) a real session from the cookie.
+ * "none" covers no cookie / unknown token / expired session / dangling user
+ * reference (the stale-cookie cases also clear the cookie); "disabled" is a
+ * VALID session whose user the admin has disabled (no refresh performed).
+ * How each outcome maps to a response is the caller's policy — requireSession
+ * is strict, sessionOrSyntheticAdmin substitutes the tailnet identity.
+ */
+type SessionResolution =
+  | { kind: "ok"; user: AdminUser; tokenHash: string }
+  | { kind: "disabled" }
+  | { kind: "none" };
+
+function resolveSessionFromCookie(
+  db: Database.Database,
+  env: GatewayEnv,
+  c: Context<{ Variables: Vars }>,
+): SessionResolution {
+  const token = getCookie(c, WIZZ_SESSION_COOKIE);
+  if (!token) return { kind: "none" };
+
+  const tokenHash = hashToken(token);
+  const session = db.prepare("SELECT * FROM sessions WHERE token_hash = ?").get(tokenHash) as
+    | SessionRow
+    | undefined;
+
+  const now = new Date();
+  if (!session || Date.parse(session.expires_at) <= now.getTime()) {
+    clearSessionCookie(c, env);
+    return { kind: "none" };
+  }
+
+  const userRow = getUserRowById(db, session.user_id);
+  if (!userRow) {
+    clearSessionCookie(c, env);
+    return { kind: "none" };
+  }
+  const user = mapUserRow(userRow);
+  if (user.disabled) return { kind: "disabled" };
+
+  if (now.getTime() - Date.parse(session.last_used_at) > ROLLING_REFRESH_THRESHOLD_MS) {
+    const newExpiresAt = new Date(now.getTime() + SESSION_TTL_MS).toISOString();
+    db.prepare("UPDATE sessions SET last_used_at = ?, expires_at = ? WHERE token_hash = ?").run(
+      now.toISOString(),
+      newExpiresAt,
+      tokenHash,
+    );
+    touchUserLastSeen(db, user.id, now.toISOString());
+    setSessionCookie(c, env, token);
+  }
+
+  return { kind: "ok", user, tokenHash };
+}
+
+/** The strict mapping shared by requireSession and sessionOrSyntheticAdmin's public branch — byte-identical by construction. */
+function applyStrictSession(c: Context<{ Variables: Vars }>, resolution: SessionResolution): void {
+  if (resolution.kind === "none") throw new WizzError("auth_required");
+  if (resolution.kind === "disabled") throw new WizzError("account_disabled");
+  c.set("user", resolution.user);
+  c.set("sessionTokenHash", resolution.tokenHash);
+}
+
+/**
+ * The strict session gate (used by GET /api/auth/session, and by anything
+ * that must behave identically on both listeners). Validates the cookie,
+ * loads + disabled-checks the user, performs the rolling refresh, and
+ * attaches `user` to context. Throws WizzError("auth_required" |
+ * "account_disabled") — caught by app.onError.
  */
 export function requireSession(db: Database.Database, env: GatewayEnv): MiddlewareHandler<{ Variables: Vars }> {
   return async (c, next) => {
-    const token = getCookie(c, WIZZ_SESSION_COOKIE);
-    if (!token) throw new WizzError("auth_required");
+    applyStrictSession(c, resolveSessionFromCookie(db, env, c));
+    await next();
+  };
+}
 
-    const tokenHash = hashToken(token);
-    const session = db.prepare("SELECT * FROM sessions WHERE token_hash = ?").get(tokenHash) as
-      | SessionRow
-      | undefined;
-
-    const now = new Date();
-    if (!session || Date.parse(session.expires_at) <= now.getTime()) {
-      clearSessionCookie(c, env);
-      throw new WizzError("auth_required");
+/**
+ * The gate for the four session-scoped route groups (/api/proxy/*,
+ * /api/preset, /api/quota, /api/telemetry):
+ *
+ * - PUBLIC surface: exactly requireSession (same resolution, same strict
+ *   mapping — the shared applyStrictSession makes "byte-identical" a
+ *   structural fact, not a promise).
+ * - ADMIN surface: no session needed — tailnet arrival is the identity. A
+ *   usable real session cookie is PREFERRED when present (a signed-in-
+ *   elsewhere cookie attributes usage to that account instead of the
+ *   synthetic one); anything less than a usable session (no cookie, expired,
+ *   unknown token, or even a disabled user's cookie) falls back to the
+ *   synthetic admin row rather than erroring — a stray cookie must never
+ *   break the admin surface, that's the whole point of this gate.
+ */
+export function sessionOrSyntheticAdmin(
+  db: Database.Database,
+  env: GatewayEnv,
+): MiddlewareHandler<{ Variables: Vars }> {
+  return async (c, next) => {
+    if (c.get("surface") === "admin") {
+      const resolution = resolveSessionFromCookie(db, env, c);
+      if (resolution.kind === "ok") {
+        c.set("user", resolution.user);
+        c.set("sessionTokenHash", resolution.tokenHash);
+      } else {
+        const row = getUserRowById(db, SYNTHETIC_ADMIN_USER_ID);
+        // Unreachable in practice — openDb seeds the row on every open. Guarded so a hand-edited DB
+        // degrades to a clean 401 instead of a crash.
+        if (!row) throw new WizzError("auth_required");
+        c.set("user", mapUserRow(row));
+      }
+    } else {
+      applyStrictSession(c, resolveSessionFromCookie(db, env, c));
     }
-
-    const userRow = getUserRowById(db, session.user_id);
-    if (!userRow) {
-      clearSessionCookie(c, env);
-      throw new WizzError("auth_required");
-    }
-    const user = mapUserRow(userRow);
-    if (user.disabled) throw new WizzError("account_disabled");
-
-    if (now.getTime() - Date.parse(session.last_used_at) > ROLLING_REFRESH_THRESHOLD_MS) {
-      const newExpiresAt = new Date(now.getTime() + SESSION_TTL_MS).toISOString();
-      db.prepare("UPDATE sessions SET last_used_at = ?, expires_at = ? WHERE token_hash = ?").run(
-        now.toISOString(),
-        newExpiresAt,
-        tokenHash,
-      );
-      touchUserLastSeen(db, user.id, now.toISOString());
-      setSessionCookie(c, env, token);
-    }
-
-    c.set("user", user);
-    c.set("sessionTokenHash", tokenHash);
     await next();
   };
 }

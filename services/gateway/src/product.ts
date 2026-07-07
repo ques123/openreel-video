@@ -11,7 +11,7 @@ import type { PresetCache, SettingsCache } from "./db";
 import type { GatewayEnv } from "./env";
 import { WizzError } from "./errors";
 import { buildQuotaStatus, type QuotaStore } from "./quota";
-import { requireSession } from "./sessions";
+import { sessionOrSyntheticAdmin } from "./sessions";
 
 export interface ProductDeps {
   db: Database.Database;
@@ -22,13 +22,13 @@ export interface ProductDeps {
 }
 
 export function registerProductRoutes(app: Hono<{ Variables: Vars }>, deps: ProductDeps): void {
-  app.get("/api/preset", requireSession(deps.db, deps.env), (c) => {
+  app.get("/api/preset", sessionOrSyntheticAdmin(deps.db, deps.env), (c) => {
     const settings = deps.settings.get();
     const preset = deps.presets.getActive();
     return c.json({ preset, footageCap: settings.footageCap } satisfies PresetResponse, 200);
   });
 
-  app.get("/api/quota", requireSession(deps.db, deps.env), (c) => {
+  app.get("/api/quota", sessionOrSyntheticAdmin(deps.db, deps.env), (c) => {
     const user = c.get("user");
     if (!user) throw new WizzError("auth_required");
     const settings = deps.settings.get();

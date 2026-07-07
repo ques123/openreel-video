@@ -17,6 +17,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_GLOBAL_SETTINGS, type GlobalSettings, type PublishedPreset } from "@wizz/contracts";
 import { newId, newInviteCode } from "./crypto-ids";
+import {
+  SYNTHETIC_ADMIN_EMAIL,
+  SYNTHETIC_ADMIN_PASSWORD_SENTINEL,
+  SYNTHETIC_ADMIN_USER_ID,
+} from "./users";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = join(HERE, "migrations");
@@ -64,30 +69,52 @@ function seedSettings(db: Database.Database): void {
   }
 }
 
+/**
+ * Seed data like settings, not a migration: idempotent on every open, so an
+ * already-deployed DB (colossus) picks the row up on its next boot with no
+ * schema-version bump. See SYNTHETIC_ADMIN_USER_ID in users.ts for what this
+ * identity is for and why login as it is impossible.
+ */
+function seedSyntheticAdmin(db: Database.Database): void {
+  db.prepare(
+    "INSERT OR IGNORE INTO users (id, email, password_hash, created_at, disabled, last_seen_at, invite_id, quota_overrides) " +
+      "VALUES (?, ?, ?, ?, 0, NULL, NULL, NULL)",
+  ).run(
+    SYNTHETIC_ADMIN_USER_ID,
+    SYNTHETIC_ADMIN_EMAIL,
+    SYNTHETIC_ADMIN_PASSWORD_SENTINEL,
+    new Date().toISOString(),
+  );
+}
+
 /** True for a UNIQUE-constraint violation (e.g. users.email) — callers map that to the contract's email_taken. */
 export function isUniqueConstraintError(err: unknown): boolean {
   return err instanceof Database.SqliteError && err.code === "SQLITE_CONSTRAINT_UNIQUE";
 }
 
-/** Opens the DB, sets pragmas, applies pending migrations, and seeds the settings singleton row. Safe to call repeatedly. */
+/** Opens the DB, sets pragmas, applies pending migrations, and seeds the settings singleton row + synthetic admin. Safe to call repeatedly. */
 export function openDb(path: string): Database.Database {
   const db = new Database(path);
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
   runMigrations(db);
   seedSettings(db);
+  seedSyntheticAdmin(db);
   return db;
 }
 
 /**
- * First-boot convenience: when the users table is empty, guarantees exactly
- * one invite exists and prints its code to stdout so the admin can create the
- * first account. Idempotent across restarts — if an invite already exists
- * (bootstrap or otherwise) while users is still empty, it re-prints that
- * code instead of minting a second one.
+ * First-boot convenience: when no REAL account exists yet (the synthetic
+ * tailnet admin doesn't count — it's seeded on every open and can't log in),
+ * guarantees exactly one invite exists and prints its code to stdout so the
+ * admin can create the first account. Idempotent across restarts — if an
+ * invite already exists (bootstrap or otherwise) while users is still empty,
+ * it re-prints that code instead of minting a second one.
  */
 export function ensureBootstrapInvite(db: Database.Database): void {
-  const { n } = db.prepare("SELECT COUNT(*) as n FROM users").get() as { n: number };
+  const { n } = db
+    .prepare("SELECT COUNT(*) as n FROM users WHERE id != ?")
+    .get(SYNTHETIC_ADMIN_USER_ID) as { n: number };
   if (n > 0) return;
 
   const existing = db

@@ -27,7 +27,7 @@ import {
   deleteSessionByRawToken,
   requireSession,
 } from "./sessions";
-import { getUserRowByEmail, insertUser, toPublicUser } from "./users";
+import { getUserRowByEmail, insertUser, isSyntheticAdmin, toPublicUser } from "./users";
 import type { Vars } from "./context";
 
 /** Longer than any real password needs — just bounds the argon2 hashing cost of an abusive request body. */
@@ -50,7 +50,13 @@ export async function hashPassword(password: string): Promise<string> {
 }
 
 async function verifyPassword(passwordHash: string, password: string): Promise<boolean> {
-  return verify(passwordHash, password);
+  try {
+    return await verify(passwordHash, password);
+  } catch {
+    // A malformed stored "hash" (e.g. the synthetic admin's sentinel — see users.ts) makes argon2's
+    // verify() reject rather than return false; either way it means "no match", never a 500.
+    return false;
+  }
 }
 
 interface InviteRow {
@@ -137,6 +143,9 @@ async function handleLogin(c: Context<{ Variables: Vars }>, deps: AuthDeps): Pro
   const email = body.email.trim().toLowerCase();
   const row = getUserRowByEmail(deps.db, email);
   if (!row) throw new WizzError("invalid_credentials");
+  // The synthetic tailnet admin can never log in — its sentinel hash would fail verify anyway (see
+  // verifyPassword), but short-circuiting keeps the guarantee independent of argon2's behavior.
+  if (isSyntheticAdmin(row.id)) throw new WizzError("invalid_credentials");
 
   const valid = await verifyPassword(row.password_hash, body.password);
   if (!valid) throw new WizzError("invalid_credentials");

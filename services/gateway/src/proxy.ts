@@ -27,7 +27,7 @@ import type { GatewayEnv } from "./env";
 import { WizzError } from "./errors";
 import { effectiveQuotaLimit, precheckQuota, quotaCategoryFor, type QuotaStore } from "./quota";
 import type { RateLimiter } from "./rate-limit";
-import { clientIp, requireSession } from "./sessions";
+import { clientIp, sessionOrSyntheticAdmin } from "./sessions";
 import {
   countImageParts,
   extractRequestModel,
@@ -219,7 +219,9 @@ const DEFAULT_TIMEOUT_MS = 60_000;
 const SUNO_GENERATE_TIMEOUT_MS = 120_000;
 
 async function handleProxy(c: Context<{ Variables: Vars }>, deps: ProxyDeps): Promise<Response> {
-  // Step 1 (session + disabled) already ran as route middleware (requireSession) — see registerProxyRoutes.
+  // Step 1 already ran as route middleware (sessionOrSyntheticAdmin): on the public surface that is
+  // exactly the old strict session+disabled gate; on the admin surface `user` may be the synthetic
+  // tailnet admin (see sessions.ts). Steps 2-10 below are identical on both surfaces except step 6.
   const user = c.get("user");
   if (!user) throw new WizzError("auth_required");
 
@@ -360,5 +362,5 @@ async function handleProxy(c: Context<{ Variables: Vars }>, deps: ProxyDeps): Pr
 }
 
 export function registerProxyRoutes(app: Hono<{ Variables: Vars }>, deps: ProxyDeps): void {
-  app.all("/api/proxy/:provider/*", requireSession(deps.db, deps.env), (c) => handleProxy(c, deps));
+  app.all("/api/proxy/:provider/*", sessionOrSyntheticAdmin(deps.db, deps.env), (c) => handleProxy(c, deps));
 }
