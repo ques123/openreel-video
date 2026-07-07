@@ -274,9 +274,9 @@ describe("summarizeBulkRun / retryClipIds / formatBulkSummary", () => {
       { clipId: "1", fileName: "a.mp4", ok: true },
       { clipId: "2", fileName: "b.mp4", ok: true },
     ];
-    const summary = summarizeBulkRun(results);
-    expect(summary).toEqual({ total: 2, succeeded: 2, failed: [] });
-    expect(formatBulkSummary(summary)).toBe("2/2 enhanced");
+    const summary = summarizeBulkRun(results, 45_000);
+    expect(summary).toEqual({ total: 2, succeeded: 2, failed: [], wallMs: 45_000 });
+    expect(formatBulkSummary(summary)).toBe("2/2 enhanced · 45s");
     expect(retryClipIds(summary)).toEqual([]);
   });
 
@@ -286,28 +286,42 @@ describe("summarizeBulkRun / retryClipIds / formatBulkSummary", () => {
       { clipId: "2", fileName: "b.mp4", ok: false, error: "rate limited" },
       { clipId: "3", fileName: "c.mp4", ok: false, error: "network error" },
     ];
-    const summary = summarizeBulkRun(results);
+    const summary = summarizeBulkRun(results, 832_000);
     expect(summary.total).toBe(3);
     expect(summary.succeeded).toBe(1);
     expect(summary.failed).toEqual([
       { clipId: "2", fileName: "b.mp4", ok: false, error: "rate limited" },
       { clipId: "3", fileName: "c.mp4", ok: false, error: "network error" },
     ]);
-    expect(formatBulkSummary(summary)).toBe("1/3 enhanced, 2 failed");
+    expect(summary.wallMs).toBe(832_000);
+    expect(formatBulkSummary(summary)).toBe("1/3 enhanced, 2 failed · 13m52s");
     expect(retryClipIds(summary)).toEqual(["2", "3"]);
   });
 
   it("de-dupes retryClipIds while keeping first-seen order", () => {
-    const summary = summarizeBulkRun([
-      { clipId: "1", fileName: "a.mp4", ok: false, error: "x" },
-      { clipId: "2", fileName: "b.mp4", ok: false, error: "y" },
-      { clipId: "1", fileName: "a.mp4", ok: false, error: "x again" },
-    ]);
+    const summary = summarizeBulkRun(
+      [
+        { clipId: "1", fileName: "a.mp4", ok: false, error: "x" },
+        { clipId: "2", fileName: "b.mp4", ok: false, error: "y" },
+        { clipId: "1", fileName: "a.mp4", ok: false, error: "x again" },
+      ],
+      0,
+    );
     expect(retryClipIds(summary)).toEqual(["1", "2"]);
   });
 
-  it("formats a zero-clip run without a failure clause", () => {
-    expect(formatBulkSummary(summarizeBulkRun([]))).toBe("0/0 enhanced");
+  it("formats a zero-clip run without a failure clause OR a duration clause", () => {
+    expect(formatBulkSummary(summarizeBulkRun([], 0))).toBe("0/0 enhanced");
+    // Even a nonzero wallMs (e.g. guardrail-confirm time) stays hidden — there
+    // were no clips to time.
+    expect(formatBulkSummary(summarizeBulkRun([], 5_000))).toBe("0/0 enhanced");
+  });
+
+  it("formats sub-minute durations as seconds only, minute-plus as Xm YYs", () => {
+    const oneClip: BulkClipResult[] = [{ clipId: "1", fileName: "a.mp4", ok: true }];
+    expect(formatBulkSummary(summarizeBulkRun(oneClip, 9_000))).toBe("1/1 enhanced · 9s");
+    expect(formatBulkSummary(summarizeBulkRun(oneClip, 60_000))).toBe("1/1 enhanced · 1m00s");
+    expect(formatBulkSummary(summarizeBulkRun(oneClip, 832_000))).toBe("1/1 enhanced · 13m52s");
   });
 });
 

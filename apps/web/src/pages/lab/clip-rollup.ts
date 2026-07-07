@@ -164,11 +164,18 @@ export interface BulkRunSummary {
   total: number;
   succeeded: number;
   failed: BulkClipResult[];
+  /**
+   * Wall-clock for the WHOLE bulk run (BULK_CLIP_CONCURRENCY clips at a
+   * time), not a sum of per-clip times — see formatBulkSummary/PerfPanel's
+   * "compute" column for the sum-vs-wall-clock distinction this exists to
+   * keep separate.
+   */
+  wallMs: number;
 }
 
-export function summarizeBulkRun(results: BulkClipResult[]): BulkRunSummary {
+export function summarizeBulkRun(results: BulkClipResult[], wallMs: number): BulkRunSummary {
   const failed = results.filter((r) => !r.ok);
-  return { total: results.length, succeeded: results.length - failed.length, failed };
+  return { total: results.length, succeeded: results.length - failed.length, failed, wallMs };
 }
 
 /** Clip ids a "retry failed" pass should re-run (order kept, de-duped). */
@@ -176,10 +183,23 @@ export function retryClipIds(summary: BulkRunSummary): string[] {
   return [...new Set(summary.failed.map((f) => f.clipId))];
 }
 
-/** "85/91 enhanced, 6 failed" (failure clause only when something failed). */
+/** 832_000 -> "13m52s", 45_000 -> "45s" (same shape as experiments.ts's fmtDurationMs). */
+function fmtDuration(ms: number): string {
+  const totalS = Math.round(ms / 1000);
+  const m = Math.floor(totalS / 60);
+  const s = totalS % 60;
+  return m > 0 ? `${m}m${String(s).padStart(2, "0")}s` : `${s}s`;
+}
+
+/**
+ * "85/91 enhanced, 6 failed · 13m52s" (failure clause only when something
+ * failed; duration clause only when the run actually covered clips — a
+ * zero-clip summary has no wall-clock worth reporting).
+ */
 export function formatBulkSummary(summary: BulkRunSummary): string {
   const base = `${summary.succeeded}/${summary.total} enhanced`;
-  return summary.failed.length > 0 ? `${base}, ${summary.failed.length} failed` : base;
+  const withFailures = summary.failed.length > 0 ? `${base}, ${summary.failed.length} failed` : base;
+  return summary.total > 0 ? `${withFailures} · ${fmtDuration(summary.wallMs)}` : withFailures;
 }
 
 /** "1:23.4" — same mm:ss.s shape the filmstrip header uses. */

@@ -97,6 +97,17 @@ export interface CloudRunMeta {
   cachedTokens?: number;
   /** In-scope frame count before blur-gate/similarity merge (lever-1 datum). */
   preMergeCount?: number;
+  /**
+   * Exact USD actually billed by the provider for this run, summed across
+   * its API calls — set ONLY when every usage-bearing call reported a cost
+   * (OpenRouter's `usage.cost`, requested via `usage: {include: true}`; see
+   * services/cloud-vision.ts). Absent when unknown: OpenAI never reports a
+   * billed cost (its token×rate price IS exact, single provider), an
+   * OpenRouter response omitted it, or this run predates cost tracking —
+   * callers fall back to the token×rate estimate in all those cases. Never
+   * guessed/backfilled, same discipline as promptTokens/completionTokens.
+   */
+  actualCostUSD?: number;
 }
 
 /** Local caption pass stats (speed side of the local-vs-cloud comparison). */
