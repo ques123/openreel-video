@@ -1,12 +1,13 @@
 /**
  * The generate-flow state machine (contracts §"generate-flow state machine" +
- * docs/wizz-contracts.md §7). `applyEvent` is a PURE reducer over the exact
- * `GenerateFlowState`/`GenerateFlowEvent` union from @wizz/contracts — no
- * side effects, no telemetry, no gateway calls — so it is trivially unit
- * tested and is the single source of truth for "which scene is on screen".
+ * docs/wizz-contracts.md §7). `applyEvent` is a PURE reducer over
+ * `FlowState`/`FlowEvent` (below) — no side effects, no telemetry, no
+ * gateway calls — so it is trivially unit tested and is the single source of
+ * truth for "which scene is on screen".
  *
- * Two deliberate extensions beyond the literal contract, both documented
- * where the contract under-specifies a real transition:
+ * Three deliberate extensions beyond the literal `GenerateFlowState`/
+ * `GenerateFlowEvent` union from @wizz/contracts, all documented where the
+ * contract under-specifies a real transition:
  *
  * 1. `bench.allReady` is treated as advisory only: the reducer keeps it
  *    reasonably in sync (false on CLIPS_ADDED/CLIPS_CHANGED, true on
@@ -25,6 +26,17 @@
  *    test) get a same-shaped state with an empty category placeholder
  *    rather than a thrown error, and use-generate-flow.ts always supplies it
  *    from the caught GatewayError.
+ * 3. `RESTORE_AVAILABLE`/`studio-restore-offer` need a `rememberedCount` —
+ *    how much of the remembered footage's analysis cache is actually still
+ *    current (see services/file-handles.ts's getStoredSessionInfo) — that
+ *    the contract type has no field for at all. Unlike point 2, the
+ *    dispatching call site always has the value already in hand, so rather
+ *    than a side channel it's carried directly on an apps/web-local
+ *    widening of just those two members: `FlowEvent`/`FlowState`. Every
+ *    other member is untouched, so a plain contract-typed
+ *    GenerateFlowState/GenerateFlowEvent value is still assignable wherever
+ *    FlowState/FlowEvent is expected (telemetryForTransition below takes
+ *    advantage of this and keeps the exact contract types).
  */
 import type {
   GenerateFlowEvent,
@@ -38,11 +50,21 @@ export interface ApplyEventCtx {
   quota?: { category: QuotaCategory; resetsAt: string };
 }
 
+/** See file header, point 3. */
+export type FlowEvent =
+  | Exclude<GenerateFlowEvent, { type: "RESTORE_AVAILABLE" }>
+  | { type: "RESTORE_AVAILABLE"; clipCount: number; label: string; rememberedCount: number | null };
+
+/** See file header, point 3. */
+export type FlowState =
+  | Exclude<GenerateFlowState, { name: "studio-restore-offer" }>
+  | { name: "studio-restore-offer"; clipCount: number; label: string; rememberedCount: number | null };
+
 export function applyEvent(
-  state: GenerateFlowState,
-  event: GenerateFlowEvent,
+  state: FlowState,
+  event: FlowEvent,
   ctx?: ApplyEventCtx,
-): GenerateFlowState {
+): FlowState {
   // Global short-circuits: valid from (almost) any state.
   if (event.type === "UNSUPPORTED_BROWSER") return { name: "gate-unsupported" };
   if (event.type === "SESSION_MISSING") return { name: "needs-auth" };
@@ -53,7 +75,12 @@ export function applyEvent(
 
     case "RESTORE_AVAILABLE":
       if (state.name !== "studio-empty") return state;
-      return { name: "studio-restore-offer", clipCount: event.clipCount, label: event.label };
+      return {
+        name: "studio-restore-offer",
+        clipCount: event.clipCount,
+        label: event.label,
+        rememberedCount: event.rememberedCount,
+      };
 
     case "RESTORE_ACCEPTED":
       if (state.name !== "studio-restore-offer") return state;
@@ -152,7 +179,7 @@ export function applyEvent(
 }
 
 /** Fresh session's starting point, before boot-time checks resolve anything. */
-export const INITIAL_FLOW_STATE: GenerateFlowState = { name: "needs-auth" };
+export const INITIAL_FLOW_STATE: FlowState = { name: "needs-auth" };
 
 /**
  * Fire-and-forget telemetry the flow emits on each transition (contracts §C:

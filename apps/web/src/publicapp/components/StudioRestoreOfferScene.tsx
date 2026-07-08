@@ -9,6 +9,21 @@
 import { useFlow } from "../flow-context";
 import { Chrome } from "./Chrome";
 
+/**
+ * The clips-hint line's copy — true only to the extent the remembered
+ * footage's analysis cache actually survived (rememberedCount, from
+ * services/file-handles.ts's getStoredSessionInfo): null makes no claim at
+ * all (a legacy session saved before that check existed), rather than
+ * defaulting to either the optimistic or pessimistic extreme.
+ */
+export function restoreOfferSubtitle(clipCount: number, rememberedCount: number | null): string {
+  const clipsPart = `${clipCount} clip${clipCount === 1 ? "" : "s"}`;
+  if (rememberedCount === null) return clipsPart;
+  if (rememberedCount === clipCount) return `${clipsPart} · analyzed and remembered`;
+  if (rememberedCount === 0) return `${clipsPart} · footage will be re-analyzed`;
+  return `${clipsPart} · ${rememberedCount} remembered, ${clipCount - rememberedCount} will be re-analyzed`;
+}
+
 export function StudioRestoreOfferScene() {
   const { state, actions, restoreProgress } = useFlow();
   if (state.name !== "studio-restore-offer") return null;
@@ -26,9 +41,7 @@ export function StudioRestoreOfferScene() {
           <h2 className="display" style={{ fontSize: 22 }}>
             Reload {state.label}?
           </h2>
-          <p className="clips-hint">
-            {state.clipCount} clip{state.clipCount === 1 ? "" : "s"} · analyzed and remembered
-          </p>
+          <p className="clips-hint">{restoreOfferSubtitle(state.clipCount, state.rememberedCount)}</p>
           <button
             className="btn btn-primary"
             onClick={() => void actions.acceptRestore()}

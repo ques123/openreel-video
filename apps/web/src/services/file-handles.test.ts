@@ -8,6 +8,13 @@
  * a non-functional placeholder (its open() never calls onsuccess), so every
  * test here installs its own.
  *
+ * The analysis-cache probe behind SessionInfo.rememberedCount is tested with
+ * @openreel/core module-mocked (vi.hoisted + vi.mock, same shape as
+ * bridges/media-bridge.test.ts): hasCurrentDossier is the ONLY runtime
+ * import file-handles.ts takes from core, and the real one reaches into
+ * core's own IndexedDB-backed StorageEngine — a second database the fake
+ * below doesn't (and shouldn't) model.
+ *
  * Note: test/setup.ts installs its placeholder via
  * `Object.defineProperty(window, "indexedDB", {writable: true, value: ...})`
  * with no `configurable` (defaults to false) — `vi.stubGlobal` redefines the
@@ -23,11 +30,20 @@ import {
   getStoredSessionInfo,
   handleFromDataTransferItem,
   pickFilesWithHandles,
+  probeRememberedCount,
   rememberClip,
   restoreFromRows,
   restoreSession,
   type StoredClip,
 } from "./file-handles";
+
+const { mockHasCurrentDossier } = vi.hoisted(() => ({
+  mockHasCurrentDossier: vi.fn(),
+}));
+
+vi.mock("@openreel/core", () => ({
+  hasCurrentDossier: mockHasCurrentDossier,
+}));
 
 /* ─────────────────────── minimal in-memory fake IndexedDB ─────────────────────── */
 
@@ -187,9 +203,19 @@ function makeFakeHandle(opts: {
   };
 }
 
-function row(id: string, handle: FileSystemFileHandle, name = "clip.mp4"): StoredClip {
-  return { id, name, sizeAtSave: 100, handle };
+function row(
+  id: string,
+  handle: FileSystemFileHandle,
+  name = "clip.mp4",
+  lastModifiedAtSave?: number,
+): StoredClip {
+  return { id, name, sizeAtSave: 100, lastModifiedAtSave, handle };
 }
+
+beforeEach(() => {
+  mockHasCurrentDossier.mockReset();
+  mockHasCurrentDossier.mockResolvedValue(false);
+});
 
 afterEach(() => {
   while (installedIndexedDBRestores.length > 0) installedIndexedDBRestores.pop()!();
@@ -237,9 +263,58 @@ describe("restoreFromRows (pure decision loop, no IndexedDB)", () => {
   });
 });
 
+describe("probeRememberedCount (pure probe math, mocked analysis cache)", () => {
+  it("counts every row when the whole cache survived, probing each under its SAVED identity", async () => {
+    mockHasCurrentDossier.mockResolvedValue(true);
+    const rows = [row("a", makeFakeHandle({}), "a.mp4", 111), row("b", makeFakeHandle({}), "b.mp4", 222)];
+    await expect(probeRememberedCount(rows)).resolves.toBe(2);
+    expect(mockHasCurrentDossier).toHaveBeenCalledWith({ name: "a.mp4", size: 100, lastModified: 111 });
+    expect(mockHasCurrentDossier).toHaveBeenCalledWith({ name: "b.mp4", size: 100, lastModified: 222 });
+  });
+
+  it("counts zero when nothing is cached any more (evicted or pipeline-version bumped)", async () => {
+    const rows = [row("a", makeFakeHandle({}), "a.mp4", 111), row("b", makeFakeHandle({}), "b.mp4", 222)];
+    await expect(probeRememberedCount(rows)).resolves.toBe(0);
+  });
+
+  it("counts only the hits on a partially surviving cache", async () => {
+    mockHasCurrentDossier.mockImplementation(async (identity: { name: string }) => identity.name !== "b.mp4");
+    const rows = [
+      row("a", makeFakeHandle({}), "a.mp4", 111),
+      row("b", makeFakeHandle({}), "b.mp4", 222),
+      row("c", makeFakeHandle({}), "c.mp4", 333),
+    ];
+    await expect(probeRememberedCount(rows)).resolves.toBe(2);
+  });
+
+  it("returns null — no claim at all — when ANY row lacks lastModifiedAtSave (legacy session)", async () => {
+    mockHasCurrentDossier.mockResolvedValue(true);
+    const rows = [row("a", makeFakeHandle({}), "a.mp4", 111), row("b", makeFakeHandle({}), "b.mp4")];
+    await expect(probeRememberedCount(rows)).resolves.toBeNull();
+    expect(mockHasCurrentDossier).not.toHaveBeenCalled();
+  });
+
+  it("treats a rejected or throwing probe as not-remembered instead of failing the whole count", async () => {
+    mockHasCurrentDossier
+      .mockResolvedValueOnce(true)
+      .mockRejectedValueOnce(new Error("storage exploded"))
+      .mockImplementationOnce(() => {
+        throw new Error("sync throw");
+      });
+    const rows = [
+      row("a", makeFakeHandle({}), "a.mp4", 111),
+      row("b", makeFakeHandle({}), "b.mp4", 222),
+      row("c", makeFakeHandle({}), "c.mp4", 333),
+    ];
+    await expect(probeRememberedCount(rows)).resolves.toBe(1);
+  });
+});
+
 describe("session persistence (fake IndexedDB)", () => {
+  let fakeStores: Map<string, Map<string, unknown>>;
+
   beforeEach(() => {
-    installFakeIndexedDB();
+    fakeStores = installFakeIndexedDB().stores;
   });
 
   it("has no stored session before anything is remembered", async () => {
@@ -247,19 +322,55 @@ describe("session persistence (fake IndexedDB)", () => {
   });
 
   it("remembering a clip creates a session with clipCount 1", async () => {
-    await rememberClip({ id: "a", name: "a.mp4", size: 10, handle: makeFakeHandle({}) });
+    await rememberClip({ id: "a", name: "a.mp4", size: 10, lastModified: 111, handle: makeFakeHandle({}) });
     const info = await getStoredSessionInfo();
     expect(info?.clipCount).toBe(1);
+  });
+
+  it("rememberClip captures the live File's identity — sizeAtSave AND lastModifiedAtSave", async () => {
+    const file = new File(["xx"], "a.mp4", { type: "video/mp4", lastModified: 1_720_000_000_000 });
+    await rememberClip({
+      id: file.name,
+      name: file.name,
+      size: file.size,
+      lastModified: file.lastModified,
+      handle: makeFakeHandle({ name: file.name }),
+    });
+    const stored = fakeStores.get("clips")?.get("a.mp4") as StoredClip;
+    expect(stored.sizeAtSave).toBe(file.size);
+    expect(stored.lastModifiedAtSave).toBe(1_720_000_000_000);
+  });
+
+  it("getStoredSessionInfo probes each stored row against the analysis cache and counts the hits", async () => {
+    mockHasCurrentDossier.mockImplementation(async (identity: { name: string }) => identity.name === "a.mp4");
+    await rememberClip({ id: "a", name: "a.mp4", size: 10, lastModified: 111, handle: makeFakeHandle({}) });
+    await rememberClip({ id: "b", name: "b.mp4", size: 20, lastModified: 222, handle: makeFakeHandle({}) });
+    const info = await getStoredSessionInfo();
+    expect(info?.rememberedCount).toBe(1);
+    expect(mockHasCurrentDossier).toHaveBeenCalledWith({ name: "a.mp4", size: 10, lastModified: 111 });
+    expect(mockHasCurrentDossier).toHaveBeenCalledWith({ name: "b.mp4", size: 20, lastModified: 222 });
+  });
+
+  it("getStoredSessionInfo reports a null rememberedCount when any stored row predates lastModifiedAtSave", async () => {
+    mockHasCurrentDossier.mockResolvedValue(true);
+    await rememberClip({ id: "a", name: "a.mp4", size: 10, lastModified: 111, handle: makeFakeHandle({}) });
+    await rememberClip({ id: "b", name: "b.mp4", size: 10, lastModified: 222, handle: makeFakeHandle({}) });
+    // Rows written before the field existed simply lack it — recreate one in place.
+    delete (fakeStores.get("clips")!.get("b") as { lastModifiedAtSave?: number }).lastModifiedAtSave;
+    const info = await getStoredSessionInfo();
+    expect(info?.clipCount).toBe(2);
+    expect(info?.rememberedCount).toBeNull();
+    expect(mockHasCurrentDossier).not.toHaveBeenCalled();
   });
 
   it("remembering more clips bumps clipCount but keeps the original savedAt", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-07-01T00:00:00.000Z"));
-    await rememberClip({ id: "a", name: "a.mp4", size: 10, handle: makeFakeHandle({}) });
+    await rememberClip({ id: "a", name: "a.mp4", size: 10, lastModified: 111, handle: makeFakeHandle({}) });
     const first = await getStoredSessionInfo();
 
     vi.setSystemTime(new Date("2026-07-02T00:00:00.000Z"));
-    await rememberClip({ id: "b", name: "b.mp4", size: 10, handle: makeFakeHandle({}) });
+    await rememberClip({ id: "b", name: "b.mp4", size: 10, lastModified: 222, handle: makeFakeHandle({}) });
     const second = await getStoredSessionInfo();
 
     expect(second?.clipCount).toBe(2);
@@ -269,8 +380,8 @@ describe("session persistence (fake IndexedDB)", () => {
   it("forgetting a clip decrements clipCount without touching savedAt", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-07-01T00:00:00.000Z"));
-    await rememberClip({ id: "a", name: "a.mp4", size: 10, handle: makeFakeHandle({}) });
-    await rememberClip({ id: "b", name: "b.mp4", size: 10, handle: makeFakeHandle({}) });
+    await rememberClip({ id: "a", name: "a.mp4", size: 10, lastModified: 111, handle: makeFakeHandle({}) });
+    await rememberClip({ id: "b", name: "b.mp4", size: 10, lastModified: 222, handle: makeFakeHandle({}) });
     const before = await getStoredSessionInfo();
 
     vi.setSystemTime(new Date("2026-07-05T00:00:00.000Z"));
@@ -282,21 +393,33 @@ describe("session persistence (fake IndexedDB)", () => {
   });
 
   it("forgetting the last clip clears the session entirely", async () => {
-    await rememberClip({ id: "a", name: "a.mp4", size: 10, handle: makeFakeHandle({}) });
+    await rememberClip({ id: "a", name: "a.mp4", size: 10, lastModified: 111, handle: makeFakeHandle({}) });
     await forgetClip("a");
     await expect(getStoredSessionInfo()).resolves.toBeNull();
   });
 
   it("clearSession drops everything regardless of clip count", async () => {
-    await rememberClip({ id: "a", name: "a.mp4", size: 10, handle: makeFakeHandle({}) });
-    await rememberClip({ id: "b", name: "b.mp4", size: 10, handle: makeFakeHandle({}) });
+    await rememberClip({ id: "a", name: "a.mp4", size: 10, lastModified: 111, handle: makeFakeHandle({}) });
+    await rememberClip({ id: "b", name: "b.mp4", size: 10, lastModified: 222, handle: makeFakeHandle({}) });
     await clearSession();
     await expect(getStoredSessionInfo()).resolves.toBeNull();
   });
 
   it("restoreSession resolves every remembered handle when all are healthy", async () => {
-    await rememberClip({ id: "a", name: "a.mp4", size: 10, handle: makeFakeHandle({ name: "a.mp4" }) });
-    await rememberClip({ id: "b", name: "b.mp4", size: 10, handle: makeFakeHandle({ name: "b.mp4" }) });
+    await rememberClip({
+      id: "a",
+      name: "a.mp4",
+      size: 10,
+      lastModified: 111,
+      handle: makeFakeHandle({ name: "a.mp4" }),
+    });
+    await rememberClip({
+      id: "b",
+      name: "b.mp4",
+      size: 10,
+      lastModified: 222,
+      handle: makeFakeHandle({ name: "b.mp4" }),
+    });
     const result = await restoreSession();
     expect(result.restored.map((r) => r.id).sort()).toEqual(["a", "b"]);
     expect(result.moved).toEqual([]);
@@ -306,11 +429,18 @@ describe("session persistence (fake IndexedDB)", () => {
   });
 
   it("restoreSession prunes moved clips from storage but keeps the healthy ones", async () => {
-    await rememberClip({ id: "ok", name: "ok.mp4", size: 10, handle: makeFakeHandle({ name: "ok.mp4" }) });
+    await rememberClip({
+      id: "ok",
+      name: "ok.mp4",
+      size: 10,
+      lastModified: 111,
+      handle: makeFakeHandle({ name: "ok.mp4" }),
+    });
     await rememberClip({
       id: "gone",
       name: "gone.mp4",
       size: 10,
+      lastModified: 222,
       handle: makeFakeHandle({ getFileError: new DOMException("nope", "NotFoundError") }),
     });
 
@@ -332,6 +462,7 @@ describe("session persistence (fake IndexedDB)", () => {
       id: "gone",
       name: "gone.mp4",
       size: 10,
+      lastModified: 111,
       handle: makeFakeHandle({ getFileError: new Error("nope") }),
     });
     await restoreSession();

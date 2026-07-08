@@ -52,8 +52,13 @@ import { nextUtcMidnightIso, restoreOfferLabel } from "./format";
 import { openCutInEditor } from "./editor-handoff";
 import { useAppRouter, type PublicRoute } from "./router";
 import { useWizzTheme, type UseWizzThemeReturn } from "./theme";
-import { applyEvent, INITIAL_FLOW_STATE, telemetryForTransition, type ApplyEventCtx } from "./state-machine";
-import type { GenerateFlowEvent } from "@wizz/contracts";
+import {
+  applyEvent,
+  INITIAL_FLOW_STATE,
+  telemetryForTransition,
+  type ApplyEventCtx,
+  type FlowEvent,
+} from "./state-machine";
 
 const STUDIO_VISITED_KEY = "wizz:studio-visited";
 const KNOWN_ERROR_CODES = new Set<string>(WIZZ_ERROR_CODES);
@@ -219,7 +224,7 @@ export function useGenerateFlow(): Flow {
   const track = useCallback<Flow["track"]>((type, data) => sendTelemetry(type, data), []);
 
   const dispatchFlow = useCallback(
-    (event: GenerateFlowEvent, ctx?: ApplyEventCtx) => {
+    (event: FlowEvent, ctx?: ApplyEventCtx) => {
       const prev = stateRef.current;
       let next = applyEvent(prev, event, ctx);
       if (next.name === "studio-empty" && event.type === "SESSION_OK") {
@@ -329,6 +334,7 @@ export function useGenerateFlow(): Flow {
           type: "RESTORE_AVAILABLE",
           clipCount: info.clipCount,
           label: restoreOfferLabel(info.savedAt),
+          rememberedCount: info.rememberedCount,
         });
       }
     },
@@ -467,9 +473,13 @@ export function useGenerateFlow(): Flow {
         handleTasks.push(
           handleFromDataTransferItem(item).then((handle) => {
             if (!handle) return;
-            void rememberClip({ id: file.name, name: file.name, size: file.size, handle }).catch((err) =>
-              console.error("[wizz] failed to remember file handle", err),
-            );
+            void rememberClip({
+              id: file.name,
+              name: file.name,
+              size: file.size,
+              lastModified: file.lastModified,
+              handle,
+            }).catch((err) => console.error("[wizz] failed to remember file handle", err));
           }),
         );
       }
@@ -484,9 +494,13 @@ export function useGenerateFlow(): Flow {
     if (picked.length === 0) return;
     addFiles(picked.map((p) => p.file));
     for (const { file, handle } of picked) {
-      void rememberClip({ id: file.name, name: file.name, size: file.size, handle }).catch((err) =>
-        console.error("[wizz] failed to remember file handle", err),
-      );
+      void rememberClip({
+        id: file.name,
+        name: file.name,
+        size: file.size,
+        lastModified: file.lastModified,
+        handle,
+      }).catch((err) => console.error("[wizz] failed to remember file handle", err));
     }
   }, [addFiles]);
 

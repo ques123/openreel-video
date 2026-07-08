@@ -36,9 +36,17 @@ export function fmtEtaLeft(etaS: number): string {
   return `about ${mins} minute${mins === 1 ? "" : "s"} left`;
 }
 
-/** "Understanding your footage — clip 3 of 12". */
-export function fmtBatchLine(currentIndex: number, total: number): string {
-  return `Understanding your footage — clip ${Math.min(currentIndex + 1, total)} of ${total}`;
+/**
+ * "Understanding your footage — clip 3 of 12" (or "Updating your footage for
+ * our latest pipeline — clip 3 of 12" when reanalyzing). `currentIndex` is
+ * deriveBatch's settled+active count and is ALREADY 1-based — rendered as-is,
+ * clamped to [1, total] defensively, never incremented.
+ */
+export function fmtBatchLine(currentIndex: number, total: number, reanalyzing?: boolean): string {
+  const verb = reanalyzing
+    ? "Updating your footage for our latest pipeline"
+    : "Understanding your footage";
+  return `${verb} — clip ${Math.max(1, Math.min(currentIndex, total))} of ${total}`;
 }
 
 /**

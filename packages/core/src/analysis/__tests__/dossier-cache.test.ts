@@ -2,11 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   DossierCache,
   deserializeDossier,
+  dossierCacheKey,
+  hasCurrentDossier,
   serializeDossier,
   staleDossierCacheKeys,
   ThrottledDossierSaver,
+  type FileIdentity,
 } from "../dossier-cache";
-import { DOSSIER_VERSION, type ClipDossier } from "../types";
+import { DOSSIER_VERSION, type ClipDossier, type CloudTranscriptMeta } from "../types";
 import type { StorageEngine } from "../../storage/storage-engine";
 import type { CacheRecord } from "../../storage/types";
 
@@ -214,9 +217,10 @@ function makeFile(name = "clip.mp4", lastModified = 111): File {
 
 /**
  * Minimal fake implementing only the StorageEngine methods DossierCache
- * actually calls (loadCache) — no real IndexedDB needed, so this runs fine
- * under the "node" test environment. `hits` maps a cache key to "hit" (a
- * record exists), "throw" (an unreadable record), or omitted (a miss).
+ * actually calls (loadCache, hasCache) — no real IndexedDB needed, so this
+ * runs fine under the "node" test environment. `hits` maps a cache key to
+ * "hit" (a record exists), "throw" (an unreadable record), or omitted (a
+ * miss).
  */
 function fakeStorage(hits: Record<string, "hit" | "throw">): StorageEngine {
   const record: CacheRecord = { key: "unused", data: new ArrayBuffer(0), timestamp: 0, size: 0 };
@@ -225,6 +229,11 @@ function fakeStorage(hits: Record<string, "hit" | "throw">): StorageEngine {
       const outcome = hits[key];
       if (outcome === "throw") throw new Error("storage read failed");
       return outcome === "hit" ? record : null;
+    },
+    async hasCache(key: string): Promise<boolean> {
+      const outcome = hits[key];
+      if (outcome === "throw") throw new Error("storage read failed");
+      return outcome === "hit";
     },
   } as unknown as StorageEngine;
 }
@@ -289,6 +298,110 @@ describe("DossierCache.findStaleVersion", () => {
     const v2Key = keys.find((k) => k.version === 2)!.key;
     const cache = new DossierCache(fakeStorage({ [v3Key]: "throw", [v2Key]: "hit" }));
     expect(await cache.findStaleVersion(file)).toBe(2);
+  });
+});
+
+/**
+ * The cheap existence probe fleet views use to badge many clips as
+ * "already analyzed" without paying for a full load() + deserialize per
+ * clip. hasCurrentDossier is the standalone wrapper other packages import;
+ * DossierCache.hasCurrent is the same logic on an existing instance.
+ */
+describe("DossierCache.hasCurrent / hasCurrentDossier", () => {
+  it("is true when a current-version dossier is cached for this identity", async () => {
+    const file = makeFile();
+    const cache = new DossierCache(fakeStorage({ [dossierCacheKey(file)]: "hit" }));
+    expect(await cache.hasCurrent(file)).toBe(true);
+  });
+
+  it("is false when nothing is cached for this identity", async () => {
+    const cache = new DossierCache(fakeStorage({}));
+    expect(await cache.hasCurrent(makeFile())).toBe(false);
+  });
+
+  it("is false when only an older-version record exists under the same identity", async () => {
+    const file = makeFile();
+    const staleKey = staleDossierCacheKeys(file).find((k) => k.version === DOSSIER_VERSION - 1)!.key;
+    const cache = new DossierCache(fakeStorage({ [staleKey]: "hit" }));
+    expect(await cache.hasCurrent(file)).toBe(false);
+  });
+
+  it("resolves false, never throws, when the storage read fails", async () => {
+    const file = makeFile();
+    const cache = new DossierCache(fakeStorage({ [dossierCacheKey(file)]: "throw" }));
+    await expect(cache.hasCurrent(file)).resolves.toBe(false);
+  });
+
+  it("hasCurrentDossier resolves false rather than throwing when storage is unavailable", async () => {
+    // No fake here: hasCurrentDossier default-constructs a real StorageEngine,
+    // and this suite runs in vitest's "node" environment where `indexedDB` is
+    // undefined — exactly the "any browser context" case it must survive.
+    const identity: FileIdentity = { name: "clip.mp4", size: 10, lastModified: 111 };
+    await expect(hasCurrentDossier(identity)).resolves.toBe(false);
+  });
+
+  it("accepts a plain FileIdentity object, not just a File", async () => {
+    const identity: FileIdentity = { name: "clip.mp4", size: 10, lastModified: 111 };
+    const cache = new DossierCache(fakeStorage({ [dossierCacheKey(identity)]: "hit" }));
+    expect(await cache.hasCurrent(identity)).toBe(true);
+  });
+});
+
+/**
+ * Salvaging opt-in cloud STT results across a DOSSIER_VERSION bump: only the
+ * stale record's cloudTranscript is read out — see loadStaleCloudTranscript's
+ * doc comment and funnel-orchestrator.ts's salvageCloudTranscript for how the
+ * two combine into "carry the transcript over, recompute everything else".
+ */
+describe("DossierCache.loadStaleCloudTranscript", () => {
+  const cloudTranscript: CloudTranscriptMeta = {
+    model: "whisper-large-v3-turbo",
+    segments: [{ t0: 0, t1: 1, text: "hi" }],
+    words: null,
+    billedSeconds: 10,
+    costUSD: 0.0001,
+    ms: 100,
+    transcribedAt: 1720000000000,
+  };
+
+  function fakeStorageWithRecord(key: string, dossier: ClipDossier): StorageEngine {
+    const record: CacheRecord = { key, data: serializeDossier(dossier), timestamp: 0, size: 0 };
+    return {
+      async loadCache(k: string) {
+        return k === key ? record : null;
+      },
+    } as unknown as StorageEngine;
+  }
+
+  it("returns the stale record's cloudTranscript, verbatim", async () => {
+    const file = makeFile();
+    const version = DOSSIER_VERSION - 1;
+    const key = staleDossierCacheKeys(file).find((k) => k.version === version)!.key;
+    const cache = new DossierCache(
+      fakeStorageWithRecord(key, { ...makeDossier(), cloudTranscript }),
+    );
+    expect(await cache.loadStaleCloudTranscript(file, version)).toEqual(cloudTranscript);
+  });
+
+  it("returns null when the stale record never ran a cloud transcription", async () => {
+    const file = makeFile();
+    const version = DOSSIER_VERSION - 1;
+    const key = staleDossierCacheKeys(file).find((k) => k.version === version)!.key;
+    const cache = new DossierCache(fakeStorageWithRecord(key, makeDossier()));
+    expect(await cache.loadStaleCloudTranscript(file, version)).toBeNull();
+  });
+
+  it("returns null when no record exists at that version", async () => {
+    const cache = new DossierCache(fakeStorage({}));
+    expect(await cache.loadStaleCloudTranscript(makeFile(), DOSSIER_VERSION - 1)).toBeNull();
+  });
+
+  it("returns null, not throw, when the stale record is unreadable", async () => {
+    const file = makeFile();
+    const version = DOSSIER_VERSION - 1;
+    const key = staleDossierCacheKeys(file).find((k) => k.version === version)!.key;
+    const cache = new DossierCache(fakeStorage({ [key]: "throw" }));
+    await expect(cache.loadStaleCloudTranscript(file, version)).resolves.toBeNull();
   });
 });
 

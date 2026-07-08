@@ -21,6 +21,7 @@
  * same id, and starting fresh (or a full restore) can replace the set
  * wholesale via clearSession().
  */
+import { hasCurrentDossier, type FileIdentity } from "@openreel/core";
 
 const DB_NAME = "wizz-file-handles";
 const DB_VERSION = 1;
@@ -96,6 +97,13 @@ export interface StoredClip {
   id: string;
   name: string;
   sizeAtSave: number;
+  /**
+   * Absent on rows saved before this field existed — those legacy sessions
+   * can't be probed for a remembered-analysis count (see
+   * getStoredSessionInfo/probeRememberedCount below), only the honest
+   * "unknowable" null.
+   */
+  lastModifiedAtSave?: number;
   handle: FileSystemFileHandle;
 }
 
@@ -287,11 +295,54 @@ export async function pickFilesWithHandles(): Promise<PickedFile[]> {
 export interface SessionInfo {
   savedAt: number;
   clipCount: number;
+  /**
+   * How many remembered clips still have a CURRENT-pipeline-version analysis
+   * cached; null when the session can't be probed at all — see
+   * probeRememberedCount.
+   */
+  rememberedCount: number | null;
 }
 
-/** For the studio-return offer card ("Reload Tuesday's footage? · 12 clips"); null = nothing remembered. */
+/**
+ * For the studio-return offer card ("Reload Tuesday's footage? · 12 clips ·
+ * analyzed and remembered"); null = nothing remembered. rememberedCount is a
+ * fresh probe of @openreel/core's per-clip dossier cache on every call, not
+ * a value tracked alongside the session meta — that cache can go stale
+ * (never finished, evicted, or invalidated by a pipeline-version bump)
+ * independently of anything this module does, so the offer can't just trust
+ * "we saved it, therefore it's still analyzed".
+ */
 export async function getStoredSessionInfo(): Promise<SessionInfo | null> {
-  return getMeta();
+  const meta = await getMeta();
+  if (!meta) return null;
+  const rows = await getAllClipRows();
+  return { ...meta, rememberedCount: await probeRememberedCount(rows) };
+}
+
+/**
+ * How many of these rows still have a current-pipeline-version analysis
+ * cached, or null when the session can't be probed at all (any row missing
+ * lastModifiedAtSave — a legacy session saved before that field existed, so
+ * its cache identity can't be reconstructed for at least one clip). Factored
+ * out from IndexedDB access, same spirit as restoreFromRows above, so it's
+ * unit-testable against plain rows. Probes run concurrently and are
+ * individually failure-safe (see probeRow) — one bad row degrades to
+ * "not remembered", never to a thrown error that would break boot.
+ */
+export async function probeRememberedCount(rows: readonly StoredClip[]): Promise<number | null> {
+  if (rows.some((r) => r.lastModifiedAtSave === undefined)) return null;
+  const hits = await Promise.all(rows.map(probeRow));
+  return hits.filter(Boolean).length;
+}
+
+async function probeRow(row: StoredClip): Promise<boolean> {
+  if (row.lastModifiedAtSave === undefined) return false;
+  const identity: FileIdentity = { name: row.name, size: row.sizeAtSave, lastModified: row.lastModifiedAtSave };
+  try {
+    return await hasCurrentDossier(identity);
+  } catch {
+    return false;
+  }
 }
 
 /** Remembers (or replaces) one clip's handle. Called as each handle-bearing clip joins the bench. */
@@ -299,9 +350,16 @@ export async function rememberClip(entry: {
   id: string;
   name: string;
   size: number;
+  lastModified: number;
   handle: FileSystemFileHandle;
 }): Promise<void> {
-  await putClipRow({ id: entry.id, name: entry.name, sizeAtSave: entry.size, handle: entry.handle });
+  await putClipRow({
+    id: entry.id,
+    name: entry.name,
+    sizeAtSave: entry.size,
+    lastModifiedAtSave: entry.lastModified,
+    handle: entry.handle,
+  });
   await syncMetaAfterMutation(false);
 }
 

@@ -52,6 +52,12 @@ export interface RawClipState {
   captionsTotal: number;
   outcome: RawClipOutcome;
   errorMessage?: string;
+  /**
+   * True when this analysis replaces a cached dossier invalidated by a
+   * DOSSIER_VERSION bump (mirrors LabClip.staleReanalysis) — surfaced to the
+   * UI as PublicClip.reanalyzing and folded into deriveBatch's batch-line flag.
+   */
+  staleReanalysis?: boolean;
   /** Set once the clip reaches "ready" — feeds RateTracker (see recordClipReady). */
   readyAtMs: number | null;
   dossier: ClipDossier | null;
@@ -96,6 +102,7 @@ function freshClip(id: string, fileName: string, atMs: number): RawClipState {
     captionsTotal: 0,
     outcome: "analyzing",
     errorMessage: undefined,
+    staleReanalysis: undefined,
     readyAtMs: null,
     dossier: null,
   };
@@ -170,6 +177,8 @@ export function pipelineReducer(state: PipelineState, action: PipelineAction): P
               action.atMs,
             ),
           );
+        case "cache-invalidated":
+          return updateClip(state, e.clipId, (c) => ({ ...c, staleReanalysis: true }));
         case "clip-error":
           if (e.cancelled) {
             // Only ever true for a cap-driven internal cancellation (the
@@ -271,6 +280,7 @@ export function toPublicClip(clip: RawClipState): PublicClip {
     durationS: clip.metaKnown ? clip.durationS : null,
     thumbnailUrl: clip.thumbnailUrl,
     status: deriveClipStatus(clip),
+    reanalyzing: clip.staleReanalysis,
   };
 }
 
@@ -344,6 +354,8 @@ export interface BatchSummary {
   currentIndex: number;
   total: number;
   etaS: number | null;
+  /** True when ≥1 still-analyzing clip's staleReanalysis flag is set — undefined (never false) when none are, matching the seam's absent-key convention. */
+  reanalyzing?: boolean;
 }
 
 /**
@@ -352,7 +364,10 @@ export interface BatchSummary {
  * `currentIndex` counts settled clips (ready or error) + the one actively
  * being worked on (1-based), capped at `total`. `etaS` sums every
  * still-analyzing clip's estimate; null the moment ANY of them can't be
- * honestly estimated yet (rather than silently under-reporting).
+ * honestly estimated yet (rather than silently under-reporting). `reanalyzing`
+ * is true when any STILL-ANALYZING clip's cache was invalidated by a
+ * pipeline update (see RawClipState.staleReanalysis) — undefined, never
+ * false, when none are.
  */
 export function deriveBatch(clips: RawClipState[], nowMs: number): BatchSummary | null {
   if (clips.length === 0) return null;
@@ -374,7 +389,11 @@ export function deriveBatch(clips: RawClipState[], nowMs: number): BatchSummary 
     etaS = (etaS ?? 0) + remaining;
   }
 
-  return { currentIndex, total: clips.length, etaS };
+  const reanalyzing =
+    clips.some((c) => c.readyAtMs === null && c.outcome !== "error" && c.staleReanalysis) ||
+    undefined;
+
+  return { currentIndex, total: clips.length, etaS, reanalyzing };
 }
 
 // ---------------------------------------------------------------------------

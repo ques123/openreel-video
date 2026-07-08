@@ -22,6 +22,7 @@ import {
   type AudioEnvelope,
   type AudioEvent,
   type ClipDossier,
+  type CloudTranscriptMeta,
   type DenseCaption,
   type DenseFrame,
   type DossierPerf,
@@ -72,6 +73,21 @@ export function planLocalCaptionFrames(
     }));
 }
 
+/**
+ * Which cloudTranscript a just-finished analysis run should carry: its own
+ * result always wins (never clobber real work); otherwise one salvaged from
+ * a stale-version cache hit found before the run started. cloudTranscript is
+ * additive and version-independent (no DOSSIER_VERSION bump gated it in —
+ * see its field comment in types.ts), so a salvaged value stays valid across
+ * the bump that forced re-analysis. Pure; exported for unit tests.
+ */
+export function salvageCloudTranscript(
+  fresh: CloudTranscriptMeta | null | undefined,
+  salvaged: CloudTranscriptMeta | null | undefined,
+): CloudTranscriptMeta | null | undefined {
+  return fresh ?? salvaged;
+}
+
 interface PendingEmbed {
   resolve: (vector: Float32Array, ms: number) => void;
   reject: (err: Error) => void;
@@ -91,6 +107,8 @@ interface ClipRun {
   shots: Shot[];
   denseFrames: Array<{ t: number; dataUrl: string; sharpness?: number }>;
   transcript: TranscriptSegment[];
+  /** Salvaged from a stale-version cache hit found before this run started; see salvageCloudTranscript. */
+  salvagedCloudTranscript: CloudTranscriptMeta | null;
   meta: { durationS: number; width: number; height: number } | null;
   startMs: number;
   decodeMs: number;
@@ -304,8 +322,10 @@ export class FunnelOrchestrator {
     // is a re-analysis forced by a DOSSIER_VERSION bump, not a new clip —
     // tell the UI so 91 clips "re-analyzing" after a deploy have a label.
     const staleVersion = await this.cache.findStaleVersion(identity);
+    let salvagedCloudTranscript: CloudTranscriptMeta | null = null;
     if (staleVersion !== null) {
       this.emit({ kind: "cache-invalidated", clipId, previousVersion: staleVersion });
+      salvagedCloudTranscript = await this.cache.loadStaleCloudTranscript(identity, staleVersion);
     }
 
     if (this.preRunCancels.delete(clipId)) {
@@ -321,6 +341,7 @@ export class FunnelOrchestrator {
       shots: [],
       denseFrames: [],
       transcript: [],
+      salvagedCloudTranscript,
       meta: null,
       startMs: performance.now(),
       decodeMs: 0,
@@ -708,6 +729,10 @@ export class FunnelOrchestrator {
       audioEvents: run.audioEvents,
       perf,
     };
+    dossier.cloudTranscript = salvageCloudTranscript(
+      dossier.cloudTranscript,
+      run.salvagedCloudTranscript,
+    );
 
     void this.cache.save(run.identityFile, dossier);
     this.emit({ kind: "clip-done", clipId: run.clipId, dossier });

@@ -33,6 +33,8 @@ export interface PublicClip {
   durationS: number | null; // null until decoded
   thumbnailUrl: string | null;
   status: PublicClipStatus;
+  /** True when this clip's analysis replaced a cached dossier invalidated by a pipeline update — absent/false for an ordinary first analysis. */
+  reanalyzing?: boolean;
 }
 
 /** The bench's engine surface (WS-E fills; WS-D renders). */
@@ -44,7 +46,13 @@ export interface PublicPipeline {
   /** True when ≥1 clip and every clip is ready (Generate arms). */
   allReady: boolean;
   /** Honest batch line: "Understanding your footage — clip 3 of 12 · about 9 minutes left". */
-  batch: { currentIndex: number; total: number; etaS: number | null } | null;
+  batch: {
+    currentIndex: number;
+    total: number;
+    etaS: number | null;
+    /** True when ≥1 still-analyzing clip's cache was invalidated by a pipeline update — fmtBatchLine swaps in "Updating" copy; absent/false otherwise. */
+    reanalyzing?: boolean;
+  } | null;
   /** Cloud speech transcription toggle (session-scoped consent; preset provides the default). */
   cloudSTT: boolean;
   setCloudSTT(on: boolean): void;
@@ -91,6 +99,8 @@ export interface PublicCut {
   clipCount: number;
   /** Two composed variations when music was on; null otherwise. */
   musicTakes: { a: string; b: string } | null; // object URLs / proxied URLs
+  /** True from cut assembly until the music request settles (ready or silently given up); absent/false when music was never requested. */
+  musicPending?: boolean;
 }
 
 /** The director surface (WS-E fills): one active conversation, refine continues it. */

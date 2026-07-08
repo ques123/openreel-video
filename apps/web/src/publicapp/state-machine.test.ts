@@ -1,10 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { GenerateFlowState } from "@wizz/contracts";
-import { applyEvent, INITIAL_FLOW_STATE, telemetryForTransition } from "./state-machine";
+import { applyEvent, INITIAL_FLOW_STATE, telemetryForTransition, type FlowState } from "./state-machine";
 
 describe("applyEvent", () => {
   it("routes to needs-auth on SESSION_MISSING from any state", () => {
-    const states: GenerateFlowState[] = [
+    const states: FlowState[] = [
       { name: "bench", allReady: true },
       { name: "screening", rendering: false },
       { name: "gate-unsupported" },
@@ -28,21 +27,38 @@ describe("applyEvent", () => {
   });
 
   describe("the restore-offer path", () => {
-    it("RESTORE_AVAILABLE only fires from studio-empty", () => {
+    it("RESTORE_AVAILABLE only fires from studio-empty, carrying rememberedCount onto the offer state", () => {
       const from = { name: "studio-empty", firstVisit: false } as const;
       expect(
-        applyEvent(from, { type: "RESTORE_AVAILABLE", clipCount: 12, label: "Tuesday's footage" }),
-      ).toEqual({ name: "studio-restore-offer", clipCount: 12, label: "Tuesday's footage" });
+        applyEvent(from, {
+          type: "RESTORE_AVAILABLE",
+          clipCount: 12,
+          label: "Tuesday's footage",
+          rememberedCount: 9,
+        }),
+      ).toEqual({
+        name: "studio-restore-offer",
+        clipCount: 12,
+        label: "Tuesday's footage",
+        rememberedCount: 9,
+      });
 
       // Ignored from an unrelated state (guarded no-op).
       const bench = { name: "bench", allReady: true } as const;
       expect(
-        applyEvent(bench, { type: "RESTORE_AVAILABLE", clipCount: 12, label: "x" }),
+        applyEvent(bench, { type: "RESTORE_AVAILABLE", clipCount: 12, label: "x", rememberedCount: 0 }),
       ).toBe(bench);
     });
 
+    it("RESTORE_AVAILABLE passes a null rememberedCount through unchanged (legacy session — unknowable)", () => {
+      const from = { name: "studio-empty", firstVisit: true } as const;
+      expect(
+        applyEvent(from, { type: "RESTORE_AVAILABLE", clipCount: 5, label: "x", rememberedCount: null }),
+      ).toEqual({ name: "studio-restore-offer", clipCount: 5, label: "x", rememberedCount: null });
+    });
+
     it("RESTORE_ACCEPTED moves to an analyzing bench", () => {
-      const from = { name: "studio-restore-offer", clipCount: 12, label: "x" } as const;
+      const from = { name: "studio-restore-offer", clipCount: 12, label: "x", rememberedCount: 12 } as const;
       expect(applyEvent(from, { type: "RESTORE_ACCEPTED" })).toEqual({
         name: "bench",
         allReady: false,
@@ -50,7 +66,7 @@ describe("applyEvent", () => {
     });
 
     it("RESTORE_DECLINED returns to a non-first-visit empty studio", () => {
-      const from = { name: "studio-restore-offer", clipCount: 12, label: "x" } as const;
+      const from = { name: "studio-restore-offer", clipCount: 12, label: "x", rememberedCount: 12 } as const;
       expect(applyEvent(from, { type: "RESTORE_DECLINED" })).toEqual({
         name: "studio-empty",
         firstVisit: false,

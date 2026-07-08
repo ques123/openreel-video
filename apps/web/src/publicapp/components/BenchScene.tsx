@@ -40,7 +40,7 @@ export function BenchScene() {
   if (state.name !== "bench") return null;
 
   const fleetLine = pipeline.batch
-    ? fmtBatchLine(pipeline.batch.currentIndex, pipeline.batch.total)
+    ? fmtBatchLine(pipeline.batch.currentIndex, pipeline.batch.total, pipeline.batch.reanalyzing)
     : pipeline.clips.length > 0
       ? `All footage understood — ${fmtClipsSummary(pipeline.clips.length, sumKnownDurations(pipeline.clips))}`
       : "Drop clips to begin";

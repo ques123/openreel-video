@@ -5,12 +5,24 @@
  */
 
 import { StorageEngine } from "../storage/storage-engine";
-import { DOSSIER_VERSION, type ClipDossier, type Shot } from "./types";
+import {
+  DOSSIER_VERSION,
+  type ClipDossier,
+  type CloudTranscriptMeta,
+  type Shot,
+} from "./types";
 
 const KEY_PREFIX = `perception:v${DOSSIER_VERSION}`;
 
-export function dossierCacheKey(file: File): string {
-  return `${KEY_PREFIX}:${file.name}:${file.size}:${file.lastModified}`;
+/** The structural identity a cache key is derived from — a File satisfies this. */
+export interface FileIdentity {
+  name: string;
+  size: number;
+  lastModified: number;
+}
+
+export function dossierCacheKey(identity: FileIdentity): string {
+  return `${KEY_PREFIX}:${identity.name}:${identity.size}:${identity.lastModified}`;
 }
 
 /**
@@ -21,13 +33,13 @@ export function dossierCacheKey(file: File): string {
  * new clip". Pure; exported for unit tests.
  */
 export function staleDossierCacheKeys(
-  file: File,
+  identity: FileIdentity,
 ): Array<{ version: number; key: string }> {
   const keys: Array<{ version: number; key: string }> = [];
   for (let v = DOSSIER_VERSION - 1; v >= 1; v -= 1) {
     keys.push({
       version: v,
-      key: `perception:v${v}:${file.name}:${file.size}:${file.lastModified}`,
+      key: `perception:v${v}:${identity.name}:${identity.size}:${identity.lastModified}`,
     });
   }
   return keys;
@@ -229,6 +241,19 @@ export class DossierCache {
   }
 
   /**
+   * Cheap existence probe for a CURRENT-version dossier: checks the cache
+   * key only, never loads or deserializes the record. Safe to call from
+   * anywhere — resolves false (never throws) when storage is unavailable.
+   */
+  async hasCurrent(identity: FileIdentity): Promise<boolean> {
+    try {
+      return await this.storage.hasCache(dossierCacheKey(identity));
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * The newest OLD-version dossier cached for this file, or null when none
    * exists (a genuinely new clip). Only the version number is reported —
    * the stale record's schema is arbitrary, so its data is never
@@ -246,6 +271,29 @@ export class DossierCache {
     return null;
   }
 
+  /**
+   * The cloudTranscript ONLY from a specific stale-version record (see
+   * findStaleVersion) — opt-in cloud STT costs real money, so it is worth
+   * salvaging across a DOSSIER_VERSION bump even though the rest of an old
+   * record is cheaper to recompute than to keep around. Deserializes that
+   * one record to pluck the field, then lets the rest of it go; null when
+   * the version has no record, it's unreadable, or it never ran a cloud
+   * transcription.
+   */
+  async loadStaleCloudTranscript(
+    file: File,
+    version: number,
+  ): Promise<CloudTranscriptMeta | null> {
+    const entry = staleDossierCacheKeys(file).find((k) => k.version === version);
+    if (!entry) return null;
+    try {
+      const record = await this.storage.loadCache(entry.key);
+      return record ? deserializeDossier(record.data).cloudTranscript ?? null : null;
+    } catch {
+      return null;
+    }
+  }
+
   async save(file: File, dossier: ClipDossier): Promise<void> {
     // The stable identity used to re-find this clip across sessions
     // (clipIds are per-session; experiments and Stage 6 remap through this).
@@ -258,4 +306,9 @@ export class DossierCache {
       size: data.byteLength,
     });
   }
+}
+
+/** Convenience wrapper over a default-constructed DossierCache; see DossierCache.hasCurrent. */
+export async function hasCurrentDossier(identity: FileIdentity): Promise<boolean> {
+  return new DossierCache().hasCurrent(identity);
 }

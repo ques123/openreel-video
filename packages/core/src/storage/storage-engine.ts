@@ -313,6 +313,16 @@ export class StorageEngine implements IStorageEngine {
     return null;
   }
 
+  /** Existence check only — never reads/deserializes the record's value. */
+  async hasCache(key: string): Promise<boolean> {
+    const cacheKey = await this.transaction<IDBValidKey | undefined>(
+      STORES.CACHE,
+      "readonly",
+      (stores) => stores[STORES.CACHE].getKey(key),
+    );
+    return cacheKey !== undefined;
+  }
+
   async deleteCache(key: string): Promise<void> {
     await this.transaction(STORES.CACHE, "readwrite", (stores) =>
       stores[STORES.CACHE].delete(key),

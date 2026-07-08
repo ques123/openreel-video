@@ -50,10 +50,21 @@ describe("fmtEtaLeft", () => {
 });
 
 describe("fmtBatchLine", () => {
-  it("reports 1-based clip position, clamped to total", () => {
-    expect(fmtBatchLine(0, 12)).toBe("Understanding your footage — clip 1 of 12");
-    expect(fmtBatchLine(11, 12)).toBe("Understanding your footage — clip 12 of 12");
+  it("renders deriveBatch's 1-based index as-is (no double increment), clamped to [1, total]", () => {
+    expect(fmtBatchLine(1, 12)).toBe("Understanding your footage — clip 1 of 12");
+    expect(fmtBatchLine(3, 12)).toBe("Understanding your footage — clip 3 of 12");
+    expect(fmtBatchLine(12, 12)).toBe("Understanding your footage — clip 12 of 12");
     expect(fmtBatchLine(99, 12)).toBe("Understanding your footage — clip 12 of 12");
+    expect(fmtBatchLine(0, 12)).toBe("Understanding your footage — clip 1 of 12");
+  });
+
+  it("swaps in the pipeline-update copy when reanalyzing, keeping the clip-position suffix identical", () => {
+    expect(fmtBatchLine(1, 12, true)).toBe("Updating your footage for our latest pipeline — clip 1 of 12");
+    expect(fmtBatchLine(12, 12, true)).toBe("Updating your footage for our latest pipeline — clip 12 of 12");
+  });
+
+  it("treats reanalyzing:false the same as omitted", () => {
+    expect(fmtBatchLine(1, 12, false)).toBe("Understanding your footage — clip 1 of 12");
   });
 });
 

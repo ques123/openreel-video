@@ -177,6 +177,14 @@ describe("pipelineReducer — event handling", () => {
     expect(state.clips[0]).toMatchObject({ outcome: "done", readyAtMs: null });
   });
 
+  it("cache-invalidated sets staleReanalysis on the matching clip only", () => {
+    let state = added(initialPipelineState, "c1");
+    state = added(state, "c2");
+    state = withEvent(state, { kind: "cache-invalidated", clipId: "c1", previousVersion: 3 });
+    expect(state.clips.find((c) => c.id === "c1")?.staleReanalysis).toBe(true);
+    expect(state.clips.find((c) => c.id === "c2")?.staleReanalysis).toBeUndefined();
+  });
+
   it("clip-error (real failure) sets outcome error with the message", () => {
     let state = added(initialPipelineState, "c1");
     state = withEvent(state, { kind: "clip-error", clipId: "c1", message: "decode failed" });
@@ -385,6 +393,28 @@ describe("toPublicClip", () => {
     });
     expect(toPublicClip({ ...clip, metaKnown: true }).durationS).toBe(30);
   });
+
+  it("surfaces staleReanalysis as reanalyzing, undefined when never flagged", () => {
+    const clip: RawClipState = {
+      id: "c1",
+      fileName: "beach.mp4",
+      addedAtMs: 0,
+      durationS: 30,
+      metaKnown: true,
+      thumbnailUrl: null,
+      ingestProgress: null,
+      decodeT: 0,
+      ingestWindow: null,
+      transcriptReceived: false,
+      captionsDone: 0,
+      captionsTotal: 0,
+      outcome: "analyzing",
+      readyAtMs: null,
+      dossier: null,
+    };
+    expect(toPublicClip(clip).reanalyzing).toBeUndefined();
+    expect(toPublicClip({ ...clip, staleReanalysis: true }).reanalyzing).toBe(true);
+  });
 });
 
 describe("deriveAllReady", () => {
@@ -478,6 +508,27 @@ describe("buildRateTracker / deriveBatch", () => {
     const batch = deriveBatch(state.clips, 1000);
     expect(batch?.currentIndex).toBe(2);
     expect(batch?.total).toBe(2);
+  });
+
+  it("reanalyzing is true when a still-analyzing clip's cache was invalidated by a pipeline update", () => {
+    let state = added(initialPipelineState, "c1", 0);
+    state = withEvent(state, { kind: "cache-invalidated", clipId: "c1", previousVersion: 3 });
+    state = withEvent(state, { kind: "meta", clipId: "c1", durationS: 30, width: 1, height: 1, analyzedThroughS: null });
+    expect(deriveBatch(state.clips, 1000)?.reanalyzing).toBe(true);
+  });
+
+  it("reanalyzing is undefined (not false) when no still-analyzing clip is flagged", () => {
+    let state = added(initialPipelineState, "c1", 0);
+    state = withEvent(state, { kind: "meta", clipId: "c1", durationS: 30, width: 1, height: 1, analyzedThroughS: null });
+    expect(deriveBatch(state.clips, 1000)?.reanalyzing).toBeUndefined();
+  });
+
+  it("reanalyzing ignores a flagged clip that has already settled", () => {
+    let state = added(initialPipelineState, "c1", 0);
+    state = withEvent(state, { kind: "cache-invalidated", clipId: "c1", previousVersion: 3 });
+    state = withEvent(state, { kind: "clip-done", clipId: "c1", dossier: fixtureDossier({ denseFrames: [] }) }, 500);
+    state = added(state, "c2", 500); // still analyzing, never flagged
+    expect(deriveBatch(state.clips, 1000)?.reanalyzing).toBeUndefined();
   });
 });
 
