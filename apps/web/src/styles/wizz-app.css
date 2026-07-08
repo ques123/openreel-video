@@ -19,7 +19,13 @@
   font-family: var(--font-body);
   font-size: 15px;
   line-height: 1.55;
-  min-height: 100vh;
+  /* index.css (imported unconditionally by main.tsx for the editor) locks
+     html/body with overflow: hidden, so the public flow must scroll inside
+     this root instead. .direction's position: sticky sticks against this
+     scroll container. */
+  height: 100vh;
+  height: 100dvh;
+  overflow-y: auto;
 }
 
 .wizz h1,
