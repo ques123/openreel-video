@@ -95,7 +95,12 @@ export function Player({ segments, index, onIndexChange, started, onStart, getFi
   );
 
   // Frame-accurate boundary watcher (Chrome/Safari); the timeupdate handler
-  // below covers browsers without rVFC.
+  // below covers browsers without rVFC. MUST include `started`: the <video>
+  // only mounts once it flips true, and url/crossBoundary are typically
+  // already stable by then, so without it this effect's only run before
+  // mount armed against a null ref and never re-fires once the element
+  // exists (same class of gotcha StoryboardPreviewModal's url-keyed effect
+  // calls out).
   useEffect(() => {
     const v = videoRef.current;
     if (!v || !url || !HAS_RVFC) return;
@@ -127,7 +132,7 @@ export function Player({ segments, index, onIndexChange, started, onStart, getFi
       v.removeEventListener("seeked", arm);
       v.removeEventListener("pause", cancel);
     };
-  }, [url, crossBoundary, updateElapsed]);
+  }, [url, crossBoundary, updateElapsed, started]);
 
   const onTimeUpdateFallback = HAS_RVFC
     ? undefined
@@ -155,7 +160,19 @@ export function Player({ segments, index, onIndexChange, started, onStart, getFi
           className="play"
           aria-label="Replay"
           onClick={() => {
-            onIndexChange(0);
+            // When the cut ended on segment 0 (single-segment cuts), the
+            // index never changes, so the seek effect won't re-fire — seek
+            // and resume imperatively instead of relying on onIndexChange.
+            if (index === 0) {
+              const v = videoRef.current;
+              const first = segments[0];
+              if (v && first) {
+                v.currentTime = first.inS;
+                v.play().catch(() => {});
+              }
+            } else {
+              onIndexChange(0);
+            }
             play();
           }}
         >

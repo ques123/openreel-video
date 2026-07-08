@@ -18,9 +18,13 @@
  * unmodified — it already falls back to a pure heuristic on ANY failure, so
  * music generation can never surface an error here, only silently stay
  * absent (PublicCut.musicTakes null). The cut itself is shown the moment the
- * storyboard is accepted; music lands afterward via a phase update in place
- * (see the "music-ready" reducer action) rather than blocking the reveal for
- * Suno's ~60s generation time.
+ * storyboard is accepted, musicPending true iff request.music; music lands
+ * afterward via a phase update in place (see the "music-ready" reducer
+ * action) rather than blocking the reveal for Suno's ~60s generation time.
+ * Every other runMusic outcome (timeout, poll failure, thrown fetch) instead
+ * dispatches "music-settled", which clears musicPending the same silent,
+ * error-free way — the composing indicator must resolve one way or the
+ * other, never hang forever on a bonus that quietly gave up.
  *
  * cancel() ALWAYS resolves to `{kind:"idle"}`, never back to a previous
  * "done" cut — this matches publicapp/state-machine.ts's DIRECTOR_CANCELLED
@@ -71,15 +75,17 @@ const TITLE_MODEL = "gpt-5.4-mini";
 const MUSIC_POLL_INTERVAL_MS = 10_000;
 const MUSIC_TIMEOUT_MS = 10 * 60 * 1000;
 
-type Action =
+export type Action =
   | { type: "run-start" }
   | { type: "activity"; line: NarrativeLine }
   | { type: "done"; cut: PublicCut }
   | { type: "music-ready"; musicTakes: { a: string; b: string } }
+  | { type: "music-settled" }
   | { type: "error"; error: { code: string; friendly: string; retryable: boolean } }
   | { type: "idle" };
 
-function reducer(phase: DirectorPhase, action: Action): DirectorPhase {
+/** Exported for use-public-director.test.ts — the pure phase transitions, decoupled from the async runLoop/runMusic plumbing around them. */
+export function reducer(phase: DirectorPhase, action: Action): DirectorPhase {
   switch (action.type) {
     case "run-start":
       return { kind: "running", activity: [] };
@@ -91,7 +97,16 @@ function reducer(phase: DirectorPhase, action: Action): DirectorPhase {
       return { kind: "done", cut: action.cut };
     case "music-ready":
       // Updates the cut IN PLACE once Suno lands — never re-enters "running".
-      return phase.kind === "done" ? { kind: "done", cut: { ...phase.cut, musicTakes: action.musicTakes } } : phase;
+      return phase.kind === "done"
+        ? { kind: "done", cut: { ...phase.cut, musicTakes: action.musicTakes, musicPending: false } }
+        : phase;
+    case "music-settled":
+      // Every non-success runMusic exit lands here — clears the pending flag
+      // with no error, same silent-absence stance as a plain failure. A run
+      // superseded by a fresh generate/refine can't reach this branch against
+      // the NEW cut: runMusic gates its onSettle call on its own AbortSignal
+      // (see runLoop's musicAbortRef), so a stale settle never dispatches.
+      return phase.kind === "done" ? { kind: "done", cut: { ...phase.cut, musicPending: false } } : phase;
     case "error":
       return { kind: "error", ...action.error };
     case "idle":
@@ -122,9 +137,17 @@ function delay(ms: number, signal: AbortSignal): Promise<void> {
 /**
  * Suno path, unmodified generator + polling until 2 takes land (or one
  * "ready" track, degenerately mirrored as both a/b), a failure, or a
- * timeout. Every outcome besides success is a silent no-op — music is a
- * bonus that must never surface an error or block the cut (see the file
- * header and services/suno.ts's own generateMusicBrief resilience stance).
+ * timeout. Every outcome besides success clears musicPending via onSettle
+ * but never surfaces an error — music is a bonus that must never block or
+ * blemish the cut (see the file header and services/suno.ts's own
+ * generateMusicBrief resilience stance). All exits funnel through the one
+ * `finally`, `ready` distinguishing "settle" from "already told onReady".
+ * onSettle (like onReady) is gated on `!signal.aborted`: a run superseded by
+ * a fresh generate/refine aborts the previous musicController before doing
+ * anything else (see runLoop), so by the time this promise chain's
+ * continuation resumes, aborted is already true and NEITHER callback fires —
+ * a stale settle can't clear the new cut's pending flag, and stale takes
+ * can't attach to it.
  */
 async function runMusic(
   storyboard: Storyboard,
@@ -132,7 +155,9 @@ async function runMusic(
   targetDurationS: number | null,
   signal: AbortSignal,
   onReady: (takes: { a: string; b: string }) => void,
+  onSettle: () => void,
 ): Promise<void> {
+  let ready = false;
   try {
     const sceneHints = storyboard.items
       .slice(0, 5)
@@ -149,10 +174,12 @@ async function runMusic(
       if (signal.aborted) return;
       if (result.status === "failed") return;
       if (result.tracks.length >= 2) {
+        ready = true;
         onReady({ a: proxiedMusicUrl(result.tracks[0].audioUrl), b: proxiedMusicUrl(result.tracks[1].audioUrl) });
         return;
       }
       if (result.status === "ready" && result.tracks.length === 1) {
+        ready = true;
         onReady({ a: proxiedMusicUrl(result.tracks[0].audioUrl), b: proxiedMusicUrl(result.tracks[0].audioUrl) });
         return;
       }
@@ -160,6 +187,8 @@ async function runMusic(
     }
   } catch {
     // Silent give-up — see file header.
+  } finally {
+    if (!ready && !signal.aborted) onSettle();
   }
 }
 
@@ -294,14 +323,19 @@ export function usePublicDirector(
           dispatch({ type: "activity", line: ASSEMBLING_LINE });
 
           const title = await resolveCutTitle(result.storyboard, request);
-          dispatch({ type: "done", cut: assemblePublicCut(result.storyboard, title, null) });
+          dispatch({ type: "done", cut: assemblePublicCut(result.storyboard, title, null, request.music) });
 
           if (request.music) {
             const musicController = new AbortController();
             musicAbortRef.current = musicController;
-            void runMusic(result.storyboard, request, targetDurationS, musicController.signal, (takes) => {
-              dispatch({ type: "music-ready", musicTakes: takes });
-            });
+            void runMusic(
+              result.storyboard,
+              request,
+              targetDurationS,
+              musicController.signal,
+              (takes) => dispatch({ type: "music-ready", musicTakes: takes }),
+              () => dispatch({ type: "music-settled" }),
+            );
           }
         } catch (err) {
           if (err instanceof DirectorLoopError && err.code === "aborted") {

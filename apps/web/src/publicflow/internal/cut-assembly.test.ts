@@ -89,4 +89,17 @@ describe("assemblePublicCut", () => {
     expect(cut.totalS).toBe(0);
     expect(cut.clipCount).toBe(0);
   });
+
+  describe("musicPending", () => {
+    it("defaults to false for existing callers that omit it (no music requested)", () => {
+      const storyboard: Storyboard = { title: "t", notes: null, items: [item()] };
+      expect(assemblePublicCut(storyboard, "t", null).musicPending).toBe(false);
+    });
+
+    it("carries an explicit musicPending through unchanged", () => {
+      const storyboard: Storyboard = { title: "t", notes: null, items: [item()] };
+      expect(assemblePublicCut(storyboard, "t", null, true).musicPending).toBe(true);
+      expect(assemblePublicCut(storyboard, "t", null, false).musicPending).toBe(false);
+    });
+  });
 });

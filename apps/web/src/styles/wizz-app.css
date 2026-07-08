@@ -656,6 +656,22 @@
 .wizz .verbs .spacer {
   flex: 1;
 }
+/* Occupies the music-ab slot while Suno is still composing (see
+   ScreeningRoomScene.tsx) — .chip is the existing quiet-pill vocabulary;
+   the pulse is the one addition, kept subtle (opacity only, no motion) and
+   already covered by wizz-tokens.css's prefers-reduced-motion rule. */
+.wizz .music-pending {
+  animation: music-pending-pulse 1.8s ease-in-out infinite;
+}
+@keyframes music-pending-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
 .wizz .music-ab {
   display: inline-flex;
   border: 1px solid var(--line);

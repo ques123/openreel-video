@@ -13,7 +13,11 @@
  * snapshot) even here — cheap, no ML/GPU, and it makes the bench/screening
  * room look right instead of gray placeholder boxes through every dev
  * session. Music takes are synthesized as short audible tones (no network
- * asset, no dependency) so the screening room's A/B actually differs.
+ * asset, no dependency) so the screening room's A/B actually differs. They
+ * land ~3s after the cut itself (musicPending true meanwhile), not
+ * synchronously — the same timersRef pattern as the narrative stream — so
+ * ?mock=1 exercises the screening room's composing indicator too, not just
+ * the finished A/B state.
  *
  * Failure-path testing: appending `&mockfail=quota_exceeded` (or
  * `kill_switch` | `upstream_error` | `rate_limited` | `auth_required`) to the
@@ -119,6 +123,8 @@ const STAGE_LABELS = ["watching your footage", "listening for speech", "describi
 const ANALYSIS_TICK_MS = 130;
 const STAGE_STEP = 0.22;
 const STUDIO_WARM_KEY = "wizz:mock-studio-warm";
+/** Demo-speed stand-in for Suno's real ~60s generation — long enough to see the composing indicator, short enough not to make ?mock=1 tedious. */
+const MOCK_MUSIC_DELAY_MS = 3000;
 
 function uid(): string {
   return `mock-${Math.random().toString(36).slice(2, 10)}`;
@@ -466,7 +472,10 @@ export function useMockDirector(pipeline: PublicPipeline): PublicDirector {
       totalS: segments.reduce((sum, s) => sum + (s.outS - s.inS), 0),
       segments,
       clipCount: readyClips.length,
-      musicTakes: request.music ? ensureMusicUrls() : null,
+      // Takes land later (see runDirecting's musicT) — never synchronously —
+      // so the screening room's composing indicator has a window to show.
+      musicTakes: null,
+      musicPending: request.music,
     };
   };
 
@@ -488,7 +497,18 @@ export function useMockDirector(pipeline: PublicPipeline): PublicDirector {
           setPhase({ kind: "error", code: failCode, ...FAIL_COPY[failCode] });
           return;
         }
-        setPhase({ kind: "done", cut: buildCut(request, refined) });
+        const cut = buildCut(request, refined);
+        setPhase({ kind: "done", cut });
+        if (cut.musicPending) {
+          const musicT = window.setTimeout(() => {
+            setPhase((prev) =>
+              prev.kind === "done"
+                ? { kind: "done", cut: { ...prev.cut, musicTakes: ensureMusicUrls(), musicPending: false } }
+                : prev,
+            );
+          }, MOCK_MUSIC_DELAY_MS);
+          timersRef.current.push(musicT);
+        }
       },
       500 + STREAM_TEMPLATE.length * 550 + 700,
     );

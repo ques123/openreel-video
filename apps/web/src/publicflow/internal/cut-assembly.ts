@@ -30,11 +30,16 @@ function toPublicCutSegment(item: Storyboard["items"][number]): PublicCutSegment
  * resolution can involve a network call and this function stays pure.
  * `musicTakes` is null until (or unless) Suno generation lands — the cut
  * itself never waits on music (see use-public-director.ts's doc comment).
+ * `musicPending` mirrors that wait: true only when the caller actually
+ * requested music and it's still outstanding at assembly time; defaults to
+ * false (equivalent to "no music requested") so existing callers/tests that
+ * predate this flag are unaffected.
  */
 export function assemblePublicCut(
   storyboard: Storyboard,
   title: string,
   musicTakes: { a: string; b: string } | null,
+  musicPending = false,
 ): PublicCut {
   return {
     title,
@@ -42,5 +47,6 @@ export function assemblePublicCut(
     segments: storyboard.items.map(toPublicCutSegment),
     clipCount: new Set(storyboard.items.map((item) => item.clipId)).size,
     musicTakes,
+    musicPending,
   };
 }

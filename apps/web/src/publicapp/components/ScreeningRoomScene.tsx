@@ -83,27 +83,34 @@ export function ScreeningRoomScene() {
             Change setup
           </button>
           <span className="spacer" />
-          {currentCut.musicTakes && (
-            <span className="music-ab" role="group" aria-label="Music takes">
-              <button
-                aria-pressed={selectedTake === "a"}
-                onClick={() => {
-                  setSelectedTake("a");
-                  toast.show("Swaps the composed track under the same cut.");
-                }}
-              >
-                track A
-              </button>
-              <button
-                aria-pressed={selectedTake === "b"}
-                onClick={() => {
-                  setSelectedTake("b");
-                  toast.show("Swaps the composed track under the same cut.");
-                }}
-              >
-                track B
-              </button>
+          {/* Same slot as the A/B picker below, so the picker replaces this in place once music lands (or the cut simply has none). */}
+          {currentCut.musicPending ? (
+            <span className="chip music-pending" role="status" aria-live="polite">
+              Composing your soundtrack…
             </span>
+          ) : (
+            currentCut.musicTakes && (
+              <span className="music-ab" role="group" aria-label="Music takes">
+                <button
+                  aria-pressed={selectedTake === "a"}
+                  onClick={() => {
+                    setSelectedTake("a");
+                    toast.show("Swaps the composed track under the same cut.");
+                  }}
+                >
+                  track A
+                </button>
+                <button
+                  aria-pressed={selectedTake === "b"}
+                  onClick={() => {
+                    setSelectedTake("b");
+                    toast.show("Swaps the composed track under the same cut.");
+                  }}
+                >
+                  track B
+                </button>
+              </span>
+            )
           )}
           <button
             className="btn"
